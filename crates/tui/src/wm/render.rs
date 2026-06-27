@@ -51,22 +51,21 @@ pub fn render(
 
     // Pass 2 — built-in panes: dispatch into `Screen::render`, which
     // needs `&mut App` + `&mut [Box<dyn Screen>]`. No manager borrow.
-    for (id, rect, kind, focused) in &plan {
+    for (_id, rect, kind, focused) in &plan {
         if let WindowKind::Builtin(sid) = kind {
             if let Some(s) = screens.iter_mut().find(|s| s.id() == *sid) {
                 s.render(f, *rect, app, theme, *focused);
             }
-            let _ = id; // id unused for builtins
         }
     }
 
     // Pass 3 — terminal panes: needs `&mut Window`, so we re-borrow
     // `&mut app.manager`. This pass doesn't touch `app` outside
     // `app.manager`, so it doesn't conflict with pass 2 (sequential).
-    for (id, _rect, kind, focused) in &plan {
+    for (id, rect, kind, focused) in &plan {
         if matches!(kind, WindowKind::Terminal) {
             if let Some(w) = app.manager.window_mut(*id) {
-                w.paint(f, *_rect, theme, *focused);
+                w.paint(f, *rect, theme, *focused);
             }
         }
     }
