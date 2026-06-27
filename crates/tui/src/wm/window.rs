@@ -174,25 +174,25 @@ impl Window {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Paragraph};
         self.focused = focused;
-        let title = crate::wm::render::pane_title(&self.kind);
-        let block = Block::default()
-            .title(Span::styled(title, theme.title()))
-            .borders(Borders::ALL)
-            .border_style(theme.border(focused));
         match self.kind {
             WindowKind::Builtin(id) => {
                 if let Some(s) = screens.iter_mut().find(|s| s.id() == id) {
                     s.render(frame, area, app, theme, focused);
                 }
-                // Re-render the border on top so the title is visible
-                // above the screen's own widget. ratatui's render order
-                // is last-wins for overlapping rects, so this draws
-                // over the screen's own block.
-                let _ = block; // the screen's render already draws its own border
+                // The screen's `render` already drew its own border with
+                // the screen's title — we don't need to draw ours on top.
             }
             WindowKind::Terminal => {
+                // Drain first, then borrow `self.terminal` mutably for the
+                // rest of the arm. The split into two statements avoids a
+                // `&mut self` overlapping a `&mut self.terminal` borrow.
                 let _ = self.drain_output();
                 if let Some(term) = self.terminal.as_mut() {
+                    let title = crate::wm::render::pane_title(&self.kind);
+                    let block = Block::default()
+                        .title(Span::styled(title, theme.title()))
+                        .borders(Borders::ALL)
+                        .border_style(theme.border(focused));
                     let lines: Vec<Line> = (0..term.grid.rows as usize)
                         .map(|r| {
                             let spans: Vec<Span> = (0..term.grid.cols as usize)

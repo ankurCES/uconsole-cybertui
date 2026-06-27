@@ -11,14 +11,6 @@
 //! one your keystrokes are going to.
 
 use ratatui::layout::Rect;
-// `Line`/`Span`/`Block`/`Borders` are used by the Window::paint body
-// (see `window.rs`); re-exported here with `_`-prefixed aliases below
-// for the convenience of any future helper that wants to compose a
-// title bar the same way.
-#[allow(unused_imports)]
-use ratatui::text::{Line, Span};
-#[allow(unused_imports)]
-use ratatui::widgets::{Block, Borders};
 use ratatui::Frame;
 
 use crate::app::screen::Screen;
@@ -52,24 +44,15 @@ pub fn pane_title(w: &WindowKind) -> String {
     format!(" {} ", w.label())
 }
 
-// `Line`/`Span`/`Block`/`Borders` are used by the Window::paint body
-// (see next task); they're re-exported here for the convenience of any
-// future helper that wants to compose a title bar the same way.
-#[allow(unused_imports)]
-pub(crate) use ratatui::text::{Line as _Line, Span as _Span};
-#[allow(unused_imports)]
-pub(crate) use ratatui::widgets::{Block as _Block, Borders as _Borders};
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::screen::ScreenId;
-    use crate::theme::Theme;
     use crate::wm::tree::SplitDir;
     use ratatui::layout::Rect;
 
     #[test]
-    fn render_single_pane_draws_into_the_whole_area() {
+    fn apply_layout_single_pane_uses_full_area() {
         // We can't easily assert on a `Frame` here, but we *can* assert
         // that `apply_layout` produced the right rects. The actual
         // pixel-level render is exercised by the manual smoke test in
@@ -79,7 +62,6 @@ mod tests {
         m.apply_layout(area);
         let layout = m.layout();
         assert_eq!(layout, vec![(m.focused(), area)]);
-        let _ = Theme::by_name(crate::theme::ThemeName::Dark);
     }
 
     #[test]
