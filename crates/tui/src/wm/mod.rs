@@ -15,5 +15,6 @@ pub mod broadcaster;
 pub mod keymap;
 pub mod manager;
 pub mod pty;
+pub mod render;
 pub mod tree;
 pub mod window;
