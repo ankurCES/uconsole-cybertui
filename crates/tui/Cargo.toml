@@ -9,6 +9,11 @@ description = "Cyberdeck OS-level TUI: a rich ratatui front-end for cyberdeck-co
 
 [features]
 web = ["dep:cyberdeck-web"]
+# uconsole-keymap: makes uconsole the default profile when CYBERDECK_KEYMAP
+# isn't set. Empty because the runtime check is in `wm/keymap.rs`; the
+# feature just changes the *default* so an unattended build for the
+# device boots straight into uconsole behaviour.
+uconsole-keymap = []
 
 [dependencies]
 cyberdeck-core = { path = "../core" }

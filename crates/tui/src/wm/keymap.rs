@@ -17,14 +17,24 @@ pub enum KeymapProfile {
     Uconsole,
 }
 
-#[allow(dead_code)] // wired in Task 1.2 (env wiring) / 1.3 (handler call)
 impl KeymapProfile {
-    /// Resolved at runtime from the env var, with a sensible default
-    /// (Desktop) so x86 development builds Just Work.
+    /// Resolved at runtime from the env var, defaulting to `Desktop` unless
+    /// the binary was built with `--features uconsole-keymap` (intended for
+    /// device images where the env var won't be set).
     pub fn detect() -> Self {
         match std::env::var("CYBERDECK_KEYMAP").as_deref() {
             Ok("uconsole") => Self::Uconsole,
-            _ => Self::Desktop,
+            Ok("desktop") => Self::Desktop,
+            // Env var unset (or an unknown value). Default is Desktop on
+            // a normal build, Uconsole when built with
+            // `--features uconsole-keymap` (for flashing onto the device).
+            Ok(_) | Err(_) => {
+                if cfg!(feature = "uconsole-keymap") {
+                    Self::Uconsole
+                } else {
+                    Self::Desktop
+                }
+            }
         }
     }
 }
@@ -90,5 +100,17 @@ mod tests {
         let mapped = map_key(x_shift, p).unwrap();
         assert_eq!(mapped.code, KeyCode::Up);
         assert_eq!(mapped.modifiers, KeyModifiers::SHIFT);
+    }
+
+    #[test]
+    fn env_var_overrides_feature_default() {
+        // We can't toggle `cfg!(feature = ...)` from a test, but we *can*
+        // assert that the env-var branches are reached. If the feature
+        // isn't enabled in this build, the env var still wins.
+        std::env::set_var("CYBERDECK_KEYMAP", "uconsole");
+        assert_eq!(KeymapProfile::detect(), KeymapProfile::Uconsole);
+        std::env::set_var("CYBERDECK_KEYMAP", "desktop");
+        assert_eq!(KeymapProfile::detect(), KeymapProfile::Desktop);
+        std::env::remove_var("CYBERDECK_KEYMAP");
     }
 }
