@@ -507,6 +507,18 @@ async fn handle_key(
 ) -> bool {
     use KeyCode::*;
 
+    // Hardware-button remap. Runs first so the rest of the handler
+    // (modal dispatch, global keys, screen on_key) sees a normal
+    // KeyEvent. The desktop profile is identity; the uconsole profile
+    // rewrites X/Y/A/B into Up/Down/Enter/Esc. See `wm/keymap.rs`.
+    let key = match wm::keymap::map_key(key, wm::keymap::KeymapProfile::detect()) {
+        Some(k) => k,
+        // The contract is `Option` so future profiles can swallow
+        // specific keys (e.g. a tablet profile that ignores the
+        // volume buttons). Today every profile returns `Some`.
+        None => return false,
+    };
+
     // Modal handling first.
     match &app.modal {
         Modal::None => {}
