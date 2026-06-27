@@ -155,67 +155,56 @@ impl Window {
         self.last_cols = cols;
     }
 
-    /// Paint one pane. Dispatches on `kind`:
-    ///   * `Builtin(id)` — finds the matching `Screen` in `screens`
-    ///     and calls its `render`.
-    ///   * `Terminal`    — drains the broadcaster into the parser,
-    ///     then paints the `Grid` as styled spans into a `Paragraph`
-    ///     wrapped in a `Block` with the pane title.
+    /// Paint one pane. Terminal-only: drains the broadcaster into the parser
+    /// and paints the grid as styled spans into a `Paragraph` wrapped in a
+    /// `Block` with the pane title. Built-in panes are dispatched by
+    /// `wm::render::render` directly into `Screen::render` so the manager
+    /// borrow can be released before we touch `&mut App`.
     #[allow(dead_code)] // wired up in Task 2.3
     pub fn paint(
         &mut self,
         frame: &mut ratatui::Frame,
         area: ratatui::layout::Rect,
-        screens: &mut [Box<dyn crate::app::screen::Screen>],
-        app: &mut crate::app::App,
         theme: &crate::theme::Theme,
         focused: bool,
     ) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Paragraph};
         self.focused = focused;
-        match self.kind {
-            WindowKind::Builtin(id) => {
-                if let Some(s) = screens.iter_mut().find(|s| s.id() == id) {
-                    s.render(frame, area, app, theme, focused);
-                }
-                // The screen's `render` already drew its own border with
-                // the screen's title — we don't need to draw ours on top.
-            }
-            WindowKind::Terminal => {
-                // Drain first, then borrow `self.terminal` mutably for the
-                // rest of the arm. The split into two statements avoids a
-                // `&mut self` overlapping a `&mut self.terminal` borrow.
-                let _ = self.drain_output();
-                if let Some(term) = self.terminal.as_mut() {
-                    let title = crate::wm::render::pane_title(&self.kind);
-                    let block = Block::default()
-                        .title(Span::styled(title, theme.title()))
-                        .borders(Borders::ALL)
-                        .border_style(theme.border(focused));
-                    let lines: Vec<Line> = (0..term.grid.rows as usize)
-                        .map(|r| {
-                            let spans: Vec<Span> = (0..term.grid.cols as usize)
-                                .map(|c| {
-                                    let cell = &term.grid.cells()[r * term.grid.cols as usize + c];
-                                    Span::styled(
-                                        cell.ch.to_string(),
-                                        ratatui::style::Style::default()
-                                            .fg(cell.fg)
-                                            .bg(cell.bg)
-                                            .add_modifier(cell.mods),
-                                    )
-                                })
-                                .collect();
-                            Line::from(spans)
+        if !matches!(self.kind, WindowKind::Terminal) {
+            return;
+        }
+        // Drain first, then borrow `self.terminal` mutably for the
+        // rest of the arm. The split into two statements avoids a
+        // `&mut self` overlapping a `&mut self.terminal` borrow.
+        let _ = self.drain_output();
+        if let Some(term) = self.terminal.as_mut() {
+            let title = crate::wm::render::pane_title(&self.kind);
+            let block = Block::default()
+                .title(Span::styled(title, theme.title()))
+                .borders(Borders::ALL)
+                .border_style(theme.border(focused));
+            let lines: Vec<Line> = (0..term.grid.rows as usize)
+                .map(|r| {
+                    let spans: Vec<Span> = (0..term.grid.cols as usize)
+                        .map(|c| {
+                            let cell = &term.grid.cells()[r * term.grid.cols as usize + c];
+                            Span::styled(
+                                cell.ch.to_string(),
+                                ratatui::style::Style::default()
+                                    .fg(cell.fg)
+                                    .bg(cell.bg)
+                                    .add_modifier(cell.mods),
+                            )
                         })
                         .collect();
-                    let p = Paragraph::new(lines)
-                        .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg))
-                        .block(block);
-                    frame.render_widget(p, area);
-                }
-            }
+                    Line::from(spans)
+                })
+                .collect();
+            let p = Paragraph::new(lines)
+                .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg))
+                .block(block);
+            frame.render_widget(p, area);
         }
     }
 }

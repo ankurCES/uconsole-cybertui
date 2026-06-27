@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use app::action::{Action, RunAction};
 use app::screen::{Screen, ScreenId};
 use app::toast::ToastKind;
-use app::{App, ConfirmKind, Focus, InputKind, Modal};
+use app::{App, ConfirmKind, InputKind, Modal};
 use theme::Theme;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -343,16 +343,10 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
         content.width,
         content.height.saturating_sub(2),
     );
-    let id = app.current;
-    if let Some(s) = screens.iter_mut().find(|s| s.id() == id) {
-        s.render(
-            f,
-            content_inner,
-            app,
-            theme,
-            matches!(app.focus, Focus::Content),
-        );
-    }
+    // WM-driven render: walks the split tree, paints each pane into its
+    // rect. The screen's `render` already draws its own border, so we
+    // don't draw into `content_inner` directly here.
+    wm::render::render(f, content_inner, app, screens, theme);
     ui::draw_toasts(f, f.area(), app, theme);
     draw_modal(f, f.area(), app, theme);
 }
@@ -630,17 +624,20 @@ async fn handle_key(
         Char('9') => app.current = ScreenId::Packages,
         Char('0') => app.current = ScreenId::Settings,
         Tab => {
-            app.focus = match app.focus {
-                Focus::Sidebar => Focus::Content,
-                Focus::Content => Focus::Sidebar,
-            };
+            app.sidebar_focused = !app.sidebar_focused;
         }
         _ => {
-            // Forward to the focused screen.
-            if matches!(app.focus, Focus::Content) {
-                if let Some(s) = screens.iter_mut().find(|s| s.id() == app.current) {
-                    if s.on_key(key, app) {
-                        return false;
+            // Forward to the focused pane. If the focused pane is a
+            // built-in screen, find it in `screens` and call on_key.
+            // (If it's a terminal pane, the key goes to the PTY in
+            // Task 2.5 — out of scope for this commit.)
+            let focused_id = app.manager.focused();
+            if let Some(w) = app.manager.window(focused_id) {
+                if let crate::wm::window::WindowKind::Builtin(sid) = w.kind {
+                    if let Some(s) = screens.iter_mut().find(|s| s.id() == sid) {
+                        if s.on_key(key, app) {
+                            return false;
+                        }
                     }
                 }
             }

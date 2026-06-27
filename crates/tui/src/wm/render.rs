@@ -9,6 +9,12 @@
 //! The focus border style comes from `Theme::border(focused)`. The
 //! focused pane gets the brighter border so it's always obvious which
 //! one your keystrokes are going to.
+//!
+//! The two-pass layout (collect plan → paint builtins → paint terminals)
+//! exists to satisfy the borrow checker: `Window::paint` (terminal) needs
+//! `&mut self` from `app.manager`, while `Screen::render` needs `&mut App`.
+//! We can't hold both at once, so we plan under one borrow, release it,
+//! then render each kind with its own disjoint borrow.
 
 use ratatui::layout::Rect;
 use ratatui::Frame;
@@ -16,23 +22,52 @@ use ratatui::Frame;
 use crate::app::screen::Screen;
 use crate::app::App;
 use crate::theme::Theme;
-use crate::wm::manager::Manager;
 use crate::wm::window::WindowKind;
 
 #[allow(dead_code)] // wired up in Task 2.3
 pub fn render(
     f: &mut Frame,
     area: Rect,
-    manager: &mut Manager,
-    screens: &mut [Box<dyn Screen>],
     app: &mut App,
+    screens: &mut [Box<dyn Screen>],
     theme: &Theme,
 ) {
-    manager.apply_layout(area);
-    for (id, rect) in manager.layout() {
-        let focused = id == manager.focused();
-        if let Some(w) = manager.window_mut(id) {
-            w.paint(f, rect, screens, app, theme, focused);
+    // Pass 1 — plan: apply layout and snapshot what each pane is.
+    // We only touch `app.manager` here, so the borrow is scoped tightly.
+    let plan: Vec<(crate::wm::broadcaster::PaneId, Rect, WindowKind, bool)> = {
+        let manager = &mut app.manager;
+        manager.apply_layout(area);
+        let focused = manager.focused();
+        manager
+            .layout()
+            .into_iter()
+            .filter_map(|(id, rect)| {
+                let w = manager.window(id)?;
+                let is_focused = id == focused;
+                Some((id, rect, w.kind, is_focused))
+            })
+            .collect()
+    };
+
+    // Pass 2 — built-in panes: dispatch into `Screen::render`, which
+    // needs `&mut App` + `&mut [Box<dyn Screen>]`. No manager borrow.
+    for (id, rect, kind, focused) in &plan {
+        if let WindowKind::Builtin(sid) = kind {
+            if let Some(s) = screens.iter_mut().find(|s| s.id() == *sid) {
+                s.render(f, *rect, app, theme, *focused);
+            }
+            let _ = id; // id unused for builtins
+        }
+    }
+
+    // Pass 3 — terminal panes: needs `&mut Window`, so we re-borrow
+    // `&mut app.manager`. This pass doesn't touch `app` outside
+    // `app.manager`, so it doesn't conflict with pass 2 (sequential).
+    for (id, _rect, kind, focused) in &plan {
+        if matches!(kind, WindowKind::Terminal) {
+            if let Some(w) = app.manager.window_mut(*id) {
+                w.paint(f, *_rect, theme, *focused);
+            }
         }
     }
 }
@@ -46,8 +81,8 @@ pub fn pane_title(w: &WindowKind) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::app::screen::ScreenId;
+    use crate::wm::manager::Manager;
     use crate::wm::tree::SplitDir;
     use ratatui::layout::Rect;
 

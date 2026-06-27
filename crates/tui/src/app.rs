@@ -226,6 +226,9 @@ pub struct App {
     pub current: ScreenId,
     pub manager: crate::wm::manager::Manager,
     pub modal: Modal,
+    /// True when the sidebar (screen list) has focus. Tab toggles this.
+    /// While false, key events are forwarded into the focused pane.
+    pub sidebar_focused: bool,
     pub palette_buf: String,
     pub palette_idx: usize,
     pub toasts: Vec<Toast>,
@@ -279,6 +282,7 @@ impl App {
             current: ScreenId::System,
             manager: crate::wm::manager::Manager::new(ScreenId::System),
             modal: Modal::None,
+            sidebar_focused: true,
             palette_buf: String::new(),
             palette_idx: 0,
             toasts: Vec::new(),

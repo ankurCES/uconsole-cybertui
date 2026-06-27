@@ -6,7 +6,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 use ratatui::Frame;
 
-use crate::app::{App, Focus};
+use crate::app::App;
 use crate::theme::{glyphs, Theme};
 
 pub fn header_lines(app: &App) -> Vec<Line<'static>> {
@@ -84,7 +84,7 @@ pub fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let focused = matches!(app.focus, Focus::Sidebar);
+    let focused = app.sidebar_focused;
     let items: Vec<ListItem> = crate::app::screen::ScreenId::ALL
         .iter()
         .enumerate()
