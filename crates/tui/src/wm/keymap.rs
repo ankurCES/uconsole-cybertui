@@ -17,6 +17,7 @@ pub enum KeymapProfile {
     Uconsole,
 }
 
+#[allow(dead_code)] // wired in Task 1.2 (env wiring) / 1.3 (handler call)
 impl KeymapProfile {
     /// Resolved at runtime from the env var, with a sensible default
     /// (Desktop) so x86 development builds Just Work.
@@ -37,6 +38,10 @@ pub fn map_key(key: KeyEvent, profile: KeymapProfile) -> Option<KeyEvent> {
             KeyCode::Char('y') => Some(KeyEvent::new(KeyCode::Down, key.modifiers)),
             KeyCode::Char('a') => Some(KeyEvent::new(KeyCode::Enter, key.modifiers)),
             KeyCode::Char('b') => Some(KeyEvent::new(KeyCode::Esc, key.modifiers)),
+            // Anything else (real arrows, hjkl, tab, q, etc.) passes
+            // through unchanged. This is the critical contract: we
+            // never *swallow* a key, only rewrite the four hardware
+            // buttons.
             _ => Some(key),
         },
     }
@@ -72,5 +77,18 @@ mod tests {
         let p = KeymapProfile::Desktop;
         assert_eq!(map_key(k(KeyCode::Up), p), Some(k(KeyCode::Up)));
         assert_eq!(map_key(k(KeyCode::Char('x')), p), Some(k(KeyCode::Char('x'))));
+    }
+
+    #[test]
+    fn uconsole_mapping_preserves_modifiers() {
+        // Pressing X while holding Shift should still map to Up+Shift,
+        // not just Up. Locking this in prevents a future refactor from
+        // dropping SHIFT/CTRL/ALT on the floor.
+        use crossterm::event::KeyModifiers;
+        let p = KeymapProfile::Uconsole;
+        let x_shift = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SHIFT);
+        let mapped = map_key(x_shift, p).unwrap();
+        assert_eq!(mapped.code, KeyCode::Up);
+        assert_eq!(mapped.modifiers, KeyModifiers::SHIFT);
     }
 }
