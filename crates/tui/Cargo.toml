@@ -1,0 +1,40 @@
+[package]
+name = "cyberdeck-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Cyberdeck OS-level TUI: a rich ratatui front-end for cyberdeck-core."
+
+[features]
+web = ["dep:cyberdeck-web"]
+
+[dependencies]
+cyberdeck-core = { path = "../core" }
+cyberdeck-web = { path = "../web", optional = true }
+
+ratatui.workspace = true
+crossterm.workspace = true
+tui-input.workspace = true
+
+# tui-window-manager: PTY + ANSI parser
+portable-pty.workspace = true
+vte.workspace = true
+parking_lot.workspace = true
+crossbeam-channel.workspace = true
+
+tokio.workspace = true
+futures.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+humantime.workspace = true
+rand.workspace = true
+once_cell.workspace = true
+async-trait = "0.1"

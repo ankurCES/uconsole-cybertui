@@ -1,0 +1,27 @@
+[package]
+name = "cyberdeck-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Cyberdeck LAN web UI: axum server + WebSocket for cyberdeck-core."
+
+[dependencies]
+cyberdeck-core = { path = "../core" }
+
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+askama.workspace = true
+
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+rand.workspace = true
+futures.workspace = true

@@ -1,0 +1,24 @@
+# Rust / Cargo
+/target/
+**/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Local artifacts
+*.log
+*.tmp
+*.swp
+*.swo
+
+# Editor / IDE
+.vscode/
+.idea/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Env / secrets (defense in depth — none expected in this repo)
+.env
+.env.*
+*.pem
+*.key
