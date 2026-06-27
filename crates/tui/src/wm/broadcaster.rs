@@ -38,7 +38,7 @@ use crate::wm::pty::Pty;
 pub struct PaneId(pub u64);
 
 impl PaneId {
-    fn fresh() -> Self {
+    pub(crate) fn fresh() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }

@@ -13,6 +13,7 @@
 pub mod ansi;
 pub mod broadcaster;
 pub mod keymap;
+pub mod manager;
 pub mod pty;
 pub mod tree;
 pub mod window;
