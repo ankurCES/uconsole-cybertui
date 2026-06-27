@@ -38,12 +38,6 @@ pub use action::Action;
 pub use screen::ScreenId;
 pub use toast::Toast;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Focus {
-    Sidebar,
-    Content,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Modal {
     None,
@@ -230,7 +224,7 @@ pub enum ProcessSort {
 pub struct App {
     pub live: Arc<Live>,
     pub current: ScreenId,
-    pub focus: Focus,
+    pub manager: crate::wm::manager::Manager,
     pub modal: Modal,
     pub palette_buf: String,
     pub palette_idx: usize,
@@ -283,7 +277,7 @@ impl App {
         Self {
             live: Arc::new(Live::default()),
             current: ScreenId::System,
-            focus: Focus::Sidebar,
+            manager: crate::wm::manager::Manager::new(ScreenId::System),
             modal: Modal::None,
             palette_buf: String::new(),
             palette_idx: 0,
@@ -337,5 +331,23 @@ impl App {
             spans.push(format!("  · {s}").into());
         }
         Line::from(spans)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_app_has_one_pane() {
+        // A bit of a smoke test: the App's manager should be in a
+        // valid state with one focused pane hosting the System
+        // screen.
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        let app = App::new(tx, rx);
+        let panes = app.manager.pane_ids();
+        assert_eq!(panes.len(), 1);
+        let w = app.manager.window(app.manager.focused()).unwrap();
+        assert_eq!(w.kind, crate::wm::window::WindowKind::Builtin(ScreenId::System));
     }
 }
