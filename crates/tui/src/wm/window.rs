@@ -181,6 +181,7 @@ impl Window {
         area: ratatui::layout::Rect,
         theme: &crate::theme::Theme,
         focused: bool,
+        pane_index: usize,
     ) {
         use ratatui::text::{Line, Span};
         use ratatui::widgets::{Block, Borders, Paragraph};
@@ -193,7 +194,7 @@ impl Window {
         // `&mut self` overlapping a `&mut self.terminal` borrow.
         let _ = self.drain_output();
         if let Some(term) = self.terminal.as_mut() {
-            let title = crate::wm::render::pane_title(&self.kind);
+            let title = crate::wm::render::pane_title(&self.kind, pane_index);
             let block = Block::default()
                 .title(Span::styled(title, theme.title()))
                 .borders(Borders::ALL)

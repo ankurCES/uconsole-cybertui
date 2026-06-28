@@ -34,24 +34,24 @@ pub fn render(
 ) {
     // Pass 1 — plan: apply layout and snapshot what each pane is.
     // We only touch `app.manager` here, so the borrow is scoped tightly.
-    let plan: Vec<(crate::wm::broadcaster::PaneId, Rect, WindowKind, bool)> = {
+    let plan: Vec<(crate::wm::broadcaster::PaneId, Rect, WindowKind, bool, usize)> = {
         let manager = &mut app.manager;
         manager.apply_layout(area);
         let focused = manager.focused();
         manager
             .layout()
             .into_iter()
-            .filter_map(|(id, rect)| {
+            .enumerate()
+            .filter_map(|(index, (id, rect))| {
                 let w = manager.window(id)?;
                 let is_focused = id == focused;
-                Some((id, rect, w.kind, is_focused))
+                Some((id, rect, w.kind, is_focused, index))
             })
             .collect()
     };
 
-    // Pass 2 — built-in panes: dispatch into `Screen::render`, which
-    // needs `&mut App` + `&mut [Box<dyn Screen>]`. No manager borrow.
-    for (_id, rect, kind, focused) in &plan {
+    // Pass 2 — built-in panes.
+    for (_id, rect, kind, focused, _index) in &plan {
         if let WindowKind::Builtin(sid) = kind {
             if let Some(s) = screens.iter_mut().find(|s| s.id() == *sid) {
                 s.render(f, *rect, app, theme, *focused);
@@ -59,23 +59,22 @@ pub fn render(
         }
     }
 
-    // Pass 3 — terminal panes: needs `&mut Window`, so we re-borrow
-    // `&mut app.manager`. This pass doesn't touch `app` outside
-    // `app.manager`, so it doesn't conflict with pass 2 (sequential).
-    for (id, rect, kind, focused) in &plan {
+    // Pass 3 — terminal panes.
+    for (id, rect, kind, focused, index) in &plan {
         if matches!(kind, WindowKind::Terminal) {
             if let Some(w) = app.manager.window_mut(*id) {
-                w.paint(f, *rect, theme, *focused);
+                w.paint(f, *rect, theme, *focused, *index);
             }
         }
     }
 }
 
-/// Title-bar string for a pane. Kept here (not in `Window`) because
-/// ratatui's `Block` builder is what we pass it to.
+/// Title-bar string for a pane. `index` is the 0-based leaf position
+/// in DFS order (matches `Manager::pane_ids()`); the user sees a
+/// 1-based badge ` [N] `.
 #[allow(dead_code)] // wired up in Task 2.3
-pub fn pane_title(w: &WindowKind) -> String {
-    format!(" {} ", w.label())
+pub fn pane_title(w: &WindowKind, index: usize) -> String {
+    format!(" [{}] {} ", index + 1, w.label())
 }
 
 #[cfg(test)]
@@ -84,6 +83,7 @@ mod tests {
     use crate::wm::manager::Manager;
     use crate::wm::tree::SplitDir;
     use ratatui::layout::Rect;
+    use super::pane_title;
 
     #[test]
     fn apply_layout_single_pane_uses_full_area() {
@@ -111,5 +111,17 @@ mod tests {
         assert_eq!(layout[1].1.width, 40);
         assert_eq!(layout[0].1.x, 0);
         assert_eq!(layout[1].1.x, 40);
+    }
+
+    #[test]
+    fn pane_title_includes_index_and_label() {
+        use crate::wm::window::WindowKind;
+        // 0-based manager index → 1-based badge.
+        assert_eq!(pane_title(&WindowKind::Terminal, 0), " [1] terminal ");
+        assert_eq!(pane_title(&WindowKind::Terminal, 8), " [9] terminal ");
+        assert_eq!(
+            pane_title(&WindowKind::Builtin(crate::app::screen::ScreenId::Network), 1),
+            " [2] Network "
+        );
     }
 }
