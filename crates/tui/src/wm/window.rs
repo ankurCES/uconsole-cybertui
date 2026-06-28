@@ -11,6 +11,15 @@
 //!   * `Terminal` — a `Grid` + `AnsiParser` + `PaneOutput` (broadcast
 //!     receiver) + `PtyWriter` + last cached child PID. Each rendered frame
 //!     drains the broadcast receiver into the parser, then paints the grid.
+//!
+//! Phase-4 simplification: the TUI is locked to 2 panes and the Ctrl-W
+//! keymap (which spawned terminal panes) is gone. The `WindowKind::Terminal`
+//! variant, the `Window::terminal` constructor, and the `TerminalState`
+//! struct are kept (and silenced) so a future re-enable doesn't have to
+//! re-derive the design. Remove this allow when the WM is wired back up.
+//! Same goes for `Window::drain_output` and the `wm::input` path that fed
+//! terminal keystrokes in.
+#![allow(dead_code)]
 
 use crate::wm::ansi::{AnsiParser, Grid};
 use crate::wm::broadcaster::{PaneId, PaneOutput, PtyWriter};

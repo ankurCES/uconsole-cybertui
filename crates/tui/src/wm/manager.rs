@@ -10,6 +10,16 @@
 //! `apply_layout(area)` walks the tree once per render and hands the
 //! computed rects to each `Window`. `Window::resize` is then called with
 //! the new size so terminal panes can re-`ioctl(TIOCSWINSZ)`.
+//!
+//! Phase-4 simplification: the TUI is locked to a 2-pane layout
+//! (sidebar + content) — the Ctrl-W keymap that drove `split_focused`,
+//! `close_focused`, `resize_focused`, `focus_neighbor`, and
+//! `replace_focused_with_terminal` is gone. The infrastructure is kept
+//! (and silenced with `allow(dead_code)`) so a future re-enable doesn't
+//! have to re-derive the design. Remove this allow when the WM is wired
+//! back up.
+//! `MAX_PANES` and `SplitError::PaneLimit` exist for the same reason.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 

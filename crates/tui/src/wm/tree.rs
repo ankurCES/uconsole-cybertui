@@ -24,6 +24,13 @@
 //! `focus_neighbor` walks the tree to find the next pane in a direction.
 //! Returns `None` if no neighbor exists in that direction (used by the
 //! `Ctrl-W h/j/k/l` keymap).
+//!
+//! Phase-4 simplification: with the layout locked to 2 panes, the
+//! `Split` variant, the split/close/resize/focus_neighbor mutators, and
+//! the `rect_center` helper are unused at runtime. They're kept (and
+//! silenced) so a future re-enable doesn't have to re-derive the
+//! design. Remove this allow when the WM is wired back up.
+#![allow(dead_code)]
 
 use ratatui::layout::Rect;
 
