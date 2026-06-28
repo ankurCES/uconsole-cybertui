@@ -83,6 +83,7 @@ ASSUME_YES=0
 REFUSE_SUDO=0
 DO_UNINSTALL=0
 SKIP_DEPS=0
+DO_DEPS=0
 
 usage() {
     sed -n '2,40p' "$0"
