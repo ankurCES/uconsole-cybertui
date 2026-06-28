@@ -638,30 +638,17 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
             f.render_widget(gauge, gauge_rect);
         }
         Modal::AuthFailure { command, stderr, retry: _ } => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-            let lines = vec![
-                Line::from(format!("Authentication failed: {command}")),
-                Line::from(""),
-                Line::from(stderr.clone()),
-                Line::from(""),
-                Line::from("Press R to retry, Esc to cancel."),
-            ];
-            let w_ = 64.min(area.width.saturating_sub(4));
-            let h_ = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w_)) / 2;
-            let y = area.y + (area.height.saturating_sub(h_)) / 2;
-            let rect = rect(x, y, w_, h_);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" auth required ")
-                        .borders(Borders::ALL)
-                        .border_style(theme.warn()),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, rect);
+            let body = format!(
+                "Authentication failed: {command}\n\n{}\n\nPress R to retry, Esc to cancel.",
+                stderr
+            );
+            crate::wm::popup::render(
+                f,
+                area,
+                crate::wm::popup::Popup::new("auth required", &body)
+                    .with_hint("[r] retry   [esc] cancel"),
+                theme,
+            );
         }
     }
 }
