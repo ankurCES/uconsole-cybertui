@@ -19,7 +19,7 @@ mod inner {
     use cyberdeck_core::net::Interface;
     use cyberdeck_core::power::Battery;
     use cyberdeck_core::sys::{SystemInfo, ThermalReading};
-    use cyberdeck_core::{audio, bluetooth, display, net, packages, process, services, storage};
+    use cyberdeck_core::{audio, bluetooth, display, packages, process, services, storage};
     use tokio::sync::mpsc::Sender;
 
     use cyberdeck_web::api::LiveRead;
@@ -30,7 +30,10 @@ mod inner {
     /// The bridge. It implements the web's `LiveRead` against the TUI's `Live`.
     /// `action_tx` is the sender half of the TUI's action channel, wrapped to
     /// turn `WebAction` into TUI `Action::Toast` so the web UI can notify the
-    /// user of side effects.
+    /// user of side effects. Held for parity with the standalone bridge; the
+    /// TUI's main loop pumps web actions through a separate task, so it isn't
+    /// read by `LiveRead` itself.
+    #[allow(dead_code)]
     pub struct TuiLiveRead {
         pub live: Arc<Live>,
         pub action_tx: Sender<super::AppAction>,
