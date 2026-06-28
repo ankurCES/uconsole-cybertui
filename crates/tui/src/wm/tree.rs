@@ -203,9 +203,18 @@ impl Node {
                 FocusDir::Left | FocusDir::Right => c.1.abs_diff(fc.1),
                 FocusDir::Up | FocusDir::Down => c.0.abs_diff(fc.0),
             };
-            let score = (candidate as u32) * 1000 + tiebreak as u32;
+            // Score = (tiebreak * 1000) + candidate. Primary key is the
+            // perpendicular distance (vertical for L/R, horizontal for U/D)
+            // so "straight" moves win over diagonal ones; secondary key is
+            // the along-direction gap as a finer preference. Without this
+            // rank order, e.g. moving Right from a top-left pane into a
+            // 3-pane "Top | Bottom" layout picks the bottom-left pane
+            // (closer horizontally) instead of the top-right (same row).
+            let score = (tiebreak as u32) * 1000 + candidate as u32;
             best = match best {
-                Some((s, _)) if s <= score => best,
+                // Strict `<` so equal-score candidates keep the earlier
+                // winner (deterministic by leaf-order).
+                Some((s, _)) if s < score => best,
                 _ => Some((score, *id)),
             };
         }
@@ -378,11 +387,13 @@ mod tests {
         let out = compute_layout(&tree, Rect::new(0, 0, 100, 10));
         assert_eq!(out[0].1.width, 99);
         assert_eq!(out[1].1.width, 1);
-        // Resize target pid(2) (the right side) by -200 → clamps to 1.
+        // Resize target pid(2) (the right side) by -200 → ratio = 50-200 = -150,
+        // clamped to 1. Side `a` (pid(1), the left) is now 1%, side `b`
+        // (pid(2), the right) is 99%.
         assert!(tree.resize(pid(2), SplitDir::Horizontal, -200));
         let out = compute_layout(&tree, Rect::new(0, 0, 100, 10));
-        assert_eq!(out[0].1.width, 99);
-        assert_eq!(out[1].1.width, 1);
+        assert_eq!(out[0].1.width, 1, "left after clamp");
+        assert_eq!(out[1].1.width, 99, "right after clamp");
     }
 
     #[test]
