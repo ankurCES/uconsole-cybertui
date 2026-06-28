@@ -132,6 +132,10 @@ pub enum InputKind {
     WifiEnterpriseIdentity,
     WifiEnterprisePassword,
     HiddenSSID,
+    /// Bluetooth pairing passkey. Numeric only — the modal's Char(c)
+    /// handler drops non-digit chars at the buffer-insert step so the
+    /// user can't accidentally type letters into a passkey field.
+    BluetoothPasskey,
 }
 
 #[derive(Debug)]
