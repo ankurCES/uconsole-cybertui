@@ -47,20 +47,6 @@ pub enum FocusDir {
     Right,
 }
 
-impl FocusDir {
-    /// Map `h/j/k/l` to directions. Lives here so `main.rs` and tests agree
-    /// on the mapping.
-    pub fn from_vim(c: char) -> Option<Self> {
-        match c {
-            'h' => Some(Self::Left),
-            'j' => Some(Self::Down),
-            'k' => Some(Self::Up),
-            'l' => Some(Self::Right),
-            _ => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum Node {
     Leaf { id: PaneId },
@@ -237,22 +223,7 @@ impl Node {
         }
     }
 
-    /// Swap `a` and `b` of the split containing `target` (a no-op if
-    /// `target` is a root leaf).
-    pub fn rotate(&mut self, target: PaneId) -> bool {
-        match self {
-            Node::Leaf { .. } => false,
-            Node::Split { a, b, .. } => {
-                if a.contains(target) ^ b.contains(target) {
-                    std::mem::swap(a, b);
-                    true
-                } else {
-                    a.rotate(target) || b.rotate(target)
-                }
-            }
-        }
     }
-}
 
 fn rect_center(r: Rect) -> (u32, u32) {
     let x = r.x as u32 + r.width as u32 / 2;
@@ -405,18 +376,6 @@ mod tests {
         let out = compute_layout(&tree, Rect::new(0, 0, 100, 10));
         assert_eq!(out[0].1.width, 99);
         assert_eq!(out[1].1.width, 1);
-    }
-
-    #[test]
-    fn rotate_swaps_children() {
-        let mut tree = Node::leaf(pid(1));
-        tree.split(pid(1), SplitDir::Horizontal, 50, pid(2));
-        assert!(tree.rotate(pid(1)));
-        // After rotate, the left child is the old right child. Layout should
-        // still put pid(2) on the left half.
-        let out = compute_layout(&tree, Rect::new(0, 0, 80, 24));
-        assert_eq!(out[0].0, pid(2));
-        assert_eq!(out[1].0, pid(1));
     }
 
     #[test]

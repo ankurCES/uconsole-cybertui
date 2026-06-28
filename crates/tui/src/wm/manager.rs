@@ -20,8 +20,6 @@ use crate::wm::broadcaster::PaneId;
 use crate::wm::tree::{compute_layout, FocusDir, Node, SplitDir};
 use crate::wm::window::{Window, WindowKind};
 
-pub use crate::wm::tree::FocusDir as NeighbourDir;
-
 pub struct Manager {
     tree: Node,
     windows: HashMap<PaneId, Window>,
@@ -58,11 +56,16 @@ impl Manager {
 
     /// Borrow the terminal state of the focused pane, if any. Used
     /// by the input path to push bytes into the child's PTY.
+    // Public API consumed only by tests and the planned Ctrl-W forwarding
+    // path (see docs/superpowers/plans/.../2026-06-27-...md §2.5).
+    #[allow(dead_code)]
     pub fn focused_terminal_mut(&mut self) -> Option<&mut crate::wm::window::TerminalState> {
         let id = self.focused;
         self.windows.get_mut(&id)?.terminal_mut()
     }
 
+    // Public API used by app.rs tests and future pane enumeration (see plan §2.5).
+    #[allow(dead_code)]
     pub fn pane_ids(&self) -> Vec<PaneId> { self.tree.leaves() }
 
     /// Split the focused leaf, opening a new built-in screen on the

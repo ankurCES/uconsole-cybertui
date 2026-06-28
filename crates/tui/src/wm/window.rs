@@ -42,6 +42,11 @@ impl WindowKind {
 /// a `broadcast::Receiver`, which isn't `Clone`. The WM owns windows in a
 /// `HashMap<PaneId, Window>` and looks them up by id.
 pub struct Window {
+    // Pane identity — canonical lookup key against the manager's `windows`
+    // map. Currently set in constructors and unused at runtime; the manager
+    // holds its own copy in the map key. Kept so future callers (debugger
+    // hooks, log lines) can ask a Window its id without a separate lookup.
+    #[allow(dead_code)]
     pub id: PaneId,
     pub kind: WindowKind,
     pub focused: bool,
@@ -106,6 +111,9 @@ impl Window {
     }
 
     /// Convenience for tests / programmatic creation.
+    // Public predicate used by manager tests; the WM core dispatches via
+    // `WindowKind` matching in the input/render paths.
+    #[allow(dead_code)]
     pub fn is_terminal(&self) -> bool {
         self.terminal.is_some()
     }
