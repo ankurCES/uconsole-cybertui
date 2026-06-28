@@ -1304,7 +1304,9 @@ async fn handle_action(
         Action::Toast(kind, msg) => app.push_toast(kind, msg),
         Action::Toggle(key) => {
             use app::screen::SettingsKey::*;
-            match key {
+            // Confirmation toast text is decided at the end of the arm so
+            // we can name the post-toggle state (e.g. "theme: light").
+            let confirm: Option<String> = match key {
                 Theme => {
                     app.theme_name = match app.theme_name {
                         app::screen::ThemeNameReexport::Dark => {
@@ -1317,9 +1319,29 @@ async fn handle_action(
                             app::screen::ThemeNameReexport::Dark
                         }
                     };
+                    Some(format!(
+                    "theme: {}",
+                    match app.theme_name {
+                        app::screen::ThemeNameReexport::Dark => "dark",
+                        app::screen::ThemeNameReexport::Light => "light",
+                        app::screen::ThemeNameReexport::HighContrast => "contrast",
+                    }
+                ))
                 }
-                Mouse => app.mouse = !app.mouse,
-                NerdFont => app.nerd_font = !app.nerd_font,
+                Mouse => {
+                    app.mouse = !app.mouse;
+                    Some(format!(
+                        "mouse capture: {}",
+                        if app.mouse { "on" } else { "off" }
+                    ))
+                }
+                NerdFont => {
+                    app.nerd_font = !app.nerd_font;
+                    Some(format!(
+                        "nerd font glyphs: {}",
+                        if app.nerd_font { "on" } else { "off" }
+                    ))
+                }
                 WebServer => {
                     let act = if *app.live.web_enabled.read().await {
                         RunAction::WebStop
@@ -1327,8 +1349,20 @@ async fn handle_action(
                         RunAction::WebStart
                     };
                     let sender = app.live.web_ctrl.lock().await.clone();
+                    // Optimistic confirmation: assume the request will
+                    // succeed. If it fails the web-server task pushes a
+                    // follow-up Error toast itself.
+                    let will_be = if matches!(act, RunAction::WebStop) {
+                        "off"
+                    } else {
+                        "on"
+                    };
                     let _ = sender.send((tx.clone(), Action::Run(act))).await;
+                    Some(format!("web server: {will_be}"))
                 }
+            };
+            if let Some(msg) = confirm {
+                app.push_toast(ToastKind::Info, msg);
             }
         }
         Action::Run(act) => {
@@ -1955,10 +1989,64 @@ mod tests {
         assert!(_rx.try_recv().is_err(), "no action should be enqueued");
     }
 
-    // Boot toast: the first Action::Tick in a process must push a welcome
-    // toast exactly once. Subsequent ticks must NOT spam welcome toasts —
-    // otherwise the welcome becomes noise. Mirrors orbital's startup
-    // greeter pattern (one frame, then silent).
+    // Toggle confirmation toasts: every Action::Toggle must push an Info
+    // toast naming the new state, so the user gets immediate feedback
+    // instead of a silent flag flip. Mirrors orbital's "every action
+    // produces a visible ack" rule.
+    #[tokio::test]
+    async fn toggle_theme_pushes_confirmation_toast() {
+        use app::screen::SettingsKey;
+        let (tx, _rx, mut app) = make_app();
+        let before = app.theme_name;
+        let _ = handle_action(
+            &mut [],
+            &mut app,
+            &tx,
+            Action::Toggle(SettingsKey::Theme),
+        )
+        .await;
+        assert_ne!(app.theme_name, before, "Theme toggle must rotate");
+        assert_eq!(app.toasts.len(), 1, "exactly one toast");
+        assert!(app.toasts[0].text.starts_with("theme: "), "got: {:?}", app.toasts[0].text);
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+    }
+
+    #[tokio::test]
+    async fn toggle_mouse_pushes_confirmation_toast() {
+        use app::screen::SettingsKey;
+        let (tx, _rx, mut app) = make_app();
+        let before = app.mouse;
+        let _ = handle_action(
+            &mut [],
+            &mut app,
+            &tx,
+            Action::Toggle(SettingsKey::Mouse),
+        )
+        .await;
+        assert_ne!(app.mouse, before, "Mouse toggle must flip");
+        assert_eq!(app.toasts.len(), 1);
+        assert!(app.toasts[0].text.starts_with("mouse capture: "), "got: {:?}", app.toasts[0].text);
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+    }
+
+    #[tokio::test]
+    async fn toggle_nerd_font_pushes_confirmation_toast() {
+        use app::screen::SettingsKey;
+        let (tx, _rx, mut app) = make_app();
+        let before = app.nerd_font;
+        let _ = handle_action(
+            &mut [],
+            &mut app,
+            &tx,
+            Action::Toggle(SettingsKey::NerdFont),
+        )
+        .await;
+        assert_ne!(app.nerd_font, before, "NerdFont toggle must flip");
+        assert_eq!(app.toasts.len(), 1);
+        assert!(app.toasts[0].text.starts_with("nerd font glyphs: "), "got: {:?}", app.toasts[0].text);
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+    }
+
     #[tokio::test]
     async fn boot_welcome_toast_fires_exactly_once() {
         let (tx, _rx, mut app) = make_app();
