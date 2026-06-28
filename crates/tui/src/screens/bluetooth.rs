@@ -6,8 +6,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
-use cyberdeck_core::bluetooth::BtDevice;
-
 use crate::app::action::{Action, RunAction};
 use crate::app::screen::{Screen, ScreenId};
 use crate::app::toast::ToastKind;
@@ -253,6 +251,7 @@ mod tests {
     use super::*;
     use crate::app::App;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use cyberdeck_core::bluetooth::BtDevice;
     use tokio::sync::mpsc;
 
     fn kc(code: KeyCode) -> KeyEvent {
