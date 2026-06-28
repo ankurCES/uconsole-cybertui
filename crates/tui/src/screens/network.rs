@@ -91,24 +91,22 @@ impl Screen for NetworkScreen {
                 }
             }
             KeyCode::Char('r') => {
-                let tx = app.tx.clone();
-                tokio::spawn(async move {
-                    match cyberdeck_core::net::wifi_scan().await {
-                        Ok(n) => {
-                            let _ = tx
-                                .send(Action::Toast(
-                                    ToastKind::Ok,
-                                    format!("found {} networks", n.len()),
-                                ))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(Action::Toast(ToastKind::Error, format!("{e}")))
-                                .await;
-                        }
-                    }
-                });
+                // Dispatch through Action::Run so the existing
+                // `RunAction::WifiScan` handler in main.rs populates
+                // `app.wifi_scan_results` (the screen's render reads
+                // from there). Calling `cyberdeck_core::net::wifi_scan`
+                // directly and only emitting a toast used to leave
+                // the wifi list empty — networks were parsed then
+                // discarded.
+                if app
+                    .tx
+                    .try_send(Action::Run(RunAction::WifiScan))
+                    .is_err()
+                {
+                    // Channel full / closed — surface it rather than
+                    // silently dropping the scan request.
+                    app.push_toast(ToastKind::Error, "scan dispatch failed");
+                }
                 return true;
             }
             KeyCode::Char('c') => {
@@ -495,6 +493,29 @@ mod tests {
         assert_eq!(offset, 22);
         // The selected row is visible: offset <= selected < offset + visible.
         assert!(offset <= 31 && 31 < offset + right_h);
+    }
+
+    // Pressing `r` must dispatch `Action::Run(RunAction::WifiScan)` so the
+    // handler at main.rs populates `app.wifi_scan_results`. Before the fix,
+    // the screen spawned its own task and only emitted a Toast — networks
+    // were parsed then discarded, so the user saw an empty wifi list.
+    #[tokio::test]
+    async fn r_key_dispatches_wifi_scan_run_action() {
+        let mut app = make_app();
+        push_ifaces(&app, 1).await;
+        let mut screen = NetworkScreen;
+
+        assert!(screen.on_key(kc(KeyCode::Char('r')), &mut app));
+
+        // Drain the channel: the screen must have sent exactly one
+        // Action::Run(RunAction::WifiScan).
+        let sent = app.rx.try_recv().expect("expected a queued action");
+        match sent {
+            Action::Run(RunAction::WifiScan) => {}
+            other => panic!("expected RunAction::WifiScan, got {other:?}"),
+        }
+        // And nothing else leaked into the channel.
+        assert!(app.rx.try_recv().is_err());
     }
 }
 
