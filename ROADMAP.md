@@ -70,7 +70,7 @@ Known issues (filed for a follow-up plan):
 
 ## Phase 4 — polish
 
-- Pane number badges in titles (`1`/`2`/…) so `Ctrl-W N` jump is discoverable.
+- [x] Pane number badges in titles (`1`/`2`/…) so `Ctrl-W N` jump is discoverable.
 - Last-used shell + cwd persistence (config file or env).
 - Optional: per-pane scrollback for terminals.
 - Optional: pane presets (`:layout 2v`, `:layout 1+2`).

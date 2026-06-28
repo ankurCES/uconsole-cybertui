@@ -73,3 +73,35 @@ and confirm:
 
 If any of these fail, the regression is almost always in
 `wm/render.rs` (paint order) or `wm/manager.rs` (tree bookkeeping).
+
+## Manual smoke test for Phase 4 (pane number badges + Ctrl-W N jump)
+
+After touching `wm/manager.rs`, `wm/render.rs`, or the `Ctrl-W`
+arms in `main.rs`, run the binary and confirm. Note: built-in pane
+titles are rendered by each `Screen::render` and do **not** yet show
+the badge — only terminal pane titles do (see follow-up in
+ROADMAP.md).
+
+1. Open TUI. Single built-in pane; the title reads ` System ` (no
+   badge yet for built-ins). Open a terminal pane with `Ctrl-W n` —
+   the new terminal title reads ` [1] terminal ` (terminals do show
+   the badge).
+2. `Ctrl-W v`. Two panes side by side. New pane is focused.
+3. `Ctrl-W h`. Focus border moves left; titles unchanged.
+4. `Ctrl-W 1`. Focus jumps to pane 1.
+5. Open four more terminal panes (each `Ctrl-W n` on the focused
+   pane, then `Ctrl-W v` or `Ctrl-W s` to split as needed). Six panes,
+   terminal titles ` [1] terminal `..` [6] terminal `.
+6. Open three more (`Ctrl-W n` then split). Nine panes total.
+7. `Ctrl-W v` on pane 9. No new pane appears; toast at the bottom
+   reads `pane limit reached (9)`.
+8. `Ctrl-W 1`. Focus jumps to pane 1.
+9. `Ctrl-W q` on pane 9. Eight panes remain; terminal titles
+   renumber to ` [1] terminal `..` [8] terminal `.
+10. `Ctrl-W 9`. Toast `no pane 9` (only 8 exist).
+11. `Ctrl-W 8`. Focus jumps to pane 8.
+
+If any step fails, the regression is almost always in
+`Manager::focus_pane_index` / `focus_pane` (Task 1), the `Result`
+shape of `split_focused` (Task 2), or the index threading in
+`wm::render::render` (Task 3).
