@@ -77,13 +77,25 @@ pub fn pane_title(w: &WindowKind, index: usize) -> String {
     format!(" [{}] {} ", index + 1, w.label())
 }
 
+/// Short right-aligned status hint for a terminal pane title bar.
+/// `alive=true` → `" running "`, otherwise → `" exited "`. Used by
+/// `Window::paint` to give the title bar a sense of liveness without
+/// adding a second row.
+pub fn terminal_status_hint(alive: bool) -> &'static str {
+    if alive {
+        " running "
+    } else {
+        " exited "
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::app::screen::ScreenId;
     use crate::wm::manager::Manager;
     use crate::wm::tree::SplitDir;
     use ratatui::layout::Rect;
-    use super::pane_title;
+    use super::{pane_title, terminal_status_hint};
 
     #[test]
     fn apply_layout_single_pane_uses_full_area() {
@@ -123,5 +135,11 @@ mod tests {
             pane_title(&WindowKind::Builtin(crate::app::screen::ScreenId::Network), 1),
             " [2] Network "
         );
+    }
+
+    #[test]
+    fn terminal_status_hint_reports_running_and_exited() {
+        assert_eq!(terminal_status_hint(true), " running ");
+        assert_eq!(terminal_status_hint(false), " exited ");
     }
 }
