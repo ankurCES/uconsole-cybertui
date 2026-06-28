@@ -5,6 +5,7 @@
 //! - `broadcaster`  — broadcast output + mpsc input for a pane.
 //! - `keymap`       — hardware button remap (uconsole X/Y/A/B → arrows).
 //! - `manager`      — owns the split tree + per-pane state.
+//! - `popup`        — centered floating popup with a shadow band.
 //! - `pty`          — child PTY per external pane, lifecycle + I/O.
 //! - `render`       — tree-walk renderer for the manager.
 //! - `tree`         — binary split tree, layout, focus neighbours.
@@ -15,6 +16,7 @@ pub mod broadcaster;
 pub mod input;
 pub mod keymap;
 pub mod manager;
+pub mod popup;
 pub mod pty;
 pub mod render;
 pub mod tree;
