@@ -493,6 +493,21 @@ fn palette_actions() -> Vec<(&'static str, String)> {
     v
 }
 
+/// Single point where digit-key shortcuts (`1`..`0`) translate into a
+/// screen change. Keeps `app.current` and the WM pane's `WindowKind`
+/// in sync so the right side actually redraws with the new screen —
+/// without this, the sidebar would say "Network" but the content
+/// pane would keep showing whatever it last rendered.
+fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
+    if app.sidebar_focused {
+        app.sidebar_idx = sidebar_row.min(ScreenId::ALL.len() - 1);
+    }
+    app.current = screen;
+    let _ = app.manager.set_pane_kind(
+        crate::wm::window::WindowKind::Builtin(screen),
+    );
+}
+
 async fn handle_key(
     screens: &mut [Box<dyn Screen>],
     app: &mut App,
@@ -634,6 +649,13 @@ async fn handle_key(
         Enter if app.sidebar_focused => {
             if let Some(id) = ScreenId::ALL.get(app.sidebar_idx) {
                 app.current = *id;
+                // The right-side content pane follows the sidebar: swap
+                // its kind so the next render redraws with the chosen
+                // screen. The single-pane WM means there's exactly one
+                // pane to update.
+                let _ = app.manager.set_pane_kind(
+                    crate::wm::window::WindowKind::Builtin(*id),
+                );
             }
             return false;
         }
@@ -645,215 +667,21 @@ async fn handle_key(
             app.sidebar_focused = false;
             return false;
         }
-        Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 0.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::System;
-        }
-        Char('2') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 1.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Network;
-        }
-        Char('3') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 2.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Bluetooth;
-        }
-        Char('4') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 3.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Power;
-        }
-        Char('5') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 4.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Display;
-        }
-        Char('6') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 5.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Audio;
-        }
-        Char('7') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 6.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Storage;
-        }
-        Char('8') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 7.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Services;
-        }
-        Char('9') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 8.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Packages;
-        }
-        Char('0') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.sidebar_focused {
-                app.sidebar_idx = 9.min(ScreenId::ALL.len() - 1);
-            }
-            app.current = ScreenId::Settings;
-        }
-        // Ctrl-W keymap. Vim/tmux style. Two-key sequences: the first
-        // key sets `wm_pending`, the second is consumed if it matches
-        // a known verb. Anything else clears the pending state.
-        Char('w') | Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.wm_pending = true;
-        }
-        _ if app.wm_pending => {
-            app.wm_pending = false;
-            match key.code {
-                KeyCode::Char('h') | KeyCode::Left => {
-                    let _ = app.manager.focus_neighbor(
-                        crate::wm::tree::FocusDir::Left,
-                    );
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    let _ = app.manager.focus_neighbor(
-                        crate::wm::tree::FocusDir::Down,
-                    );
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    let _ = app.manager.focus_neighbor(
-                        crate::wm::tree::FocusDir::Up,
-                    );
-                }
-                KeyCode::Char('l') | KeyCode::Right => {
-                    let _ = app.manager.focus_neighbor(
-                        crate::wm::tree::FocusDir::Right,
-                    );
-                }
-                KeyCode::Char('v') => {
-                    if let Err(e) = app.manager.split_focused(
-                        crate::wm::tree::SplitDir::Vertical,
-                        50,
-                        app.current,
-                    ) {
-                        let _ = app.push_toast(
-                            crate::app::toast::ToastKind::Warn,
-                            e.to_string(),
-                        );
-                    }
-                }
-                KeyCode::Char('s') => {
-                    if let Err(e) = app.manager.split_focused(
-                        crate::wm::tree::SplitDir::Horizontal,
-                        50,
-                        app.current,
-                    ) {
-                        let _ = app.push_toast(
-                            crate::app::toast::ToastKind::Warn,
-                            e.to_string(),
-                        );
-                    }
-                }
-                KeyCode::Char('n') => {
-                    // Spawn $SHELL in the focused pane. If the pane
-                    // is already a terminal, this is a no-op (we
-                    // don't open nested shells for v0).
-                    //
-                    // KNOWN ISSUE: we spawn the shell twice — once for
-                    // the broadcaster (which consumes the Pty handle)
-                    // and once for the Window's own Pty so resize/kill
-                    // work. The fix is to thread the Pty *out* of
-                    // `broadcaster::spawn`; tracked in ROADMAP.md
-                    // "Known issues". Don't block on it for v0.
-                    use portable_pty::CommandBuilder;
-                    let mut cmd = CommandBuilder::new(
-                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
-                    );
-                    cmd.cwd(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")));
-                    match crate::wm::pty::Pty::spawn(cmd, 24, 80) {
-                        Ok(pty) => {
-                            // Spawn a second PTY for the Window — the
-                            // broadcaster takes ownership of the first
-                            // one, and the Window needs its own handle
-                            // to call `resize`/`kill`.
-                            let (out, writer, _tasks) =
-                                crate::wm::broadcaster::spawn(pty);
-                            let second_pty = match crate::wm::pty::Pty::spawn(
-                                CommandBuilder::new(
-                                    std::env::var("SHELL")
-                                        .unwrap_or_else(|_| "/bin/sh".into()),
-                                ),
-                                24,
-                                80,
-                            ) {
-                                Ok(p) => p,
-                                Err(_) => return false,
-                            };
-                            let prev = app.manager.replace_focused_with_terminal(
-                                second_pty,
-                                out,
-                                writer,
-                            );
-                            if let Some(prev) = prev {
-                                let _ = app.push_toast(
-                                    crate::app::toast::ToastKind::Info,
-                                    format!("pane → terminal (was {})", prev.label()),
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            let _ = app.push_toast(
-                                crate::app::toast::ToastKind::Error,
-                                format!("spawn: {e}"),
-                            );
-                        }
-                    }
-                }
-                KeyCode::Char('q') | KeyCode::Char('x') => {
-                    let _ = app.manager.close_focused();
-                }
-                KeyCode::Char('=') | KeyCode::Char('+') => {
-                    // KNOWN ISSUE: `resize_focused` only tries
-                    // `SplitDir::Horizontal`, so the resize silently
-                    // no-ops if the focused pane is inside a vertical
-                    // split. The fix is to discover the parent
-                    // split's direction from the tree; tracked in
-                    // ROADMAP.md "Known issues". For v0 we get working
-                    // resize on horizontal splits (the common case on
-                    // a wide uconsole screen).
-                    let _ = app.manager.resize_focused(
-                        crate::wm::tree::SplitDir::Horizontal,
-                        5,
-                    );
-                }
-                KeyCode::Char('-') => {
-                    // Same caveat as `=`/`+` above.
-                    let _ = app.manager.resize_focused(
-                        crate::wm::tree::SplitDir::Horizontal,
-                        -5,
-                    );
-                }
-                KeyCode::Char(c) if ('1'..='9').contains(&c) => {
-                    // Jump to pane N (1..=9). Indices are 0-based inside
-                    // the manager, 1-based on screen.
-                    let target = (c as u8 - b'1') as usize;
-                    match app.manager.focus_pane_index(target) {
-                        Some(id) => { let _ = app.manager.focus_pane(id); }
-                        None => {
-                            let _ = app.push_toast(
-                                crate::app::toast::ToastKind::Warn,
-                                format!("no pane {}", target + 1),
-                            );
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::System, 0),
+        Char('2') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Network, 1),
+        Char('3') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Bluetooth, 2),
+        Char('4') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Power, 3),
+        Char('5') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Display, 4),
+        Char('6') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Audio, 5),
+        Char('7') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Storage, 6),
+        Char('8') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Services, 7),
+        Char('9') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Packages, 8),
+        Char('0') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Settings, 9),
+        // Ctrl-W keymap. Disabled: the TUI is locked to a 2-pane layout
+        // (sidebar + content) and splits/closes/resizes/terminal spawns
+        // are not exposed. The dead arms are kept out of the match so
+        // Ctrl-W + h/j/k/l/v/s/n/q/= doesn't fire surprise side
+        // effects.
         Tab => {
             app.sidebar_focused = !app.sidebar_focused;
         }
@@ -1120,8 +948,8 @@ fn spawn_action(tx: mpsc::Sender<Action>, act: RunAction) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)] // helpers like `last_toast` and `app_with_n_panes` are kept for future use
     use super::*;
-    use crate::wm::manager::{Manager, SplitError};
     use crate::wm::tree::SplitDir;
 
     fn build_screens() -> Vec<Box<dyn Screen>> {
@@ -1168,103 +996,40 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_w_digit_jumps_to_pane_by_one_based_index() {
-        let mut app = app_with_n_panes(3);
+    fn ctrl_w_is_disabled_no_split_no_focus_change() {
+        // The TUI is locked to a 2-pane layout. Ctrl-W (with any
+        // follow-up key) must not split the tree, close panes, or move
+        // focus. Verified across the typical verb set.
+        let mut app = app_with_n_panes(1);
         let mut screens = build_screens();
         let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
-        let ids_before = app.manager.pane_ids();
-        // Pre-condition: after `app_with_n_panes`, focus is on pane 1.
-        assert_eq!(app.manager.focused(), ids_before[0]);
+        let before_ids = app.manager.pane_ids();
+        let before_kind = app.manager.window(app.manager.focused()).map(|w| w.kind);
         run(async {
-            // First key: arm `wm_pending`.
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-            )
-            .await;
-            // Second key: jump to pane 2 (1-based).
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Char('2'), KeyModifiers::CONTROL),
-            )
-            .await;
+            // Try the most common Ctrl-W verbs. None should fire.
+            for verb in ["v", "s", "h", "j", "k", "l", "n", "x", "q"] {
+                handle_key(
+                    &mut screens,
+                    &mut app,
+                    &tx,
+                    KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+                )
+                .await;
+                handle_key(
+                    &mut screens,
+                    &mut app,
+                    &tx,
+                    KeyEvent::new(KeyCode::Char(verb.chars().next().unwrap()), KeyModifiers::CONTROL),
+                )
+                .await;
+            }
         });
-        assert_eq!(app.manager.focused(), ids_before[1]);
-    }
-
-    #[test]
-    fn ctrl_w_digit_out_of_range_toasts_no_pane() {
-        // Per design spec §6, Ctrl-W N with no pane at that index
-        // surfaces a "no pane N" toast (not a silent no-op). This test
-        // guards that contract.
-        let mut app = app_with_n_panes(2);
-        let mut screens = build_screens();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
-        let ids_before = app.manager.pane_ids();
-        run(async {
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-            )
-            .await;
-            // Only 2 panes; pane 9 doesn't exist.
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Char('9'), KeyModifiers::CONTROL),
-            )
-            .await;
-        });
-        // Focus stays put.
-        assert_eq!(app.manager.focused(), ids_before[0]);
-        let msg = last_toast(&app).expect("toast should be set");
-        assert!(msg.contains("no pane 9"), "got toast: {msg}");
-    }
-
-    #[test]
-    fn ctrl_w_v_at_cap_surfaces_toast_not_ignore() {
-        let mut app = app_with_n_panes(Manager::MAX_PANES);
-        let mut screens = build_screens();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
-        assert_eq!(app.manager.pane_ids().len() as u8, Manager::MAX_PANES);
-        // Regression guard: previously `let _ = split_focused(...)`
-        // silently dropped `Err(PaneLimit)`. The arm must now surface a
-        // toast and not mutate the pane set.
-        let before = app.manager.pane_ids().len();
-        run(async {
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
-            )
-            .await;
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
-            )
-            .await;
-        });
-        assert_eq!(app.manager.pane_ids().len(), before, "no new pane at cap");
-        // Confirm the manager's own invariant matches what the arm saw.
+        // Pane count unchanged.
+        assert_eq!(app.manager.pane_ids(), before_ids);
+        // Focused pane kind unchanged.
         assert_eq!(
-            app.manager
-                .split_focused(SplitDir::Vertical, 50, ScreenId::System),
-            Err(SplitError::PaneLimit)
-        );
-        let msg = last_toast(&app).expect("toast should be set");
-        assert!(
-            msg.contains("pane limit reached") && msg.contains(&Manager::MAX_PANES.to_string()),
-            "got toast: {msg}"
+            app.manager.window(app.manager.focused()).map(|w| w.kind),
+            before_kind
         );
     }
 
@@ -1376,6 +1141,17 @@ mod tests {
             .await;
         });
         assert_eq!(app.current, ScreenId::Display);
+        // The right-side content pane must follow the sidebar commit,
+        // otherwise the next render would still paint the old screen.
+        let kind = app
+            .manager
+            .window(app.manager.focused())
+            .expect("focused pane")
+            .kind;
+        assert_eq!(
+            kind,
+            crate::wm::window::WindowKind::Builtin(ScreenId::Display)
+        );
     }
 
     #[test]
@@ -1445,5 +1221,67 @@ mod tests {
         });
         assert_eq!(app.sidebar_idx, 4);
         assert_eq!(app.current, ScreenId::Display);
+        // Right-side pane kind follows.
+        let kind = app
+            .manager
+            .window(app.manager.focused())
+            .expect("focused pane")
+            .kind;
+        assert_eq!(
+            kind,
+            crate::wm::window::WindowKind::Builtin(ScreenId::Display)
+        );
+    }
+
+    #[test]
+    fn number_keys_when_content_focused_still_swap_pane_kind() {
+        // Even when the sidebar isn't focused (the user is reading the
+        // right pane), the digit-key shortcuts still need to swap the
+        // content pane — that's the whole point of the new wiring.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.sidebar_focused = false;
+        let mut screens = build_screens();
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx2,
+                KeyEvent::new(KeyCode::Char('3'), KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.current, ScreenId::Bluetooth);
+        let kind = app
+            .manager
+            .window(app.manager.focused())
+            .expect("focused pane")
+            .kind;
+        assert_eq!(
+            kind,
+            crate::wm::window::WindowKind::Builtin(ScreenId::Bluetooth)
+        );
+    }
+
+    #[test]
+    fn set_pane_kind_swaps_focused_pane_kind() {
+        // Direct test for the new Manager API the sidebar Enter path
+        // depends on. The single-pane WM means `focused()` is the only
+        // pane there is, but the API still has to (a) return the
+        // previous kind and (b) leave `Window` in a usable state.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        let prev = app.manager.set_pane_kind(
+            crate::wm::window::WindowKind::Builtin(ScreenId::Network),
+        );
+        assert_eq!(
+            prev,
+            Some(crate::wm::window::WindowKind::Builtin(ScreenId::System))
+        );
+        let w = app.manager.window(app.manager.focused()).unwrap();
+        assert_eq!(w.kind, crate::wm::window::WindowKind::Builtin(ScreenId::Network));
+        // No terminal state was allocated.
+        assert!(!w.is_terminal());
     }
 }

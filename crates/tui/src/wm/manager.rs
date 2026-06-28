@@ -203,6 +203,37 @@ impl Manager {
         *self.windows.get_mut(&id)? = Window::terminal(id, pty, output, writer, rows, cols);
         Some(prev)
     }
+
+    /// Swap the focused pane's kind to a built-in screen. No-op if the
+    /// pane is already showing that screen. Returns the previous kind.
+    ///
+    /// The 2-pane layout (sidebar + content) drives the content pane
+    /// from `app.current` via this method: selecting a screen on the
+    /// left calls `set_pane_kind(Builtin(ScreenId::N))` so the right
+    /// side redraws with the new screen on the next frame.
+    pub fn set_pane_kind(&mut self, kind: WindowKind) -> Option<WindowKind> {
+        let id = self.focused;
+        let w = self.windows.get_mut(&id)?;
+        if w.kind == kind {
+            return Some(kind);
+        }
+        // Built-in panes don't own terminal state, so swapping out a
+        // terminal here would leak the PTY/broadcaster. Reject that
+        // direction; the call sites only ever set Builtin.
+        if !matches!(kind, WindowKind::Builtin(_)) {
+            return None;
+        }
+        let prev = w.kind;
+        // Drop any terminal state (PTY + broadcaster subscription) when
+        // swapping a terminal pane to a built-in. We don't expect this
+        // in the 2-pane flow (no Ctrl-W n), but the safe thing is to
+        // release it cleanly.
+        if matches!(prev, WindowKind::Terminal) {
+            w.clear_terminal();
+        }
+        w.kind = kind;
+        Some(prev)
+    }
 }
 
 #[cfg(test)]
@@ -317,5 +348,25 @@ mod tests {
         assert_eq!(err, SplitError::PaneLimit);
         // And the pane count did not grow.
         assert_eq!(m.pane_ids().len() as u8, Manager::MAX_PANES);
+    }
+
+    #[test]
+    fn set_pane_kind_swaps_focused_builtin_screen() {
+        // The 2-pane layout drives the content pane from `app.current`
+        // via `set_pane_kind`. Verify the contract: swaps the kind,
+        // returns the previous kind, leaves no terminal state behind.
+        let mut m = Manager::new(ScreenId::System);
+        let prev = m.set_pane_kind(WindowKind::Builtin(ScreenId::Network));
+        assert_eq!(prev, Some(WindowKind::Builtin(ScreenId::System)));
+        let w = m.window(m.focused()).unwrap();
+        assert_eq!(w.kind, WindowKind::Builtin(ScreenId::Network));
+        assert!(!w.is_terminal());
+    }
+
+    #[test]
+    fn set_pane_kind_is_noop_when_already_target() {
+        let mut m = Manager::new(ScreenId::System);
+        let prev = m.set_pane_kind(WindowKind::Builtin(ScreenId::System));
+        assert_eq!(prev, Some(WindowKind::Builtin(ScreenId::System)));
     }
 }

@@ -118,6 +118,14 @@ impl Window {
         self.terminal.is_some()
     }
 
+    /// Drop the terminal state (PTY + broadcaster subscription) if any.
+    /// Used by `Manager::set_pane_kind` when swapping a terminal pane
+    /// to a built-in so the PTY is released cleanly.
+    #[allow(dead_code)]
+    pub fn clear_terminal(&mut self) {
+        self.terminal = None;
+    }
+
     /// Mutable access to the terminal state, if any. Used by the
     /// input path.
     pub fn terminal_mut(&mut self) -> Option<&mut TerminalState> {

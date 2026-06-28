@@ -234,10 +234,6 @@ pub struct App {
     /// with Enter. `current` is what's actually rendered in the content
     /// pane; `sidebar_idx` is what's highlighted in the menu.
     pub sidebar_idx: usize,
-    /// `Ctrl-W` is a two-key sequence. This is set after the first key and
-    /// consumed on the second. Cleared automatically if the second key isn't
-    /// a known verb.
-    pub wm_pending: bool,
     pub palette_buf: String,
     pub palette_idx: usize,
     pub toasts: Vec<Toast>,
@@ -293,7 +289,6 @@ impl App {
             modal: Modal::None,
             sidebar_focused: true,
             sidebar_idx: 0,
-            wm_pending: false,
             palette_buf: String::new(),
             palette_idx: 0,
             toasts: Vec::new(),
