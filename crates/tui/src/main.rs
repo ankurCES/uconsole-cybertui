@@ -361,39 +361,32 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
     match &app.modal {
         Modal::None => {}
         Modal::Help => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-            let lines = vec![
-                Line::from("cyberdeck-tui — help"),
-                Line::from(""),
-                Line::from(" ↑/↓ j/k    navigate lists"),
-                Line::from(" ←/→ h/l    switch focus between sidebar and content"),
-                Line::from(" enter      open / confirm"),
-                Line::from(" esc        back / cancel"),
-                Line::from(" 1..9       jump to screen"),
-                Line::from(" r          refresh current screen"),
-                Line::from(" :          command palette"),
-                Line::from(" ?          this help"),
-                Line::from(" q          quit"),
-                Line::from(""),
-                Line::from("Press ? or esc to close."),
-            ];
-            let w = 60.min(area.width.saturating_sub(4));
-            let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h)) / 2;
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" help ")
-                        .borders(Borders::ALL)
-                        .border_style(theme.border(true)),
-                )
-                .wrap(Wrap { trim: false })
-                .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
-            f.render_widget(p, rect);
+            // Keybindings overlay. Replaces the old hand-rolled
+            // Clear + Block + Paragraph with `popup::render_with_hints`
+            // so the help modal shares the same orbital-style chrome
+            // (shadow band, rounded border, key/description table) as
+            // every other popup on PR #5.
+            //
+            // The keys themselves are split into two columns by
+            // `render_with_hints`: the key gets `theme.key()` (the
+            // accent register) and the description gets `theme.fg()`.
+            crate::wm::popup::render_with_hints(
+                f,
+                area,
+                "help",
+                &[
+                    ("↑/↓ j/k", "navigate lists"),
+                    ("←/→ h/l", "switch focus"),
+                    ("enter", "open / confirm"),
+                    ("esc", "back / cancel"),
+                    ("1..9", "jump to screen"),
+                    ("r", "refresh current screen"),
+                    (":", "command palette"),
+                    ("?", "this help"),
+                    ("q", "quit"),
+                ],
+                theme,
+            );
         }
         Modal::CommandPalette => {
             use ratatui::text::Line;

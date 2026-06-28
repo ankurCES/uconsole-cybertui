@@ -54,6 +54,53 @@ pub fn centered_rect(parent: Rect, child_w: u16, child_h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Paint the shared popup chrome (shadow band + Clear + bordered title)
+/// into `parent` and return the inner `Rect` for the caller to fill.
+/// Used by both `render` and `render_with_hints` so every overlay
+/// shares the same orbital-style look.
+fn chrome(f: &mut Frame, parent: Rect, title: &str, theme: &Theme) -> (Rect, Rect) {
+    // Shadow band: one column right + one row below, as far as the
+    // popup extends. Only drawn when there's room.
+    let can_shadow = parent
+        .right()
+        .checked_add(1)
+        .map_or(false, |x| x < parent.right())
+        && parent
+            .bottom()
+            .checked_add(1)
+            .map_or(false, |y| y < parent.bottom());
+    if can_shadow {
+        let shadow = Rect::new(parent.x + 1, parent.y + 1, parent.width, parent.height);
+        // Reuse `theme.dim()` as a "behind-everything" tone — slightly
+        // darker than the pane background so it reads as a shadow
+        // rather than a highlight.
+        let block = Block::default().style(theme.dim());
+        // We deliberately don't paint `Clear` here — we want to dim
+        // whatever's underneath rather than wipe it.
+        f.render_widget(block, shadow);
+    }
+
+    // Clear inside the popup rect so the body doesn't show the pane
+    // contents bleeding through.
+    f.render_widget(Clear, parent);
+
+    let title_text = format!(" {} ", title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(
+            Style::default()
+                .fg(theme.border_focus)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Line::from(Span::styled(title_text, theme.title())))
+        .style(Style::default().bg(theme.bg));
+
+    let inner = block.inner(parent);
+    f.render_widget(block, parent);
+    (parent, inner)
+}
+
 /// Paint `popup` centered inside `parent`. The shadow band is dropped
 /// automatically when the parent is too small to spare a column and a
 /// row, so very small panes still get a usable popup.
@@ -72,46 +119,7 @@ pub fn render(f: &mut Frame, parent: Rect, popup: Popup<'_>, theme: &Theme) {
     let desired_h = body_lines + 4; // top border + bottom border + 1 padding each side
 
     let rect = centered_rect(parent, desired_w, desired_h);
-
-    // Shadow band: one column right + one row below, as far as the
-    // popup extends. Only drawn when there's room.
-    let can_shadow = rect
-        .right()
-        .checked_add(1)
-        .map_or(false, |x| x < parent.right())
-        && rect
-            .bottom()
-            .checked_add(1)
-            .map_or(false, |y| y < parent.bottom());
-    if can_shadow {
-        let shadow = Rect::new(rect.x + 1, rect.y + 1, rect.width, rect.height);
-        // Reuse `theme.dim()` as a "behind-everything" tone — slightly
-        // darker than the pane background so it reads as a shadow
-        // rather than a highlight.
-        let block = Block::default().style(theme.dim());
-        // We deliberately don't paint `Clear` here — we want to dim
-        // whatever's underneath rather than wipe it.
-        f.render_widget(block, shadow);
-    }
-
-    // Clear inside the popup rect so the body doesn't show the pane
-    // contents bleeding through.
-    f.render_widget(Clear, rect);
-
-    let title_text = format!(" {} ", popup.title);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(
-            Style::default()
-                .fg(theme.border_focus)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(Line::from(Span::styled(title_text, theme.title())))
-        .style(Style::default().bg(theme.bg));
-
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
+    let (_, inner) = chrome(f, rect, popup.title, theme);
 
     // Layout: body fills, hint pinned to the bottom row.
     let mut body_rect = inner;
@@ -131,6 +139,55 @@ pub fn render(f: &mut Frame, parent: Rect, popup: Popup<'_>, theme: &Theme) {
         .style(Style::default().fg(theme.fg))
         .wrap(Wrap { trim: true });
     f.render_widget(paragraph, body_rect);
+}
+
+/// Compute the key-column width for `render_with_hints`: the width in
+/// cells of the longest key in `lines`. Exposed for testing so the
+/// alignment of the two-column table is verifiable without a Frame.
+pub fn key_column_width(lines: &[(&str, &str)]) -> u16 {
+    lines
+        .iter()
+        .map(|(k, _)| k.chars().count())
+        .max()
+        .unwrap_or(0) as u16
+}
+
+/// Paint a two-column key/description table centered inside `parent`.
+/// Inspired by orbital's `?` keybindings overlay — every row is
+/// `key  description`, the key column is `theme.key()`, the description
+/// column is `theme.fg()` so the keys pop in the accent register.
+///
+/// `lines` is `&[(&str, &str)]`; the helper takes a maximum column
+/// width from the widest key so the description column stays aligned
+/// regardless of how long the descriptions are.
+pub fn render_with_hints(
+    f: &mut Frame,
+    parent: Rect,
+    title: &str,
+    lines: &[(&str, &str)],
+    theme: &Theme,
+) {
+    let key_col = key_column_width(lines);
+    let row_count = lines.len().max(1) as u16;
+    let desired_w = (parent.width * 7 / 10).max(key_col + 30);
+    let desired_h = row_count + 2; // top + bottom borders
+    let rect = centered_rect(parent, desired_w, desired_h);
+    let (_, inner) = chrome(f, rect, title, theme);
+
+    let mut y = inner.y;
+    for (key, desc) in lines {
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let row = Rect::new(inner.x, y, inner.width, 1);
+        let line = Line::from(vec![
+            Span::styled(format!("{key:<width$}", width = key_col as usize), theme.key()),
+            Span::styled("  ", theme.dim()),
+            Span::styled((*desc).to_string(), Style::default().fg(theme.fg)),
+        ]);
+        f.render_widget(Paragraph::new(line), row);
+        y = y.saturating_add(1);
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +243,22 @@ mod tests {
     fn popup_with_hint_stores_hint() {
         let p = Popup::new("t", "b").with_hint("[enter]");
         assert_eq!(p.hint, Some("[enter]"));
+    }
+
+    #[test]
+    fn key_column_width_tracks_longest_key() {
+        // Wide unicode key drives the column width.
+        let lines = [
+            ("j/k", "navigate"),
+            ("Ctrl-W v", "vertical split"),
+            ("?", "help"),
+        ];
+        assert_eq!(key_column_width(&lines), "Ctrl-W v".chars().count() as u16);
+    }
+
+    #[test]
+    fn key_column_width_returns_zero_for_empty() {
+        let empty: [(&str, &str); 0] = [];
+        assert_eq!(key_column_width(&empty), 0);
     }
 }
