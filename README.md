@@ -1,5 +1,58 @@
 # cyberdeck
 
+<p align="center">
+  <img src="./assets/banner.svg" alt="cyberdeck — a TUI + LAN web UI for the ClockworkPi uconsole" width="100%"/>
+</p>
+
+<p align="center">
+  <em>A 13-screen ratatui TUI + axum web bridge for the ClockworkPi uconsole.</em><br/>
+  <em>Two-pane WM with live PTY terminals, ANSI colours, pane-number badges,</em><br/>
+  <em>Phase 5 modals (Secret / Choice / Wizard / Progress / AuthFailure), hardened PTY test cleanup.</em>
+</p>
+
+---
+
+> **— blumi · sign-off**
+>
+> I built cyberdeck because the uconsole is the kind of machine that
+> earns a *place* in your life, not just a spot on a desk. You carry it.
+> You lean on it. You start to type on it before you realise you're
+> reaching for it. And one day you notice you're working around its
+> UI instead of *in* it.
+>
+> That was me. `nmcli` in one pane, `pactl` in another, a half-broken
+> conky overlay, a tmux session I kept re-arranging. I wanted a single
+> surface where the OS-level stuff lived — network, audio, BT, services,
+> power, display — and where I could pop a terminal next to it and not
+> fight a tiling WM to get the layout I actually wanted.
+>
+> So I wrote cyberdeck. A sidebar with 13 screens, a live header that
+> tells me what's actually happening on the box right now, a command
+> palette so I don't have to memorise the keymap, a toast log so I know
+> what just succeeded or failed without scrolling back. And a real
+> window manager on top — splits, focus jumps, live `$SHELL` panes with
+> ANSI colours — because if you're going to live in a TUI you deserve
+> one that splits.
+>
+> Then a web bridge, because half the time I'm SSH'd in from my laptop
+> and I want the same view in a browser tab. Bearer token on the door,
+> JSON API underneath, WebSocket streaming the live state.
+>
+> It's not a product. It's the interface I wanted for myself, written
+> in the language that lets me sleep at night (Rust, no `unsafe`, no
+> surprise allocations), packaged so others who own the funny little
+> uconsole can use it too.
+>
+> If you're reading this on GitHub — hi. If you find a bug, file it.
+> If you want a screen it doesn't have yet, build it. The screens are
+> small and the patterns are consistent.
+>
+> *— blumi*
+
+---
+
+## What it is
+
 A rich TUI + LAN web UI for OS-level control of a single-board computer —
 designed for the **ClockworkPi uconsole** (aarch64, Debian 13 trixie,
 NetworkManager, systemd, thermals via `/sys/class/thermal`).
@@ -24,13 +77,57 @@ NetworkManager, systemd, thermals via `/sys/class/thermal`).
   log. Live header shows clock, CPU/mem/disk gauges, active SSID,
   Bluetooth status, battery %. Privilege-aware: most reads work unprivileged,
   writes that need root are gated. **Window manager** for splitting panes,
-  live PTY terminals with ANSI colours, and pane-number badges for
-  one-keystroke focus jumps.
+  live PTY terminals with ANSI colours, pane-number badges, Phase 5 modals
+  (Secret/Choice/Wizard/Progress/AuthFailure), hardened PTY test cleanup.
 
 - **`cyberdeck-web`** — axum 0.7 server (JSON API + WebSocket + static HTML).
   Optional bearer-token auth (random 16-byte token printed to stdout on
   start). Can run **standalone** (no TUI, just a headless server) or be
   **embedded** in the TUI via the `--web` flag.
+
+## Screenshots
+
+Drop your photos into [`docs/photos/`](./docs/photos/) at the slots named
+in [`docs/photos/README.md`](./docs/photos/README.md) and they'll be
+referenced here automatically. Suggested shots:
+
+1. The launcher / sidebar (one of the 13 screens).
+2. A live terminal pane next to a status screen — WM working.
+3. A modal in flight (Secret / Choice / Wizard / Progress / AuthFailure).
+4. The web UI in a browser tab.
+
+```
+[photo-01.jpg]  [photo-02.jpg]  [photo-03.jpg]  [photo-04.jpg]
+```
+
+A small ASCII fallback (for terminals that don't render Markdown
+images):
+
+```
+cyberdeck-tui on uconsole (Debian 13 trixie, aarch64)
+┌─ cyberdeck ─────────────────────────────────────────────────────┐
+│ 14:02:11  CPU 2.4GHz 38°C  MEM 1.2/4G  BAT 71%  ssid home-5g │
+├──────────┬─────────────────────────────────────────────────────┤
+│ System   │  ▸ uptime 4d  load 0.42 0.31 0.27                   │
+│ Network  │  ▸ /dev/mmcblk0  rootfs  12G/29G (44%)              │
+│ BT       │  ▸ /dev/mmcblk1  data   89G/128G (73%)              │
+│ Power    │  ▸ governor: schedutil  thermals 38°C                │
+│ Display  │  ▸ nmcli dev wifi  →  home-5g  10.0.0.42/24         │
+│ Audio    │  ▸ pactl sinks: alsa_output.pci-0000_… (vol 70%)     │
+│ Storage  │  ▸ bluetoothctl  →  paired: 1   discovered: 0       │
+│ Services │                                                       │
+│ Packages │                                                       │
+│ Processes│  [1] ── 13 screens                                  │
+│ Logs     │  [?] ── help        [:] ── palette      [q] ── quit  │
+│ Files    │                                                       │
+│ Settings │                                                       │
+├──────────┴─────────────────────────────────────────────────────┤
+│ 2 toasts · 0 errors · focus: pane 1   Ctrl-W split, ^P palette │
+└────────────────────────────────────────────────────────────────┘
+```
+
+> See [`docs/wiki/Photos.md`](./docs/wiki/Photos.md) for the full
+> numbered photo index.
 
 ## Install (one-liner)
 
@@ -172,6 +269,9 @@ Terminal pane titles show `[N] terminal` (the badge); built-in pane
 titles are still rendered by each `Screen::render` and don't yet show
 the badge — that's filed as a follow-up in `ROADMAP.md`.
 
+For the full per-screen keymap (incl. uconsole-specific), see
+[`docs/wiki/Keymaps.md`](./docs/wiki/Keymaps.md).
+
 ## HTTP API
 
 All routes are under `/api/`. GETs are reads, POSTs are actions. Bodies are
@@ -198,7 +298,7 @@ JSON. Errors are `{"error": "<message>"}` with an appropriate status code.
 | GET    | `/api/packages/upgradable`          | list of upgradable apt packages            |
 | POST   | `/api/packages/search`              | `{"query": "vim"}`                         |
 | POST   | `/api/packages/install`             | `{"name": "vim"}`                          |
-| POST   | `/api/packages/remove`              | `{"name": "vim"}`                          |
+| POST   | `/api/packages/remove`              | `{"name": "vim"}`                           |
 | POST   | `/api/packages/update`              | `apt update`                               |
 | POST   | `/api/packages/upgrade`             | `apt upgrade -y`                           |
 | GET    | `/api/processes`                    | top by CPU                                 |
@@ -263,12 +363,88 @@ sudo chmod 440 /etc/sudoers.d/cyberdeck
   own and never touches the network — it just shells out. The web crate
   has no system-level authority; everything it does goes through `core`.
 
+## Hardening (no-hang PTY tests)
+
+Every PTY-touching test in `crates/tui/src/wm/` is wrapped so it can
+**never outlive its PTY child**:
+
+- **`Pattern A`** (broadcaster + window tests): clone a `ChildKiller`
+  kill-switch into the test, wrap the work in
+  `tokio::time::timeout(Duration::from_secs(2), …)`, and `kill()` the
+  child on early return.
+- **`Pattern B`** (raw `pty.rs::write_and_read_roundtrip`): `kill()` the
+  child, `try_wait()` it, then spawn a thread that owns the `wait()` and
+  is **dropped on scope exit** — so the test thread never blocks on
+  `wait()`.
+
+Result: even if `portable_pty` wedges inside a `wait()`, the bounded
+timeout returns, the child is `kill()`-ed, and the next test gets a fresh
+PTY allocation. The full suite finishes in ~1 s instead of hanging.
+
+Coverage:
+
+| Test | Hardening |
+| --- | --- |
+| `wm::broadcaster::tests::roundtrip_echo_via_broadcaster` | Pattern A — kill-switch clone + `tokio::time::timeout(2s)` |
+| `wm::broadcaster::tests::echo_emits_into_ansi_grid` | Pattern A — kill-switch clone + `tokio::time::timeout(2s)` |
+| `wm::window::tests::terminal_window_holds_grid_and_resizes` | Pattern A — kill-switch clone + `tokio::time::timeout(2s)` |
+| `wm::pty::tests::write_and_read_roundtrip` | Pattern B — `kill()` + `try_wait()` + thread-spawned `wait()` + drop-on-scope |
+| `wm::pty::tests::spawn_and_read` | already safe — `/bin/sh -c "printf …"` exits on its own |
+
 ## Roadmap
 
 See [`ROADMAP.md`](./ROADMAP.md). Phase 3 (window manager) is shipped;
 Phase 4 polish is in progress — pane number badges (done), per-pane
-scrollback, shell + cwd persistence, and layout presets are next.
+scrollback, shell + cwd persistence, layout presets, and `docs/wiki/`
+fleshing-out are next.
+
+## Wiki
+
+The wiki lives under [`docs/wiki/`](./docs/wiki/) and mirrors the GitHub
+wiki structure. Start at [`docs/wiki/Home.md`](./docs/wiki/Home.md).
+
+| Page | What it covers |
+| --- | --- |
+| [Home](./docs/wiki/Home.md) | Index + "where to start" |
+| [Architecture](./docs/wiki/Architecture.md) | Crate map, action flow, single-source-of-truth model |
+| [Phase 1 — TUI](./docs/wiki/Phase-1-TUI.md) | Screens, sidebar, command palette, toast log |
+| [Phase 2 — PTY / ANSI](./docs/wiki/Phase-2-PTY-ANSI.md) | `wm/pty.rs`, `wm/ansi.rs`, `wm/broadcaster.rs` |
+| [Phase 3 — Window manager](./docs/wiki/Phase-3-WM.md) | Split tree, focus, jumps, terminal panes |
+| [Phase 4 — Polish](./docs/wiki/Phase-4-Polish.md) | Pane-number badges, scrollback, persistence |
+| [Phase 5 — Modal upgrade](./docs/wiki/Phase-5-Modals.md) | Secret / Choice / Wizard / Progress / AuthFailure |
+| [Hardening](./docs/wiki/Hardening.md) | No-hang PTY tests (Patterns A + B) |
+| [Keymaps](./docs/wiki/Keymaps.md) | Global, WM, per-screen, uconsole-specific |
+| [Hardware / Setup](./docs/wiki/Hardware-Setup.md) | ClockworkPi uconsole on Debian 13 trixie |
+| [Photos](./docs/wiki/Photos.md) | Numbered photo index (drop into `docs/photos/`) |
+| [Roadmap](./docs/wiki/Roadmap.md) | Phases, in-progress, follow-ups |
 
 ## License
 
 MIT.
+
+---
+
+<p align="center">
+  <sub>
+    <strong>tags</strong> ·
+    <code>clockworkpi</code> ·
+    <code>uconsole</code> ·
+    <code>aarch64</code> ·
+    <code>debian</code> ·
+    <code>trixie</code> ·
+    <code>cyberdeck</code> ·
+    <code>tui</code> ·
+    <code>ratatui</code> ·
+    <code>axum</code> ·
+    <code>systemd</code> ·
+    <code>rust</code> ·
+    <code>portable-pty</code> ·
+    <code>vte</code> ·
+    <code>crossterm</code> ·
+    <code>single-board-computer</code>
+  </sub>
+</p>
+
+<p align="center">
+  <sub>— blumi · built for myself, packaged for you</sub>
+</p>
