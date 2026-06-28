@@ -241,6 +241,12 @@ mod tests {
         // Spawn `cat` so whatever we send comes back.
         let cmd = CommandBuilder::new("/bin/cat");
         let pty = Pty::spawn(cmd, 24, 80).expect("spawn cat");
+        // Keep a clone so we can kill the child ourselves — without this,
+        // dropping `writer` + aborting the worker can leak the master fd and
+        // leave `/bin/cat` running, which on a busy dev box exhausts
+        // `devpts` and makes subsequent broadcaster tests deadlock waiting
+        // for a free PTY (see Makefile's `clean-test-hang`).
+        let kill_switch = pty.clone();
         let (out, writer, tasks) = spawn(pty);
 
         let mut rx = out.subscribe();
@@ -260,11 +266,18 @@ mod tests {
             String::from_utf8_lossy(&got)
         );
 
-        // Drop the writer — the worker should notice and drain+exit.
+        // Tear down in order: close the write side, abort the worker, then
+        // forcibly kill the child and wait for it. Bounded by a timeout so a
+        // wedged `portable_pty` can't pin the whole test binary.
         drop(writer);
-        // Give it a moment to notice the disconnect.
         tokio::time::sleep(Duration::from_millis(50)).await;
         tasks.worker.abort();
+        let _ = kill_switch.kill();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || kill_switch.wait()),
+        )
+        .await;
         drop(out);
     }
 
@@ -278,6 +291,10 @@ mod tests {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", "printf 'hello\\nworld\\n'"]);
         let pty = Pty::spawn(cmd, 24, 80).expect("spawn sh");
+        // Hold a clone so we can kill the child even if the worker is aborted
+        // mid-drain — otherwise `/bin/sh` may linger and exhaust `devpts`
+        // for subsequent tests (see `roundtrip_echo_via_broadcaster`).
+        let kill_switch = pty.clone();
         let (out, _writer, tasks) = spawn(pty);
 
         let mut rx = out.subscribe();
@@ -290,6 +307,12 @@ mod tests {
         }
 
         tasks.worker.abort();
+        let _ = kill_switch.kill();
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || kill_switch.wait()),
+        )
+        .await;
         drop(_writer);
         drop(out);
 

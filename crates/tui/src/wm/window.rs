@@ -256,12 +256,17 @@ mod tests {
         assert_eq!(w.last_cols, 0);
     }
 
-    #[test]
-    fn terminal_window_holds_grid_and_resizes() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_window_holds_grid_and_resizes() {
         let cmd = CommandBuilder::new("/bin/cat");
         let pty = Pty::spawn(cmd, 24, 80).expect("spawn cat");
-        let (out, writer, _tasks) = crate::wm::broadcaster::spawn(pty.clone());
-        let mut w = Window::terminal(PaneId(1), pty.clone(), out, writer, 24, 80);
+        // Hold a clone as a kill switch — without this, the broadcast
+        // worker holding the other Pty can leave /bin/cat running after
+        // the test returns, exhausting devpts for subsequent runs
+        // (see wm::broadcaster::tests::roundtrip_echo_via_broadcaster).
+        let kill_switch = pty.clone();
+        let (out, writer, tasks) = crate::wm::broadcaster::spawn(pty);
+        let mut w = Window::terminal(PaneId(1), kill_switch.clone(), out, writer, 24, 80);
         assert!(w.is_terminal());
         // Resize to a smaller grid; the grid should now be 10×20.
         w.resize(10, 20);
@@ -270,7 +275,18 @@ mod tests {
         // Resize to the same size → no-op (idempotent).
         w.resize(10, 20);
         assert_eq!(w.last_rows, 10);
-        let _ = pty.kill();
+
+        // Tear down: drop the window (releases its PTY handle + writer),
+        // abort the broadcaster worker, then forcibly kill the child and
+        // bounded-wait so a wedged portable_pty can't pin the suite.
+        drop(w);
+        tasks.worker.abort();
+        let _ = kill_switch.kill();
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || kill_switch.wait()),
+        )
+        .await;
     }
 
     #[test]

@@ -220,6 +220,23 @@ mod tests {
         }
         let s = String::from_utf8_lossy(&got);
         assert!(s.contains("ping"), "got: {s:?}");
+
+        // `/bin/cat` never exits on its own — kill it, then bounded-wait so
+        // a wedged portable_pty can't pin the test binary. Without this, a
+        // leaked cat child keeps the master fd open and exhausts devpts for
+        // subsequent tests (the same hang pattern the broadcaster fix
+        // addresses for `multi_thread` tests).
         pty.kill().ok();
+        let _ = pty.try_wait();
+        // Bound the reaper wait: portable_pty's `wait()` blocks until the
+        // child is reaped, which normally happens instantly after kill. If
+        // it doesn't, we drop `pty` and move on — the OS will reap.
+        let pty_for_wait = pty.clone();
+        let join = std::thread::spawn(move || pty_for_wait.wait());
+        // We can't actually time-bound a std::thread::join, but the
+        // outer test runner will detect the hang if it ever happens; the
+        // important property is that `pty` is dropped at scope end, which
+        // releases the master fd regardless of whether `wait` returned.
+        let _ = join.join();
     }
 }
