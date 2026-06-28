@@ -229,6 +229,11 @@ pub struct App {
     /// True when the sidebar (screen list) has focus. Tab toggles this.
     /// While false, key events are forwarded into the focused pane.
     pub sidebar_focused: bool,
+    /// Cursor position in the sidebar list (0-based index into ScreenId::ALL).
+    /// Distinct from `current` so the user can navigate before committing
+    /// with Enter. `current` is what's actually rendered in the content
+    /// pane; `sidebar_idx` is what's highlighted in the menu.
+    pub sidebar_idx: usize,
     /// `Ctrl-W` is a two-key sequence. This is set after the first key and
     /// consumed on the second. Cleared automatically if the second key isn't
     /// a known verb.
@@ -287,6 +292,7 @@ impl App {
             manager: crate::wm::manager::Manager::new(ScreenId::System),
             modal: Modal::None,
             sidebar_focused: true,
+            sidebar_idx: 0,
             wm_pending: false,
             palette_buf: String::new(),
             palette_idx: 0,

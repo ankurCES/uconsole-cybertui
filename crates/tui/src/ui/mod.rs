@@ -89,34 +89,50 @@ pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         .iter()
         .enumerate()
         .map(|(i, id)| {
-            let selected = *id == app.current;
-            let prefix = if selected { g().arrow } else { " " };
+            // The sidebar cursor (`sidebar_idx`) is what's highlighted.
+            // `app.current` is what's actually rendered in the content
+            // pane; we mark it with the arrow so the user can see the
+            // gap between cursor and active screen (a typical menu
+            // affordance: preview-before-commit).
+            let active = *id == app.current;
+            let cursor = i == app.sidebar_idx;
+            let prefix = if active { g().arrow } else { " " };
             let num = format!("{:>2}", i + 1);
             let label = id.label();
             let glyph = id.glyph();
+            // Style precedence: cursor (focused sidebar) > active
+            // (current screen) > dim. Cursor gets a selection bg; active
+            // gets bold + accent.
+            let (prefix_style, label_style) = if cursor {
+                (
+                    ratatui::style::Style::default()
+                        .fg(theme.selection_fg)
+                        .bg(theme.selection_bg)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                    ratatui::style::Style::default()
+                        .fg(theme.selection_fg)
+                        .bg(theme.selection_bg),
+                )
+            } else if active {
+                (
+                    ratatui::style::Style::default()
+                        .fg(theme.accent)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                    ratatui::style::Style::default()
+                        .fg(theme.fg)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                )
+            } else {
+                (
+                    ratatui::style::Style::default().fg(theme.dim),
+                    ratatui::style::Style::default().fg(theme.fg),
+                )
+            };
             let line = Line::from(vec![
-                Span::styled(
-                    format!("{prefix} "),
-                    if selected {
-                        ratatui::style::Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(ratatui::style::Modifier::BOLD)
-                    } else {
-                        ratatui::style::Style::default().fg(theme.dim)
-                    },
-                ),
+                Span::styled(format!("{prefix} "), prefix_style),
                 Span::styled(format!("{num} "), theme.dim()),
                 Span::styled(format!("{glyph} "), theme.accent),
-                Span::styled(
-                    label.to_string(),
-                    if selected {
-                        ratatui::style::Style::default()
-                            .fg(theme.fg)
-                            .add_modifier(ratatui::style::Modifier::BOLD)
-                    } else {
-                        ratatui::style::Style::default().fg(theme.fg)
-                    },
-                ),
+                Span::styled(label.to_string(), label_style),
             ]);
             ListItem::new(line)
         })

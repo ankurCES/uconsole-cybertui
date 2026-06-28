@@ -613,16 +613,98 @@ async fn handle_key(
             app.palette_buf.clear();
             app.palette_idx = 0;
         }
-        Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::System,
-        Char('2') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Network,
-        Char('3') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Bluetooth,
-        Char('4') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Power,
-        Char('5') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Display,
-        Char('6') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Audio,
-        Char('7') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Storage,
-        Char('8') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Services,
-        Char('9') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Packages,
-        Char('0') if !key.modifiers.contains(KeyModifiers::CONTROL) => app.current = ScreenId::Settings,
+        // Sidebar navigation. Only active while `sidebar_focused` is true;
+        // otherwise these keys (Up/Down/k/j/Enter) belong to the focused
+        // pane. Up/Down (and k/j) move the sidebar cursor; Enter commits
+        // it as the current screen; Tab and Right (and l) hand focus back
+        // to the content pane; Esc cancels (back to content, leaving
+        // current screen unchanged).
+        Up | Char('k') if app.sidebar_focused => {
+            if app.sidebar_idx == 0 {
+                app.sidebar_idx = ScreenId::ALL.len() - 1;
+            } else {
+                app.sidebar_idx -= 1;
+            }
+            return false;
+        }
+        Down | Char('j') if app.sidebar_focused => {
+            app.sidebar_idx = (app.sidebar_idx + 1) % ScreenId::ALL.len();
+            return false;
+        }
+        Enter if app.sidebar_focused => {
+            if let Some(id) = ScreenId::ALL.get(app.sidebar_idx) {
+                app.current = *id;
+            }
+            return false;
+        }
+        Tab | Right | Char('l') if app.sidebar_focused => {
+            app.sidebar_focused = false;
+            return false;
+        }
+        Esc if app.sidebar_focused => {
+            app.sidebar_focused = false;
+            return false;
+        }
+        Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 0.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::System;
+        }
+        Char('2') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 1.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Network;
+        }
+        Char('3') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 2.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Bluetooth;
+        }
+        Char('4') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 3.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Power;
+        }
+        Char('5') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 4.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Display;
+        }
+        Char('6') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 5.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Audio;
+        }
+        Char('7') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 6.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Storage;
+        }
+        Char('8') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 7.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Services;
+        }
+        Char('9') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 8.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Packages;
+        }
+        Char('0') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if app.sidebar_focused {
+                app.sidebar_idx = 9.min(ScreenId::ALL.len() - 1);
+            }
+            app.current = ScreenId::Settings;
+        }
         // Ctrl-W keymap. Vim/tmux style. Two-key sequences: the first
         // key sets `wm_pending`, the second is consumed if it matches
         // a known verb. Anything else clears the pending state.
@@ -1184,5 +1266,184 @@ mod tests {
             msg.contains("pane limit reached") && msg.contains(&Manager::MAX_PANES.to_string()),
             "got toast: {msg}"
         );
+    }
+
+    // ---- Sidebar navigation regression tests ---------------------------
+    //
+    // The sidebar (screen list) is the TUI's main menu. The bugs these
+    // tests guard:
+    //   - Up/Down (and k/j) must move a cursor independently of
+    //     `app.current` so the user can preview before committing.
+    //   - Enter must commit the cursor as the new current screen.
+    //   - Tab/Right/l and Esc must hand focus back to the content pane
+    //     without changing `current`.
+    //   - These keys must NOT fire while the content pane is focused,
+    //     otherwise scrolling the System/Network lists breaks.
+
+    fn fresh_app_with_sidebar_focus() -> App {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.sidebar_focused = true;
+        app.sidebar_idx = 0;
+        app
+    }
+
+    #[test]
+    fn sidebar_down_moves_cursor_wrapping() {
+        let mut app = fresh_app_with_sidebar_focus();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            // Start at 0. Press Down twice.
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            )
+            .await;
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.sidebar_idx, 2);
+        // current should not change from Down alone.
+        assert_eq!(app.current, ScreenId::System);
+    }
+
+    #[test]
+    fn sidebar_up_wraps_to_last() {
+        let mut app = fresh_app_with_sidebar_focus();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        // Up from 0 wraps to last.
+        assert_eq!(app.sidebar_idx, ScreenId::ALL.len() - 1);
+    }
+
+    #[test]
+    fn sidebar_j_k_navigate() {
+        let mut app = fresh_app_with_sidebar_focus();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            // j = Down.
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            )
+            .await;
+            // k = Up, returns to 0.
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.sidebar_idx, 0);
+    }
+
+    #[test]
+    fn sidebar_enter_commits_cursor() {
+        let mut app = fresh_app_with_sidebar_focus();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        // Move cursor to row 4 (Display, 0-indexed).
+        app.sidebar_idx = 4;
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.current, ScreenId::Display);
+    }
+
+    #[test]
+    fn sidebar_tab_returns_focus_without_changing_current() {
+        let mut app = fresh_app_with_sidebar_focus();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let before = app.current;
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert!(!app.sidebar_focused, "Tab should drop sidebar focus");
+        assert_eq!(app.current, before);
+    }
+
+    #[test]
+    fn sidebar_keys_do_not_fire_when_content_focused() {
+        // Content-focused (sidebar_focused=false): Up/Down/Enter must NOT
+        // mutate the sidebar cursor. Otherwise the focused pane's own
+        // list navigation breaks.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.sidebar_focused = false;
+        let mut screens = build_screens();
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx2,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            )
+            .await;
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx2,
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.sidebar_idx, 0, "Down must not move sidebar cursor when content focused");
+        assert_eq!(app.current, ScreenId::System, "Enter must not change current when content focused");
+    }
+
+    #[test]
+    fn number_keys_when_sidebar_focused_move_cursor_to_that_row() {
+        let mut app = fresh_app_with_sidebar_focus();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            // Press '5'. Sidebar cursor should land on row 4 (Display),
+            // and current should switch to Display.
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.sidebar_idx, 4);
+        assert_eq!(app.current, ScreenId::Display);
     }
 }
