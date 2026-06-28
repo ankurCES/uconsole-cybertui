@@ -12,6 +12,7 @@
 
 pub mod ansi;
 pub mod broadcaster;
+pub mod input;
 pub mod keymap;
 pub mod manager;
 pub mod pty;

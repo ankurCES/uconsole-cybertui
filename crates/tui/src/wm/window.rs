@@ -110,6 +110,12 @@ impl Window {
         self.terminal.is_some()
     }
 
+    /// Mutable access to the terminal state, if any. Used by the
+    /// input path.
+    pub fn terminal_mut(&mut self) -> Option<&mut TerminalState> {
+        self.terminal.as_mut()
+    }
+
     /// Drain any pending bytes from the broadcaster into the ANSI parser.
     /// `Lagged` errors are swallowed: the next paint will use whatever the
     /// grid currently holds.

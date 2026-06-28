@@ -623,20 +623,139 @@ async fn handle_key(
         Char('8') => app.current = ScreenId::Services,
         Char('9') => app.current = ScreenId::Packages,
         Char('0') => app.current = ScreenId::Settings,
+        // Ctrl-W keymap. Vim/tmux style. Two-key sequences: the first
+        // key sets `wm_pending`, the second is consumed if it matches
+        // a known verb. Anything else clears the pending state.
+        Char('w') | Char('W') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.wm_pending = true;
+        }
+        _ if app.wm_pending => {
+            app.wm_pending = false;
+            match key.code {
+                KeyCode::Char('h') | KeyCode::Left => {
+                    let _ = app.manager.focus_neighbor(
+                        crate::wm::tree::FocusDir::Left,
+                    );
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    let _ = app.manager.focus_neighbor(
+                        crate::wm::tree::FocusDir::Down,
+                    );
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    let _ = app.manager.focus_neighbor(
+                        crate::wm::tree::FocusDir::Up,
+                    );
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    let _ = app.manager.focus_neighbor(
+                        crate::wm::tree::FocusDir::Right,
+                    );
+                }
+                KeyCode::Char('v') => {
+                    let _ = app.manager.split_focused(
+                        crate::wm::tree::SplitDir::Vertical,
+                        50,
+                        app.current,
+                    );
+                }
+                KeyCode::Char('s') => {
+                    let _ = app.manager.split_focused(
+                        crate::wm::tree::SplitDir::Horizontal,
+                        50,
+                        app.current,
+                    );
+                }
+                KeyCode::Char('n') => {
+                    // Spawn $SHELL in the focused pane. If the pane
+                    // is already a terminal, this is a no-op (we
+                    // don't open nested shells for v0).
+                    use portable_pty::CommandBuilder;
+                    let mut cmd = CommandBuilder::new(
+                        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                    );
+                    cmd.cwd(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")));
+                    match crate::wm::pty::Pty::spawn(cmd, 24, 80) {
+                        Ok(pty) => {
+                            // Spawn a second PTY for the Window — the
+                            // broadcaster takes ownership of the first
+                            // one, and the Window needs its own handle
+                            // to call `resize`/`kill`.
+                            let (out, writer, _tasks) =
+                                crate::wm::broadcaster::spawn(pty);
+                            let second_pty = match crate::wm::pty::Pty::spawn(
+                                CommandBuilder::new(
+                                    std::env::var("SHELL")
+                                        .unwrap_or_else(|_| "/bin/sh".into()),
+                                ),
+                                24,
+                                80,
+                            ) {
+                                Ok(p) => p,
+                                Err(_) => return false,
+                            };
+                            let prev = app.manager.replace_focused_with_terminal(
+                                second_pty,
+                                out,
+                                writer,
+                            );
+                            if let Some(prev) = prev {
+                                let _ = app.push_toast(
+                                    crate::app::toast::ToastKind::Info,
+                                    format!("pane → terminal (was {})", prev.label()),
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            let _ = app.push_toast(
+                                crate::app::toast::ToastKind::Error,
+                                format!("spawn: {e}"),
+                            );
+                        }
+                    }
+                }
+                KeyCode::Char('q') | KeyCode::Char('x') => {
+                    let _ = app.manager.close_focused();
+                }
+                KeyCode::Char('=') | KeyCode::Char('+') => {
+                    let _ = app.manager.resize_focused(
+                        crate::wm::tree::SplitDir::Horizontal,
+                        5,
+                    );
+                }
+                KeyCode::Char('-') => {
+                    let _ = app.manager.resize_focused(
+                        crate::wm::tree::SplitDir::Horizontal,
+                        -5,
+                    );
+                }
+                _ => {}
+            }
+        }
         Tab => {
             app.sidebar_focused = !app.sidebar_focused;
         }
         _ => {
-            // Forward to the focused pane. If the focused pane is a
-            // built-in screen, find it in `screens` and call on_key.
-            // (If it's a terminal pane, the key goes to the PTY in
-            // Task 2.5 — out of scope for this commit.)
+            // Forward to the focused pane (built-in screen OR terminal).
             let focused_id = app.manager.focused();
             if let Some(w) = app.manager.window(focused_id) {
-                if let crate::wm::window::WindowKind::Builtin(sid) = w.kind {
-                    if let Some(s) = screens.iter_mut().find(|s| s.id() == sid) {
-                        if s.on_key(key, app) {
-                            return false;
+                match w.kind {
+                    crate::wm::window::WindowKind::Builtin(sid) => {
+                        if let Some(s) = screens.iter_mut().find(|s| s.id() == sid) {
+                            if s.on_key(key, app) {
+                                return false;
+                            }
+                        }
+                    }
+                    crate::wm::window::WindowKind::Terminal => {
+                        if let Some(bytes) =
+                            crate::wm::input::bytes_for_key(&key)
+                        {
+                            if let Some(w) = app.manager.window_mut(focused_id) {
+                                if let Some(term) = w.terminal_mut() {
+                                    let _ = term.writer.try_send(bytes);
+                                }
+                            }
                         }
                     }
                 }

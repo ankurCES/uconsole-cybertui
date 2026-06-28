@@ -49,6 +49,20 @@ impl Manager {
     pub fn window(&self, id: PaneId) -> Option<&Window> { self.windows.get(&id) }
     pub fn window_mut(&mut self, id: PaneId) -> Option<&mut Window> { self.windows.get_mut(&id) }
 
+    /// Resize the split that contains the focused pane by `delta`
+    /// percentage points. Walks the tree once. Returns true if a
+    /// split was found and resized.
+    pub fn resize_focused(&mut self, dir: SplitDir, delta: i16) -> bool {
+        self.tree.resize(self.focused, dir, delta)
+    }
+
+    /// Borrow the terminal state of the focused pane, if any. Used
+    /// by the input path to push bytes into the child's PTY.
+    pub fn focused_terminal_mut(&mut self) -> Option<&mut crate::wm::window::TerminalState> {
+        let id = self.focused;
+        self.windows.get_mut(&id)?.terminal_mut()
+    }
+
     pub fn pane_ids(&self) -> Vec<PaneId> { self.tree.leaves() }
 
     /// Split the focused leaf, opening a new built-in screen on the
