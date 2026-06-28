@@ -13,6 +13,10 @@ pub enum Action {
     Key(KeyEvent),
     /// Switch to a screen (also triggered by the sidebar and the palette).
     Goto(crate::app::screen::ScreenId),
+    /// Cycle to the next/previous screen, skipping any screen whose
+    /// `Screen::is_hidden` returns true. Mirrors orbital's
+    /// Tab/Shift-Tab widget navigation with hidden-widget skipping.
+    CycleScreen(bool),
     /// Quit the app cleanly.
     Quit,
     /// Push a toast from a background task (success/error of a long action).

@@ -979,6 +979,14 @@ async fn handle_key(
             app.sidebar_focused = false;
             return false;
         }
+        // Tab / Shift-Tab screen cycling (orbital-style hidden-widget skip).
+        // Only fires when content is focused and no modal is open, so it
+        // never steals Tab from inputs or the sidebar branch above.
+        Tab | BackTab if !app.sidebar_focused && matches!(app.modal, Modal::None) => {
+            let forward = matches!(key.code, KeyCode::Tab);
+            let _ = tx.send(Action::CycleScreen(forward)).await;
+            return false;
+        }
         Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::System, 0),
         Char('2') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Network, 1),
         Char('3') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Bluetooth, 2),
@@ -1272,6 +1280,13 @@ async fn handle_action(
         Action::Key(_) => {}
         Action::Goto(id) => {
             app.current = id;
+        }
+        Action::CycleScreen(forward) => {
+            // Tab / Shift-Tab stepping. Mirrors orbital's
+            // Tab/Shift-Tab widget navigation with hidden-widget
+            // skipping: `Screen::is_hidden(&app) -> bool` defaults to
+            // false so every screen is reachable unless it opts out.
+            app.current = ScreenId::cycle(&*screens, app, app.current, forward);
         }
         Action::Quit => return true,
         Action::Toast(kind, msg) => app.push_toast(kind, msg),
