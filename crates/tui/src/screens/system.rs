@@ -1,8 +1,9 @@
 //! System screen: live values driven by the background refresh task.
 
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::screen::{Screen, ScreenId};
@@ -20,6 +21,39 @@ impl Screen for SystemScreen {
         "System Status"
     }
 
+    fn on_key(&mut self, key: KeyEvent, app: &mut App) -> bool {
+        match key.code {
+            KeyCode::Char('j') | KeyCode::Down => {
+                // Scroll the right-hand log pane down (away from the tail).
+                app.system_log_offset = app.system_log_offset.saturating_add(1);
+                return true;
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                app.system_log_offset = app.system_log_offset.saturating_sub(1);
+                return true;
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                app.system_log_offset = app.system_log_offset.saturating_add(10);
+                return true;
+            }
+            KeyCode::PageUp => {
+                app.system_log_offset = app.system_log_offset.saturating_sub(10);
+                return true;
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                // g = jump to top of log (oldest).
+                app.system_log_offset = usize::MAX;
+                return true;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                // G = jump back to live tail.
+                app.system_log_offset = 0;
+                return true;
+            }
+            _ => return false,
+        }
+    }
+
     fn render(&mut self, f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focus: bool) {
         let block = Block::default()
             .title(Span::styled(" System ", theme.title()))
@@ -28,11 +62,19 @@ impl Screen for SystemScreen {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        // Reserve bottom row for hints.
+        let body_area = Rect::new(
+            inner.x,
+            inner.y,
+            inner.width,
+            inner.height.saturating_sub(1),
+        );
+
         // Two columns: facts left, recent log right.
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(inner);
+            .split(body_area);
 
         // Left: facts. Read live data; fall back to placeholder if not ready.
         let g = glyphs();
@@ -131,34 +173,93 @@ impl Screen for SystemScreen {
             theme.dim(),
         )));
 
+        // Wrap so long fields (CPU model) stay inside the column.
         let left = Paragraph::new(lines)
             .block(
                 Block::default()
                     .borders(Borders::RIGHT)
                     .border_style(theme.border(false)),
             )
+            .wrap(Wrap { trim: false })
             .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
         f.render_widget(left, cols[0]);
 
-        // Right: latest log lines.
-        let recent: Vec<ListItem> = app
-            .logs
-            .iter()
-            .rev()
-            .take(20)
-            .map(|l| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" {} ", l.ts.format("%H:%M:%S")), theme.dim()),
-                    Span::styled(l.line.clone(), theme.fg),
-                ]))
-            })
-            .collect();
-        let right = List::new(recent).block(
-            Block::default()
-                .title(Span::styled(" recent log ", theme.title()))
-                .borders(Borders::NONE),
+        // Right: latest log lines. `system_log_offset` counts lines back
+        // from the tail (0 == newest). Cap so we never scroll past the
+        // oldest entry, even when the user holds PageDown.
+        let right_area = cols[1];
+        let visible_h = right_area.height as usize;
+        let total = app.logs.len();
+        let max_off = total.saturating_sub(visible_h);
+        if app.system_log_offset > max_off {
+            app.system_log_offset = max_off;
+        }
+        let end = total.saturating_sub(app.system_log_offset);
+        let start = end.saturating_sub(visible_h);
+        // We want newest at the bottom of the slice (most recent visible).
+        let recent: Vec<ListItem> = if total == 0 {
+            vec![ListItem::new(Line::from(Span::styled(
+                "  (no log lines yet)",
+                theme.dim(),
+            )))]
+        } else {
+            app.logs[start..end]
+                .iter()
+                .map(|l| {
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!(" {} ", l.ts.format("%H:%M:%S")), theme.dim()),
+                        Span::styled(l.line.clone(), theme.fg),
+                    ]))
+                })
+                .collect()
+        };
+        let highlight = if total == 0 {
+            None
+        } else {
+            Some(recent.len().saturating_sub(1))
+        };
+        let mut state = ListState::default().with_selected(highlight);
+        let right = List::new(recent)
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        format!(
+                            " recent log ({}/{}) ",
+                            end,
+                            total
+                        ),
+                        theme.title(),
+                    ))
+                    .borders(Borders::NONE),
+            )
+            .highlight_style(
+                ratatui::style::Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg),
+            )
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(right, right_area, &mut state);
+
+        let mode = if app.system_log_offset == 0 {
+            "  ● live (j/k step, PgUp/PgDn page, G to live)"
+        } else {
+            "  ⏸ paused — press G to jump back to live tail"
+        };
+        let hints = Paragraph::new(Line::from(vec![
+            Span::styled(mode, theme.dim()),
+            Span::raw("  "),
+            Span::styled(" r ", theme.key()),
+            Span::styled("refresh  ", theme.dim()),
+            Span::styled(" ? ", theme.key()),
+            Span::styled("help", theme.dim()),
+        ]));
+        let hint_area = Rect::new(
+            inner.x,
+            inner.y + inner.height.saturating_sub(1),
+            inner.width,
+            1,
         );
-        f.render_widget(right, cols[1]);
+        f.render_widget(hints, hint_area);
     }
 }
 
@@ -169,7 +270,3 @@ fn trim(s: &str, n: usize) -> String {
         format!("{}…", &s[..n])
     }
 }
-
-// Suppress the unused-import warning for Wrap (kept for future paragraphs that wrap).
-#[allow(dead_code)]
-fn _wrap_import(_: Wrap) {}

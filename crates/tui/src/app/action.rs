@@ -30,6 +30,13 @@ pub enum Action {
     LogPushed(crate::app::LogLine),
     /// Live refresh of a specific resource (manual `r` press).
     Refresh(crate::app::screen::ScreenId),
+    /// Result of a Wi-Fi scan. Written into `app.wifi_scan_results` so the
+    /// right pane can render the networks on the next frame.
+    WifiScanResult(Vec<cyberdeck_core::net::WifiNetwork>),
+    /// Result of a Bluetooth device scan. Written into
+    /// `app.live.bluetooth` so the bluetooth screen can render the
+    /// device list on the next frame.
+    BluetoothScanResult(Vec<cyberdeck_core::bluetooth::BtDevice>),
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +74,14 @@ pub enum RunAction {
     BluetoothPair(String),
     BluetoothTrust(String),
     BluetoothPower(bool),
+    /// Refresh the paired-device list via `bluetoothctl devices`. The
+    /// result lands in `app.live.bluetooth` via the existing Live
+    /// registry refresh path.
+    BluetoothScan,
+    /// Trigger an immediate Wi-Fi scan. The result lands in
+    /// `app.wifi_scan_results` via the broadcast loop; the right pane
+    /// redraws automatically on the next frame.
+    WifiScan,
     /// Phase 6: connect to a WPA-Enterprise SSID. Fields map to NM 802-1x
     /// settings. Implemented in `cyberdeck_core::net::wifi_connect_enterprise`.
     WifiEnterpriseConnect {

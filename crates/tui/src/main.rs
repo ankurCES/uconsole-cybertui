@@ -694,6 +694,20 @@ fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
     let _ = app.manager.set_pane_kind(
         crate::wm::window::WindowKind::Builtin(screen),
     );
+    // Trigger an immediate scan on Network enter. The wifi list is empty
+    // until something populates `app.wifi_scan_results`, and without an
+    // auto-scan the user sees an empty pane and `j`/`Down` does nothing
+    // because the cursor is clamped to the interface region.
+    if screen == ScreenId::Network && app.wifi_scan_results.is_empty() {
+        app.tx.try_send(Action::Run(RunAction::WifiScan)).ok();
+    }
+    // Trigger an immediate Bluetooth device scan on enter. Without this,
+    // the device list is empty until the background refresh task ticks
+    // (which it does, but with a delay), and `j`/`Down` does nothing
+    // because the cursor is clamped to 0 against an empty list.
+    if screen == ScreenId::Bluetooth {
+        app.tx.try_send(Action::Run(RunAction::BluetoothScan)).ok();
+    }
 }
 
 async fn handle_key(
@@ -1331,6 +1345,18 @@ async fn handle_action(
             let _ = id;
             let _ = screens;
         }
+        Action::WifiScanResult(networks) => {
+            app.wifi_scan_results = networks;
+        }
+        Action::BluetoothScanResult(devices) => {
+            // `app.live.bluetooth` is `Arc<RwLock<Vec<BtDevice>>>` — write
+            // through the lock so the next frame's render sees the new
+            // device list. tokio's RwLock::write().await returns the
+            // guard directly; acquisition errors are surfaced via
+            // try_write for non-blocking callers.
+            let mut guard = app.live.bluetooth.write().await;
+            *guard = devices;
+        }
     }
     false
 }
@@ -1347,6 +1373,22 @@ fn spawn_action(tx: mpsc::Sender<Action>, act: RunAction) {
                 cyberdeck_core::net::wifi_connect(&ssid, password.as_deref()).await
             }
             RunAction::WifiDisconnect => cyberdeck_core::net::wifi_disconnect().await,
+            RunAction::WifiScan => match cyberdeck_core::net::wifi_scan().await {
+                Ok(scan) => {
+                    let count = scan.len();
+                    let _ = tx
+                        .send(Action::WifiScanResult(scan))
+                        .await;
+                    let _ = tx
+                        .send(Action::Toast(
+                            ToastKind::Ok,
+                            format!("found {} networks", count),
+                        ))
+                        .await;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
             RunAction::WifiEnterpriseConnect { .. } => Err(cyberdeck_core::CoreError::Command {
                 cmd: "nmcli connection up".into(),
                 detail: "enterprise connect lands in Phase 6".into(),
@@ -1379,6 +1421,15 @@ fn spawn_action(tx: mpsc::Sender<Action>, act: RunAction) {
             RunAction::BluetoothPair(m) => cyberdeck_core::bluetooth::pair(&m).await,
             RunAction::BluetoothTrust(m) => cyberdeck_core::bluetooth::trust(&m).await,
             RunAction::BluetoothPower(on) => cyberdeck_core::bluetooth::adapter_power(on).await,
+            RunAction::BluetoothScan => match cyberdeck_core::bluetooth::list().await {
+                Ok(devs) => {
+                    let _ = tx
+                        .send(Action::BluetoothScanResult(devs))
+                        .await;
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            },
             RunAction::Reboot => cyberdeck_core::power::reboot().await,
             RunAction::Shutdown => cyberdeck_core::power::shutdown().await,
             RunAction::Suspend => cyberdeck_core::power::suspend().await,

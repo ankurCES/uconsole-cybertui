@@ -23,6 +23,10 @@
 #            behaviour.
 #   --build  Build both binaries into target/release and exit.
 #            No install, no sudo, no service. Useful in CI.
+#   --deps   Install the system packages the TUI shells out to (bluez,
+#            NetworkManager, wpa_supplicant, PipeWire/PulseAudio utilities,
+#            brightnessctl, smartmontools, lm_sensors, …) without building
+#            or installing anything else. Idempotent; safe to re-run.
 #
 # Options:
 #   -y, --yes            Non-interactive; assume yes for any prompt.
@@ -31,19 +35,24 @@
 #   --service-user <u>   System user for the web service (default: cyberdeck).
 #   --refuse-sudo        Refuse to call sudo; useful when --tui or --build
 #                        is what you wanted but you forgot to pass it.
+#   --skip-deps          Don't try to install OS-level packages. Useful on
+#                        a system where you've already installed them by
+#                        hand, or where the host firewall blocks apt.
 #   --uninstall          Remove installed binaries, user, service, token.
 #
 # What it does (in order):
 #   1. Sanity-checks (repo layout, cargo, systemctl).
-#   2. Builds the requested binaries (release) — skipped on --install-only.
-#   3. Escalates to root for system install steps (skipped for --tui,
+#   2. Installs OS-level dependencies (apt/dnf/pacman). Skipped with
+#      --skip-deps or on distros we don't recognise.
+#   3. Builds the requested binaries (release) — skipped on --install-only.
+#   4. Escalates to root for system install steps (skipped for --tui,
 #      --build, and when already root).
-#   4. Installs binaries to ${INSTALL_PREFIX}/bin.
-#   5. Creates the system user, config dir, and bearer token.
-#   6. Installs the NOPASSWD sudoers fragment for the service user.
-#   7. Installs the systemd unit.
-#   8. Opens the firewall port (ufw if active, hint for nft otherwise).
-#   9. Enables and starts the service; prints LAN URL + token.
+#   5. Installs binaries to ${INSTALL_PREFIX}/bin.
+#   6. Creates the system user, config dir, and bearer token.
+#   7. Installs the NOPASSWD sudoers fragment for the service user.
+#   8. Installs the systemd unit.
+#   9. Opens the firewall port (ufw if active, hint for nft otherwise).
+#  10. Enables and starts the service; prints LAN URL + token.
 #
 # Re-running is safe: nothing is duplicated, the token is preserved,
 # `systemctl enable` and `restart` are idempotent.
@@ -69,9 +78,11 @@ PRESET_FULL=0
 PRESET_TUI=0
 PRESET_WEB=0
 PRESET_BUILD=0
+PRESET_DEPS=0
 ASSUME_YES=0
 REFUSE_SUDO=0
 DO_UNINSTALL=0
+SKIP_DEPS=0
 
 usage() {
     sed -n '2,40p' "$0"
@@ -82,6 +93,10 @@ PRESETS
   --web      Web service only. Sudo for install steps.
   --full     TUI + web (default).
   --build    Build only; no install, no sudo.
+  --deps     Install OS-level packages the TUI shells out to (bluez,
+             NetworkManager, wpa_supplicant, brightnessctl, smartctl,
+             PipeWire/PulseAudio utils, journalctl). No build, no sudo
+             for cargo.
 
 OPTIONS
   -y, --yes            Non-interactive.
@@ -89,6 +104,7 @@ OPTIONS
   --bind <addr>        Web bind address (default: 0.0.0.0:7878).
   --service-user <u>   Service user (default: cyberdeck).
   --refuse-sudo        Refuse to escalate; require preset to be non-sudo.
+  --skip-deps          Don't install OS-level packages.
   --uninstall          Reverse the install.
 
 ENV
@@ -107,8 +123,10 @@ while [[ $# -gt 0 ]]; do
         --web)        PRESET_WEB=1 ;;
         --full)       PRESET_FULL=1 ;;
         --build)      PRESET_BUILD=1 ;;
+        --deps)       PRESET_DEPS=1 ;;
         -y|--yes)     ASSUME_YES=1 ;;
         --refuse-sudo) REFUSE_SUDO=1 ;;
+        --skip-deps)  SKIP_DEPS=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
         --prefix)     INSTALL_PREFIX="$2"; shift ;;
         --bind)       BIND_ADDR="$2"; shift ;;
@@ -130,7 +148,7 @@ for p in "${PASSTHROUGH[@]}"; do
 done
 
 # Pick a default preset if none was given.
-if [[ $((PRESET_TUI + PRESET_WEB + PRESET_FULL + PRESET_BUILD)) -eq 0 ]]; then
+if [[ $((PRESET_TUI + PRESET_WEB + PRESET_FULL + PRESET_BUILD + PRESET_DEPS)) -eq 0 ]]; then
     PRESET_FULL=1
 fi
 
@@ -146,6 +164,179 @@ confirm() {
     read -r -p "$(printf '\033[1;33m??\033[0m %s [y/N] ' "$prompt")" reply
     [[ "$reply" =~ ^[Yy]$ ]]
 }
+
+# ---------- 0a. distro + package install ----------
+# The TUI shells out to a number of system binaries (nmcli, bluetoothctl,
+# pactl/wpctl, brightnessctl, smartctl, journalctl, sensors, …). Without
+# them, individual screens degrade to "unavailable" messages; with them,
+# everything works on a fresh install. We detect the distro from
+# /etc/os-release and pick the right package list. Re-running is safe —
+# every package manager here is idempotent.
+
+APT_PKGS=(
+    # Network: Wi-Fi scan + connect via NetworkManager
+    network-manager
+    wpasupplicant
+    # Bluetooth: device list, pair, connect, trust, adapter power
+    bluez
+    # Audio: PipeWire first (modern), PulseAudio fallback
+    pipewire-audio
+    pulseaudio-utils
+    alsa-utils
+    # Display: brightness slider + output enumeration
+    brightnessctl
+    wlr-randr
+    x11-xserver-utils   # provides xrandr for X11 fallback
+    # Storage + sensors: df, lsblk, smart, thermals
+    smartmontools
+    lm-sensors
+    util-linux          # lsblk
+    # System: ps, log tail
+    procps
+    systemd             # journalctl
+    # Build deps for the Rust toolchain
+    build-essential
+    pkg-config
+    libssl-dev
+    libdbus-1-dev
+    libudev-dev
+)
+
+DNF_PKGS=(
+    NetworkManager
+    wpa_supplicant
+    bluez
+    bluez-tools
+    pipewire-pulseaudio
+    alsa-utils
+    brightnessctl
+    wlr-randr
+    xrandr
+    smartmontools
+    lm_sensors
+    util-linux
+    procps-ng
+    systemd
+    gcc
+    gcc-c++
+    make
+    pkgconf-pkg-config
+    openssl-devel
+    dbus-devel
+    systemd-devel
+)
+
+PACMAN_PKGS=(
+    networkmanager
+    wpa_supplicant
+    bluez
+    bluez-utils
+    pipewire-pulseaudio
+    alsa-utils
+    brightnessctl
+    wlr-randr
+    xorg-xrandr
+    smartmontools
+    lm_sensors
+    util-linux
+    procps-ng
+    systemd
+    base-devel
+    pkgconf
+    openssl
+    dbus
+)
+
+detect_distro() {
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        echo "${ID:-unknown}"
+        return 0
+    fi
+    if command -v apt-get >/dev/null 2>&1; then echo "debian"; return 0; fi
+    if command -v dnf >/dev/null 2>&1;     then echo "fedora"; return 0; fi
+    if command -v pacman >/dev/null 2>&1;  then echo "arch";   return 0; fi
+    echo "unknown"
+}
+
+install_deps() {
+    local distro
+    distro="$(detect_distro)"
+    log "Detected distro: $distro"
+
+    case "$distro" in
+        debian|ubuntu|pop|elementary|linuxmint|zorin|kali|raspbian)
+            if ! command -v apt-get >/dev/null 2>&1; then
+                die "apt-get not found on a Debian-family distro; install packages by hand."
+            fi
+            log "Installing packages via apt-get: ${APT_PKGS[*]}"
+            if [[ $EUID -ne 0 ]]; then
+                sudo apt-get update
+                sudo apt-get install -y "${APT_PKGS[@]}"
+            else
+                apt-get update
+                apt-get install -y "${APT_PKGS[@]}"
+            fi
+            ;;
+        fedora|rhel|centos|rocky|alma|nobara)
+            if ! command -v dnf >/dev/null 2>&1; then
+                die "dnf not found on a Fedora-family distro; install packages by hand."
+            fi
+            log "Installing packages via dnf: ${DNF_PKGS[*]}"
+            local cmd=(dnf install -y)
+            [[ $EUID -ne 0 ]] && cmd=(sudo dnf install -y)
+            "${cmd[@]}" "${DNF_PKGS[@]}"
+            ;;
+        arch|manjaro|endeavouros|garuda|archarm)
+            if ! command -v pacman >/dev/null 2>&1; then
+                die "pacman not found on an Arch-family distro; install packages by hand."
+            fi
+            log "Installing packages via pacman: ${PACMAN_PKGS[*]}"
+            local cmd=(pacman -Syu --noconfirm --needed)
+            [[ $EUID -ne 0 ]] && cmd=(sudo pacman -Syu --noconfirm --needed)
+            "${cmd[@]}" "${PACMAN_PKGS[@]}"
+            ;;
+        *)
+            warn "Unknown distro '$distro'. The TUI shells out to:"
+            warn "  nmcli bluetoothctl pactl wpctl brightnessctl"
+            warn "  smartctl sensors journalctl lsblk xrandr wlr-randr"
+            warn "Install those for your distro and re-run with --skip-deps."
+            ;;
+    esac
+
+    # Enable + start the core services the TUI relies on. These are no-ops
+    # if they're already enabled and running (systemctl is idempotent).
+    if command -v systemctl >/dev/null 2>&1; then
+        log "Enabling NetworkManager + bluetooth daemons"
+        local sys_cmd=(systemctl)
+        [[ $EUID -ne 0 ]] && sys_cmd=(sudo systemctl)
+        for unit in NetworkManager bluetooth; do
+            "${sys_cmd[@]}" enable --now "$unit.service" >/dev/null 2>&1 || true
+        done
+    fi
+}
+
+# ---------- 0a. system dependencies ----------
+# Runs early so a failed apt-get doesn't waste a 5-minute cargo build.
+# `--deps` short-circuits after this step (no build, no install).
+if [[ $DO_DEPS -eq 1 || $PRESET_DEPS -eq 1 || $SKIP_DEPS -eq 0 ]]; then
+    if [[ $SKIP_DEPS -eq 1 ]]; then
+        log "Skipping OS-level package install (--skip-deps)"
+    else
+        if [[ $DO_DEPS -eq 1 || $PRESET_DEPS -eq 1 || $ASSUME_YES -eq 1 ]]; then
+            install_deps
+        else
+            confirm "Install OS-level packages (apt/dnf/pacman)?" && install_deps \
+                || warn "Skipping OS deps; the TUI may show 'unavailable' on some screens."
+        fi
+    fi
+fi
+
+if [[ $PRESET_DEPS -eq 1 ]]; then
+    log "--deps: dependencies installed. Nothing more to do."
+    exit 0
+fi
 
 # ---------- 0. uninstall ----------
 if [[ $DO_UNINSTALL -eq 1 ]]; then

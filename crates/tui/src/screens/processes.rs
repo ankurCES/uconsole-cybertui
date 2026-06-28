@@ -3,7 +3,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::screen::{Screen, ScreenId};
@@ -21,17 +21,58 @@ impl Screen for ProcessesScreen {
     }
 
     fn on_key(&mut self, key: KeyEvent, app: &mut App) -> bool {
+        let total = app.live.processes.try_read().map(|v| v.len()).unwrap_or(0);
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
-                app.proc_selected = app.proc_selected.saturating_add(1)
+                if total > 0 {
+                    app.proc_selected = (app.proc_selected + 1).min(total - 1);
+                }
+                return true;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                app.proc_selected = app.proc_selected.saturating_sub(1)
+                app.proc_selected = app.proc_selected.saturating_sub(1);
+                return true;
             }
-            KeyCode::Char('c') => app.proc_sort = crate::app::ProcessSort::Cpu,
-            KeyCode::Char('m') => app.proc_sort = crate::app::ProcessSort::Mem,
-            KeyCode::Char('p') => app.proc_sort = crate::app::ProcessSort::Pid,
-            KeyCode::Char('t') => app.proc_sort = crate::app::ProcessSort::Time,
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                if total > 0 {
+                    let step = 10usize;
+                    app.proc_selected = (app.proc_selected + step).min(total - 1);
+                }
+                return true;
+            }
+            KeyCode::PageUp => {
+                app.proc_selected = app.proc_selected.saturating_sub(10);
+                return true;
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                app.proc_selected = 0;
+                return true;
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                if total > 0 {
+                    app.proc_selected = total - 1;
+                }
+                return true;
+            }
+            _ => {}
+        }
+        match key.code {
+            KeyCode::Char('c') => {
+                app.proc_sort = crate::app::ProcessSort::Cpu;
+                return true;
+            }
+            KeyCode::Char('m') => {
+                app.proc_sort = crate::app::ProcessSort::Mem;
+                return true;
+            }
+            KeyCode::Char('p') => {
+                app.proc_sort = crate::app::ProcessSort::Pid;
+                return true;
+            }
+            KeyCode::Char('t') => {
+                app.proc_sort = crate::app::ProcessSort::Time;
+                return true;
+            }
             KeyCode::Char('K') => {
                 // Quick kill of the highlighted row.
                 if let Some(p) = selected_proc(app) {
@@ -41,6 +82,7 @@ impl Screen for ProcessesScreen {
                         arg: p.pid.to_string(),
                     };
                 }
+                return true;
             }
             KeyCode::Char('x') => {
                 // Kill with explicit pid entry.
@@ -49,10 +91,10 @@ impl Screen for ProcessesScreen {
                     buf: String::new(),
                     kind: InputKind::KillPid,
                 };
+                return true;
             }
             _ => return false,
         }
-        true
     }
 
     fn render(&mut self, f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focus: bool) {
@@ -74,7 +116,23 @@ impl Screen for ProcessesScreen {
         let inner = block.inner(area);
         f.render_widget(block, area);
 
+        // Reserve header row + footer hint row.
+        let list_area = Rect::new(
+            inner.x,
+            inner.y + 1,
+            inner.width,
+            inner.height.saturating_sub(2),
+        );
+
+        let total = app.live.processes.try_read().map(|v| v.len()).unwrap_or(0);
+        if total == 0 {
+            app.proc_selected = 0;
+        } else if app.proc_selected >= total {
+            app.proc_selected = total - 1;
+        }
+
         let mut items: Vec<ListItem> = Vec::new();
+        // Header row (kept at the top, fixed).
         items.push(ListItem::new(Line::from(Span::styled(
             format!(
                 "  {:>7} {:<10} {:>5} {:>5} {:<8} {}",
@@ -83,41 +141,65 @@ impl Screen for ProcessesScreen {
             theme.title(),
         ))));
         if let Ok(p) = app.live.processes.try_read() {
-            for (i, proc) in p.iter().enumerate() {
-                if i == app.proc_selected {
-                    let row = format!(
-                        "  {:>7} {:<10} {:>5} {:>5} {:<8} {}",
-                        proc.pid,
-                        truncate(&proc.user, 10),
-                        format!("{:.1}", proc.cpu),
-                        format!("{:.1}", proc.mem),
-                        proc.stat,
-                        proc.command
-                    );
-                    items.push(ListItem::new(Line::from(Span::styled(
-                        row,
-                        ratatui::style::Style::default()
-                            .fg(theme.selection_fg)
-                            .bg(theme.selection_bg),
-                    ))));
-                } else {
-                    let row = format!(
-                        "  {:>7} {:<10} {:>5} {:>5} {:<8} {}",
-                        proc.pid,
-                        truncate(&proc.user, 10),
-                        format!("{:.1}", proc.cpu),
-                        format!("{:.1}", proc.mem),
-                        proc.stat,
-                        proc.command
-                    );
-                    items.push(ListItem::new(Line::from(Span::styled(row, theme.fg))));
-                }
+            for proc in p.iter() {
+                let row = format!(
+                    "  {:>7} {:<10} {:>5} {:>5} {:<8} {}",
+                    proc.pid,
+                    truncate(&proc.user, 10),
+                    format!("{:.1}", proc.cpu),
+                    format!("{:.1}", proc.mem),
+                    proc.stat,
+                    proc.command
+                );
+                items.push(ListItem::new(Line::from(Span::styled(row, theme.fg))));
             }
         }
-        let list = List::new(items).block(Block::default().borders(Borders::NONE));
-        f.render_widget(list, inner);
+        // `selection` in ListState is the index into `items`. We want the
+        // highlighted process row, which sits 1 below the header.
+        let sel_in_items = if total == 0 {
+            None
+        } else {
+            Some(app.proc_selected + 1)
+        };
+        let visible_h = list_area.height as usize;
+        let offset = compute_offset_list(sel_in_items.unwrap_or(0), items.len(), visible_h);
+        let mut state = ListState::default().with_selected(sel_in_items);
+        *state.offset_mut() = offset;
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::NONE))
+            .highlight_style(
+                ratatui::style::Style::default()
+                    .fg(theme.selection_fg)
+                    .bg(theme.selection_bg),
+            )
+            .highlight_symbol("▸ ");
+        f.render_stateful_widget(list, list_area, &mut state);
 
+        // Header line sits above the list (so it stays visible while we
+        // scroll the table body).
+        let header = Paragraph::new(Line::from(Span::styled(
+            format!(
+                "  {:>7} {:<10} {:>5} {:>5} {:<8} {}",
+                "PID", "USER", "CPU%", "MEM%", "STAT", "COMMAND"
+            ),
+            theme.title(),
+        )));
+        let header_area = Rect::new(inner.x, inner.y, inner.width, 1);
+        f.render_widget(header, header_area);
+
+        // Footer: position indicator + hints.
+        let indicator = if total == 0 {
+            "  no processes".to_string()
+        } else {
+            format!(
+                "  {}/{}  (j/k nav, PgUp/PgDn page, g/G top/bottom)",
+                app.proc_selected + 1,
+                total
+            )
+        };
         let hints = Paragraph::new(Line::from(vec![
+            Span::styled(indicator, theme.dim()),
+            Span::raw("  "),
             Span::styled(" c ", theme.key()),
             Span::styled("cpu  ", theme.dim()),
             Span::styled(" m ", theme.key()),
@@ -138,6 +220,26 @@ impl Screen for ProcessesScreen {
             1,
         );
         f.render_widget(hints, hint_area);
+    }
+}
+
+/// Compute the scroll offset that keeps `selected` visible inside a window
+/// of `visible` rows drawn from a list of `total` items. Top-aligned:
+/// shifts only when the cursor scrolls past the bottom (or top) edge of
+/// the visible window, so the view visually tracks the cursor immediately
+/// instead of waiting until the cursor reaches the middle (which is what a
+/// centred offset does, and which makes long lists look frozen at the top
+/// until you've already half-scrolled). PgUp/PgDn still feel symmetric
+/// because each call recomputes from the current cursor.
+fn compute_offset_list(selected: usize, total: usize, visible: usize) -> usize {
+    if total <= visible || visible == 0 {
+        return 0;
+    }
+    let sel = selected.min(total - 1);
+    if sel >= visible {
+        sel - visible + 1
+    } else {
+        0
     }
 }
 

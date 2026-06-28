@@ -345,6 +345,24 @@ pub struct App {
     pub net_selected: usize,
     pub net_show_wifi: bool,
     pub wifi_scan_results: Vec<cyberdeck_core::net::WifiNetwork>,
+    pub bt_selected: usize,
+    /// Sink currently highlighted on the Audio screen.
+    pub audio_selected: usize,
+    /// Output currently highlighted on the Display screen.
+    pub display_selected: usize,
+    /// Filesystem currently highlighted on the Storage screen.
+    pub storage_selected: usize,
+    /// Row currently highlighted on the Settings screen.
+    pub settings_selected: usize,
+    /// Upgradable package currently highlighted on the Packages screen.
+    pub pkg_selected: usize,
+    /// Up/down offset for the logs pane. Independent from `logs.len()`
+    /// (newest appended at the end).
+    pub logs_offset: usize,
+    /// Up/down offset for the System screen's embedded log pane.
+    pub system_log_offset: usize,
+    /// Last pkg_search length, so the screen can detect new arrivals.
+    pub pkg_search_offset: usize,
     pub pkgs_filter: String,
     pub pkg_search_results: Vec<Package>,
     pub theme_name: screen::ThemeNameReexport,
@@ -400,6 +418,15 @@ impl App {
             net_selected: 0,
             net_show_wifi: false,
             wifi_scan_results: Vec::new(),
+            bt_selected: 0,
+            audio_selected: 0,
+            display_selected: 0,
+            storage_selected: 0,
+            settings_selected: 0,
+            pkg_selected: 0,
+            logs_offset: 0,
+            system_log_offset: 0,
+            pkg_search_offset: 0,
             pkgs_filter: String::new(),
             pkg_search_results: Vec::new(),
             theme_name: screen::ThemeNameReexport::Dark,
