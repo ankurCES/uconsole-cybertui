@@ -1276,7 +1276,19 @@ async fn handle_action(
     action: Action,
 ) -> bool {
     match action {
-        Action::Tick => {} // refreshers already produced data
+        Action::Tick => {
+            // Refreshers already produced data. Also: fire the welcome
+            // toast exactly once on the first tick of the process so the
+            // user lands on something more useful than a blank pane.
+            // Mirrors orbital's startup greeter pattern.
+            if !app.boot_toast_sent {
+                app.boot_toast_sent = true;
+                app.push_toast(
+                    ToastKind::Info,
+                    "Welcome — Tab to switch panes, ? for help, r to rescan",
+                );
+            }
+        }
         Action::Key(_) => {}
         Action::Goto(id) => {
             app.current = id;
@@ -1941,6 +1953,41 @@ mod tests {
         let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Esc)).await;
         assert!(matches!(app.modal, Modal::None));
         assert!(_rx.try_recv().is_err(), "no action should be enqueued");
+    }
+
+    // Boot toast: the first Action::Tick in a process must push a welcome
+    // toast exactly once. Subsequent ticks must NOT spam welcome toasts —
+    // otherwise the welcome becomes noise. Mirrors orbital's startup
+    // greeter pattern (one frame, then silent).
+    #[tokio::test]
+    async fn boot_welcome_toast_fires_exactly_once() {
+        let (tx, _rx, mut app) = make_app();
+        assert!(!app.boot_toast_sent, "fresh app must start with boot_toast_sent=false");
+        assert!(app.toasts.is_empty(), "fresh app must have no toasts");
+
+        // First tick: welcome toast must land.
+        let quit = handle_action(&mut [], &mut app, &tx, Action::Tick).await;
+        assert!(!quit, "Tick must not request quit");
+        assert!(app.boot_toast_sent, "after first Tick boot_toast_sent must be true");
+        assert_eq!(app.toasts.len(), 1, "exactly one welcome toast after first Tick");
+        assert!(
+            app.toasts[0].text.starts_with("Welcome"),
+            "welcome toast text must start with 'Welcome', got: {:?}",
+            app.toasts[0].text
+        );
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+
+        // Two more ticks: no extra welcome toasts. Other refreshers may
+        // legitimately push unrelated toasts, so we count how many start
+        // with 'Welcome' and assert the count stays at 1.
+        let _ = handle_action(&mut [], &mut app, &tx, Action::Tick).await;
+        let _ = handle_action(&mut [], &mut app, &tx, Action::Tick).await;
+        let welcome_count = app
+            .toasts
+            .iter()
+            .filter(|t| t.text.starts_with("Welcome"))
+            .count();
+        assert_eq!(welcome_count, 1, "welcome toast must fire exactly once across all ticks");
     }
 
     #[tokio::test]

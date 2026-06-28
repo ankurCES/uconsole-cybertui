@@ -337,6 +337,12 @@ pub struct App {
     pub palette_buf: String,
     pub palette_idx: usize,
     pub toasts: Vec<Toast>,
+    /// One-shot guard for the first-launch welcome toast. Set to true the
+    /// first time `Action::Tick` runs, so the welcome fires exactly once
+    /// per process even though `Action::Tick` ticks forever. Mirrors
+    /// orbital's startup greeter pattern (welcome on first frame,
+    /// silent afterwards).
+    pub boot_toast_sent: bool,
     pub logs: Vec<LogLine>,
     pub logs_filter: String,
     pub proc_sort: ProcessSort,
@@ -410,6 +416,7 @@ impl App {
             palette_buf: String::new(),
             palette_idx: 0,
             toasts: Vec::new(),
+            boot_toast_sent: false,
             logs: Vec::new(),
             logs_filter: String::new(),
             proc_sort: ProcessSort::Cpu,
