@@ -47,6 +47,25 @@ impl Manager {
     pub fn window(&self, id: PaneId) -> Option<&Window> { self.windows.get(&id) }
     pub fn window_mut(&mut self, id: PaneId) -> Option<&mut Window> { self.windows.get_mut(&id) }
 
+    /// Return the `PaneId` of the leaf at DFS `index`, matching the
+    /// order `pane_ids()` and `layout()` use. `None` for out-of-range.
+    #[allow(dead_code)] // consumed by plan §2.5 (pane enumeration); see also `pane_ids`.
+    pub fn focus_pane_index(&self, index: usize) -> Option<PaneId> {
+        self.tree.leaves().get(index).copied()
+    }
+
+    /// Set the focused pane to `id`. Returns false if `id` is not in
+    /// the tree (e.g. a stale id from before a close).
+    #[allow(dead_code)] // consumed by plan §2.5 (pane enumeration); see also `pane_ids`.
+    pub fn focus_pane(&mut self, id: PaneId) -> bool {
+        if self.windows.contains_key(&id) {
+            self.focused = id;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Resize the split that contains the focused pane by `delta`
     /// percentage points. Walks the tree once. Returns true if a
     /// split was found and resized.
@@ -206,5 +225,50 @@ mod tests {
         // Focus is on the new (right) pane. Go back left.
         let back = m.focus_neighbor(FocusDir::Left).unwrap();
         assert_eq!(back, original);
+    }
+
+    #[test]
+    fn focus_pane_index_returns_some_for_in_range_leaf() {
+        let mut m = Manager::new(ScreenId::System);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let _ = m.split_focused(SplitDir::Vertical, 50, ScreenId::Audio);
+        let ids = m.pane_ids();
+        assert_eq!(ids.len(), 3);
+        // Indices match the DFS order returned by `pane_ids()`.
+        assert_eq!(m.focus_pane_index(0), Some(ids[0]));
+        assert_eq!(m.focus_pane_index(1), Some(ids[1]));
+        assert_eq!(m.focus_pane_index(2), Some(ids[2]));
+    }
+
+    #[test]
+    fn focus_pane_index_returns_none_for_out_of_range() {
+        let m = Manager::new(ScreenId::System);
+        assert!(m.pane_ids().len() < 9);
+        assert_eq!(m.focus_pane_index(m.pane_ids().len()), None);
+        assert_eq!(m.focus_pane_index(usize::MAX), None);
+    }
+
+    #[test]
+    fn focus_pane_swaps_focus() {
+        let mut m = Manager::new(ScreenId::System);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let ids = m.pane_ids();
+        // After split, the new pane (ids[1]) is focused, not the original (ids[0]).
+        let original_focus = m.focused();
+        assert_eq!(original_focus, ids[1]);
+        assert_ne!(original_focus, ids[0]);
+        // Focus the original (now unfocused) pane.
+        assert!(m.focus_pane(ids[0]));
+        assert_eq!(m.focused(), ids[0]);
+    }
+
+    #[test]
+    fn focus_pane_returns_false_for_stale_id() {
+        let mut m = Manager::new(ScreenId::System);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let stale = PaneId(999_999);
+        assert!(!m.focus_pane(stale));
+        // Focused pane is unchanged.
+        assert_eq!(m.focused(), m.pane_ids()[1]);
     }
 }
