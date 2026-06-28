@@ -20,6 +20,24 @@ use crate::wm::broadcaster::PaneId;
 use crate::wm::tree::{compute_layout, FocusDir, Node, SplitDir};
 use crate::wm::window::{Window, WindowKind};
 
+/// Error returned by `Manager::split_focused` when the requested
+/// split would exceed `Manager::MAX_PANES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitError {
+    /// `split_focused` was called when `Manager::MAX_PANES` panes already exist.
+    PaneLimit,
+}
+
+impl std::fmt::Display for SplitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SplitError::PaneLimit => write!(f, "pane limit reached ({})", Manager::MAX_PANES),
+        }
+    }
+}
+
+impl std::error::Error for SplitError {}
+
 pub struct Manager {
     tree: Node,
     windows: HashMap<PaneId, Window>,
@@ -30,6 +48,11 @@ pub struct Manager {
 }
 
 impl Manager {
+    /// Hard cap on the number of panes a single `Manager` can hold.
+    /// Reaching this cap causes `split_focused` to return
+    /// `SplitError::PaneLimit` rather than grow the tree further.
+    pub const MAX_PANES: u8 = 9;
+
     /// Build a single-pane tree hosting the given built-in screen.
     pub fn new(initial: ScreenId) -> Self {
         let id = PaneId::fresh();
@@ -90,12 +113,18 @@ impl Manager {
     /// Split the focused leaf, opening a new built-in screen on the
     /// non-focused side. The new pane is given focus (vim: the new
     /// window is the one you're typing in). Returns the new id.
+    ///
+    /// Errors with `SplitError::PaneLimit` when the tree already
+    /// holds `MAX_PANES` panes.
     pub fn split_focused(
         &mut self,
         dir: SplitDir,
         ratio: u8,
         screen: ScreenId,
-    ) -> PaneId {
+    ) -> Result<PaneId, SplitError> {
+        if self.windows.len() as u8 >= Self::MAX_PANES {
+            return Err(SplitError::PaneLimit);
+        }
         let new_id = PaneId::fresh();
         assert!(
             self.tree.split(self.focused, dir, ratio, new_id),
@@ -103,7 +132,7 @@ impl Manager {
         );
         self.windows.insert(new_id, Window::builtin(new_id, screen));
         self.focused = new_id;
-        new_id
+        Ok(new_id)
     }
 
     /// Close the focused pane. If it was the last pane, returns false and
@@ -197,7 +226,7 @@ mod tests {
     fn split_focused_adds_a_pane() {
         let mut m = Manager::new(ScreenId::System);
         let before = m.pane_ids();
-        let new_id = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let new_id = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network).expect("within cap");
         assert!(m.pane_ids().contains(&new_id));
         assert_eq!(m.pane_ids().len(), before.len() + 1);
         // Newly-split pane gets focus (vim convention).
@@ -207,8 +236,8 @@ mod tests {
     #[test]
     fn close_focused_collapses_to_one_pane() {
         let mut m = Manager::new(ScreenId::System);
-        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
-        let _ = m.split_focused(SplitDir::Vertical, 50, ScreenId::Audio);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network).expect("within cap");
+        let _ = m.split_focused(SplitDir::Vertical, 50, ScreenId::Audio).expect("within cap");
         let _ = m.close_focused();
         let _ = m.close_focused();
         assert_eq!(m.pane_ids().len(), 1);
@@ -217,7 +246,7 @@ mod tests {
     #[test]
     fn focus_neighbor_finds_adjacent_pane() {
         let mut m = Manager::new(ScreenId::System);
-        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network).expect("within cap");
         // Give the tree a real area so focus_neighbor can compute centers.
         m.apply_layout(Rect::new(0, 0, 80, 24));
         // Capture the original (left) pane id before we move focus.
@@ -230,8 +259,8 @@ mod tests {
     #[test]
     fn focus_pane_index_returns_some_for_in_range_leaf() {
         let mut m = Manager::new(ScreenId::System);
-        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
-        let _ = m.split_focused(SplitDir::Vertical, 50, ScreenId::Audio);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network).expect("within cap");
+        let _ = m.split_focused(SplitDir::Vertical, 50, ScreenId::Audio).expect("within cap");
         let ids = m.pane_ids();
         assert_eq!(ids.len(), 3);
         // Indices match the DFS order returned by `pane_ids()`.
@@ -251,7 +280,7 @@ mod tests {
     #[test]
     fn focus_pane_swaps_focus() {
         let mut m = Manager::new(ScreenId::System);
-        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network).expect("within cap");
         let ids = m.pane_ids();
         // After split, the new pane (ids[1]) is focused, not the original (ids[0]).
         let original_focus = m.focused();
@@ -265,10 +294,28 @@ mod tests {
     #[test]
     fn focus_pane_returns_false_for_stale_id() {
         let mut m = Manager::new(ScreenId::System);
-        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network);
+        let _ = m.split_focused(SplitDir::Horizontal, 50, ScreenId::Network).expect("within cap");
         let stale = PaneId(999_999);
         assert!(!m.focus_pane(stale));
         // Focused pane is unchanged.
         assert_eq!(m.focused(), m.pane_ids()[1]);
+    }
+
+    #[test]
+    fn split_focused_at_limit_returns_err() {
+        let mut m = Manager::new(ScreenId::System);
+        // Open until we hit the cap. Each call creates one new pane.
+        for i in 0..(Manager::MAX_PANES - 1) {
+            let dir = if i % 2 == 0 { SplitDir::Horizontal } else { SplitDir::Vertical };
+            let _ = m.split_focused(dir, 50, ScreenId::System).expect("within cap");
+        }
+        assert_eq!(m.pane_ids().len() as u8, Manager::MAX_PANES);
+        // The next split must fail.
+        let err = m
+            .split_focused(SplitDir::Horizontal, 50, ScreenId::System)
+            .unwrap_err();
+        assert_eq!(err, SplitError::PaneLimit);
+        // And the pane count did not grow.
+        assert_eq!(m.pane_ids().len() as u8, Manager::MAX_PANES);
     }
 }
