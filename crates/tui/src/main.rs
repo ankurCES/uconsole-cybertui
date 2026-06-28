@@ -670,6 +670,13 @@ async fn handle_key(
                     // Spawn $SHELL in the focused pane. If the pane
                     // is already a terminal, this is a no-op (we
                     // don't open nested shells for v0).
+                    //
+                    // KNOWN ISSUE: we spawn the shell twice — once for
+                    // the broadcaster (which consumes the Pty handle)
+                    // and once for the Window's own Pty so resize/kill
+                    // work. The fix is to thread the Pty *out* of
+                    // `broadcaster::spawn`; tracked in ROADMAP.md
+                    // "Known issues". Don't block on it for v0.
                     use portable_pty::CommandBuilder;
                     let mut cmd = CommandBuilder::new(
                         std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
@@ -718,12 +725,21 @@ async fn handle_key(
                     let _ = app.manager.close_focused();
                 }
                 KeyCode::Char('=') | KeyCode::Char('+') => {
+                    // KNOWN ISSUE: `resize_focused` only tries
+                    // `SplitDir::Horizontal`, so the resize silently
+                    // no-ops if the focused pane is inside a vertical
+                    // split. The fix is to discover the parent
+                    // split's direction from the tree; tracked in
+                    // ROADMAP.md "Known issues". For v0 we get working
+                    // resize on horizontal splits (the common case on
+                    // a wide uconsole screen).
                     let _ = app.manager.resize_focused(
                         crate::wm::tree::SplitDir::Horizontal,
                         5,
                     );
                 }
                 KeyCode::Char('-') => {
+                    // Same caveat as `=`/`+` above.
                     let _ = app.manager.resize_focused(
                         crate::wm::tree::SplitDir::Horizontal,
                         -5,

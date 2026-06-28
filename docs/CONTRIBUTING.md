@@ -49,3 +49,27 @@ cargo test --workspace -- --test-threads=1
 ```
 
 Run this before opening a PR. Expect 20-40 seconds on a quiet box.
+
+## Manual smoke test for Phase 3 (window manager)
+
+After touching any file under `crates/tui/src/wm/`, run the binary
+and confirm:
+
+1. The TUI starts on the System screen.
+2. `Ctrl-W v` opens a vertical split. Both panes show the System
+   screen.
+3. `Ctrl-W h` / `Ctrl-W l` move the focus border between the two
+   panes.
+4. `Ctrl-W n` turns the focused pane into a terminal. The shell's
+   prompt appears within ~100 ms.
+5. Type `echo hello` and press Enter. The text `hello` appears in
+   the pane.
+6. `Ctrl-W h` / `Ctrl-W l` move focus back to the other pane; the
+   shell is still alive in the other pane.
+7. `Ctrl-W q` closes the focused pane. The tree collapses to a
+   single pane.
+8. `q` quits the TUI cleanly (the shell child is reaped, the
+   terminal returns to its normal mode).
+
+If any of these fail, the regression is almost always in
+`wm/render.rs` (paint order) or `wm/manager.rs` (tree bookkeeping).
