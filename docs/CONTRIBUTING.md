@@ -74,6 +74,29 @@ and confirm:
 If any of these fail, the regression is almost always in
 `wm/render.rs` (paint order) or `wm/manager.rs` (tree bookkeeping).
 
+## Running the web (`cyberdeck-web`) tests
+
+The web crate has a small integration suite at
+`crates/web/tests/lan_smoke.rs` that spins up `run_with` on an
+ephemeral port and asserts the public LAN surface — auth middleware,
+the `/api/system` route, the askama shell, the static JS bundle, and
+the WebSocket upgrade (both with bearer header and `?token=` query
+string). No PTYs, no real DB, no network.
+
+Run it with:
+
+```bash
+cargo test -p cyberdeck-web --test lan_smoke
+```
+
+Expect ~10 seconds. Safe to run in the inner save loop — these tests
+do not spawn child processes and don't compete with the WM PTY
+tests.
+
+If you change `crates/web/src/auth.rs` (token validation), `api.rs`
+(the `SystemInfo` payload), `shell.rs` (the askama template), or
+`ws.rs` (the upgrade path), re-run this suite before opening a PR.
+
 ## Manual smoke test for Phase 4 (pane number badges + Ctrl-W N jump)
 
 After touching `wm/manager.rs`, `wm/render.rs`, or the `Ctrl-W`

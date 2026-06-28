@@ -211,9 +211,18 @@ impl Window {
         // `&mut self` overlapping a `&mut self.terminal` borrow.
         let _ = self.drain_output();
         if let Some(term) = self.terminal.as_mut() {
-            let title = crate::wm::render::pane_title(&self.kind, pane_index);
+            let pane_title = crate::wm::render::pane_title(&self.kind, pane_index);
+            // Right-aligned status hint gives the title bar a sense of
+            // liveness without adding a second row. Pulled from the
+            // same helper the WM tests cover so the hint stays
+            // symmetric across focused/unfocused panes.
+            let status = crate::wm::render::terminal_status_hint(term.pty.is_alive());
+            let title_line = ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(pane_title, theme.title()),
+                ratatui::text::Span::styled(status, theme.dim()),
+            ]);
             let block = Block::default()
-                .title(Span::styled(title, theme.title()))
+                .title(title_line)
                 .borders(Borders::ALL)
                 .border_style(theme.border(focused));
             let lines: Vec<Line> = (0..term.grid.rows as usize)

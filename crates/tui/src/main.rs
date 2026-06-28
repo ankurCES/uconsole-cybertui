@@ -361,39 +361,32 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
     match &app.modal {
         Modal::None => {}
         Modal::Help => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-            let lines = vec![
-                Line::from("cyberdeck-tui — help"),
-                Line::from(""),
-                Line::from(" ↑/↓ j/k    navigate lists"),
-                Line::from(" ←/→ h/l    switch focus between sidebar and content"),
-                Line::from(" enter      open / confirm"),
-                Line::from(" esc        back / cancel"),
-                Line::from(" 1..9       jump to screen"),
-                Line::from(" r          refresh current screen"),
-                Line::from(" :          command palette"),
-                Line::from(" ?          this help"),
-                Line::from(" q          quit"),
-                Line::from(""),
-                Line::from("Press ? or esc to close."),
-            ];
-            let w = 60.min(area.width.saturating_sub(4));
-            let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h)) / 2;
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" help ")
-                        .borders(Borders::ALL)
-                        .border_style(theme.border(true)),
-                )
-                .wrap(Wrap { trim: false })
-                .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
-            f.render_widget(p, rect);
+            // Keybindings overlay. Replaces the old hand-rolled
+            // Clear + Block + Paragraph with `popup::render_with_hints`
+            // so the help modal shares the same orbital-style chrome
+            // (shadow band, rounded border, key/description table) as
+            // every other popup on PR #5.
+            //
+            // The keys themselves are split into two columns by
+            // `render_with_hints`: the key gets `theme.key()` (the
+            // accent register) and the description gets `theme.fg()`.
+            crate::wm::popup::render_with_hints(
+                f,
+                area,
+                "help",
+                &[
+                    ("↑/↓ j/k", "navigate lists"),
+                    ("←/→ h/l", "switch focus"),
+                    ("enter", "open / confirm"),
+                    ("esc", "back / cancel"),
+                    ("1..9", "jump to screen"),
+                    ("r", "refresh current screen"),
+                    (":", "command palette"),
+                    ("?", "this help"),
+                    ("q", "quit"),
+                ],
+                theme,
+            );
         }
         Modal::CommandPalette => {
             use ratatui::text::Line;
@@ -638,30 +631,17 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
             f.render_widget(gauge, gauge_rect);
         }
         Modal::AuthFailure { command, stderr, retry: _ } => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-            let lines = vec![
-                Line::from(format!("Authentication failed: {command}")),
-                Line::from(""),
-                Line::from(stderr.clone()),
-                Line::from(""),
-                Line::from("Press R to retry, Esc to cancel."),
-            ];
-            let w_ = 64.min(area.width.saturating_sub(4));
-            let h_ = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w_)) / 2;
-            let y = area.y + (area.height.saturating_sub(h_)) / 2;
-            let rect = rect(x, y, w_, h_);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" auth required ")
-                        .borders(Borders::ALL)
-                        .border_style(theme.warn()),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, rect);
+            let body = format!(
+                "Authentication failed: {command}\n\n{}\n\nPress R to retry, Esc to cancel.",
+                stderr
+            );
+            crate::wm::popup::render(
+                f,
+                area,
+                crate::wm::popup::Popup::new("auth required", &body)
+                    .with_hint("[r] retry   [esc] cancel"),
+                theme,
+            );
         }
     }
 }
@@ -999,6 +979,14 @@ async fn handle_key(
             app.sidebar_focused = false;
             return false;
         }
+        // Tab / Shift-Tab screen cycling (orbital-style hidden-widget skip).
+        // Only fires when content is focused and no modal is open, so it
+        // never steals Tab from inputs or the sidebar branch above.
+        Tab | BackTab if !app.sidebar_focused && matches!(app.modal, Modal::None) => {
+            let forward = matches!(key.code, KeyCode::Tab);
+            let _ = tx.send(Action::CycleScreen(forward)).await;
+            return false;
+        }
         Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::System, 0),
         Char('2') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Network, 1),
         Char('3') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::Bluetooth, 2),
@@ -1288,16 +1276,37 @@ async fn handle_action(
     action: Action,
 ) -> bool {
     match action {
-        Action::Tick => {} // refreshers already produced data
+        Action::Tick => {
+            // Refreshers already produced data. Also: fire the welcome
+            // toast exactly once on the first tick of the process so the
+            // user lands on something more useful than a blank pane.
+            // Mirrors orbital's startup greeter pattern.
+            if !app.boot_toast_sent {
+                app.boot_toast_sent = true;
+                app.push_toast(
+                    ToastKind::Info,
+                    "Welcome — Tab to switch panes, ? for help, r to rescan",
+                );
+            }
+        }
         Action::Key(_) => {}
         Action::Goto(id) => {
             app.current = id;
+        }
+        Action::CycleScreen(forward) => {
+            // Tab / Shift-Tab stepping. Mirrors orbital's
+            // Tab/Shift-Tab widget navigation with hidden-widget
+            // skipping: `Screen::is_hidden(&app) -> bool` defaults to
+            // false so every screen is reachable unless it opts out.
+            app.current = ScreenId::cycle(&*screens, app, app.current, forward);
         }
         Action::Quit => return true,
         Action::Toast(kind, msg) => app.push_toast(kind, msg),
         Action::Toggle(key) => {
             use app::screen::SettingsKey::*;
-            match key {
+            // Confirmation toast text is decided at the end of the arm so
+            // we can name the post-toggle state (e.g. "theme: light").
+            let confirm: Option<String> = match key {
                 Theme => {
                     app.theme_name = match app.theme_name {
                         app::screen::ThemeNameReexport::Dark => {
@@ -1310,9 +1319,29 @@ async fn handle_action(
                             app::screen::ThemeNameReexport::Dark
                         }
                     };
+                    Some(format!(
+                    "theme: {}",
+                    match app.theme_name {
+                        app::screen::ThemeNameReexport::Dark => "dark",
+                        app::screen::ThemeNameReexport::Light => "light",
+                        app::screen::ThemeNameReexport::HighContrast => "contrast",
+                    }
+                ))
                 }
-                Mouse => app.mouse = !app.mouse,
-                NerdFont => app.nerd_font = !app.nerd_font,
+                Mouse => {
+                    app.mouse = !app.mouse;
+                    Some(format!(
+                        "mouse capture: {}",
+                        if app.mouse { "on" } else { "off" }
+                    ))
+                }
+                NerdFont => {
+                    app.nerd_font = !app.nerd_font;
+                    Some(format!(
+                        "nerd font glyphs: {}",
+                        if app.nerd_font { "on" } else { "off" }
+                    ))
+                }
                 WebServer => {
                     let act = if *app.live.web_enabled.read().await {
                         RunAction::WebStop
@@ -1320,8 +1349,20 @@ async fn handle_action(
                         RunAction::WebStart
                     };
                     let sender = app.live.web_ctrl.lock().await.clone();
+                    // Optimistic confirmation: assume the request will
+                    // succeed. If it fails the web-server task pushes a
+                    // follow-up Error toast itself.
+                    let will_be = if matches!(act, RunAction::WebStop) {
+                        "off"
+                    } else {
+                        "on"
+                    };
                     let _ = sender.send((tx.clone(), Action::Run(act))).await;
+                    Some(format!("web server: {will_be}"))
                 }
+            };
+            if let Some(msg) = confirm {
+                app.push_toast(ToastKind::Info, msg);
             }
         }
         Action::Run(act) => {
@@ -1946,6 +1987,95 @@ mod tests {
         let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Esc)).await;
         assert!(matches!(app.modal, Modal::None));
         assert!(_rx.try_recv().is_err(), "no action should be enqueued");
+    }
+
+    // Toggle confirmation toasts: every Action::Toggle must push an Info
+    // toast naming the new state, so the user gets immediate feedback
+    // instead of a silent flag flip. Mirrors orbital's "every action
+    // produces a visible ack" rule.
+    #[tokio::test]
+    async fn toggle_theme_pushes_confirmation_toast() {
+        use app::screen::SettingsKey;
+        let (tx, _rx, mut app) = make_app();
+        let before = app.theme_name;
+        let _ = handle_action(
+            &mut [],
+            &mut app,
+            &tx,
+            Action::Toggle(SettingsKey::Theme),
+        )
+        .await;
+        assert_ne!(app.theme_name, before, "Theme toggle must rotate");
+        assert_eq!(app.toasts.len(), 1, "exactly one toast");
+        assert!(app.toasts[0].text.starts_with("theme: "), "got: {:?}", app.toasts[0].text);
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+    }
+
+    #[tokio::test]
+    async fn toggle_mouse_pushes_confirmation_toast() {
+        use app::screen::SettingsKey;
+        let (tx, _rx, mut app) = make_app();
+        let before = app.mouse;
+        let _ = handle_action(
+            &mut [],
+            &mut app,
+            &tx,
+            Action::Toggle(SettingsKey::Mouse),
+        )
+        .await;
+        assert_ne!(app.mouse, before, "Mouse toggle must flip");
+        assert_eq!(app.toasts.len(), 1);
+        assert!(app.toasts[0].text.starts_with("mouse capture: "), "got: {:?}", app.toasts[0].text);
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+    }
+
+    #[tokio::test]
+    async fn toggle_nerd_font_pushes_confirmation_toast() {
+        use app::screen::SettingsKey;
+        let (tx, _rx, mut app) = make_app();
+        let before = app.nerd_font;
+        let _ = handle_action(
+            &mut [],
+            &mut app,
+            &tx,
+            Action::Toggle(SettingsKey::NerdFont),
+        )
+        .await;
+        assert_ne!(app.nerd_font, before, "NerdFont toggle must flip");
+        assert_eq!(app.toasts.len(), 1);
+        assert!(app.toasts[0].text.starts_with("nerd font glyphs: "), "got: {:?}", app.toasts[0].text);
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+    }
+
+    #[tokio::test]
+    async fn boot_welcome_toast_fires_exactly_once() {
+        let (tx, _rx, mut app) = make_app();
+        assert!(!app.boot_toast_sent, "fresh app must start with boot_toast_sent=false");
+        assert!(app.toasts.is_empty(), "fresh app must have no toasts");
+
+        // First tick: welcome toast must land.
+        let quit = handle_action(&mut [], &mut app, &tx, Action::Tick).await;
+        assert!(!quit, "Tick must not request quit");
+        assert!(app.boot_toast_sent, "after first Tick boot_toast_sent must be true");
+        assert_eq!(app.toasts.len(), 1, "exactly one welcome toast after first Tick");
+        assert!(
+            app.toasts[0].text.starts_with("Welcome"),
+            "welcome toast text must start with 'Welcome', got: {:?}",
+            app.toasts[0].text
+        );
+        assert!(matches!(app.toasts[0].kind, ToastKind::Info));
+
+        // Two more ticks: no extra welcome toasts. Other refreshers may
+        // legitimately push unrelated toasts, so we count how many start
+        // with 'Welcome' and assert the count stays at 1.
+        let _ = handle_action(&mut [], &mut app, &tx, Action::Tick).await;
+        let _ = handle_action(&mut [], &mut app, &tx, Action::Tick).await;
+        let welcome_count = app
+            .toasts
+            .iter()
+            .filter(|t| t.text.starts_with("Welcome"))
+            .count();
+        assert_eq!(welcome_count, 1, "welcome toast must fire exactly once across all ticks");
     }
 
     #[tokio::test]
