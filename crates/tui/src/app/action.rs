@@ -67,6 +67,15 @@ pub enum RunAction {
     BluetoothPair(String),
     BluetoothTrust(String),
     BluetoothPower(bool),
+    /// Phase 6: connect to a WPA-Enterprise SSID. Fields map to NM 802-1x
+    /// settings. Implemented in `cyberdeck_core::net::wifi_connect_enterprise`.
+    WifiEnterpriseConnect {
+        ssid: String,
+        eap: String,
+        identity: String,
+        password: Option<String>,
+        anon_or_cert: Option<String>,
+    },
     Reboot,
     Shutdown,
     Suspend,

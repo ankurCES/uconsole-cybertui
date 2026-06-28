@@ -38,7 +38,7 @@ pub use action::Action;
 pub use screen::ScreenId;
 pub use toast::Toast;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Modal {
     None,
     Help,
@@ -53,6 +53,66 @@ pub enum Modal {
         buf: String,
         kind: InputKind,
     },
+    /// Masked text input. Renders every char as `•`; underlying `buf` is the
+    /// real value. Used for passwords, BT passkeys, 802.1X identity passwords.
+    Secret {
+        prompt: String,
+        buf: String,
+        kind: InputKind,
+    },
+    /// Pick one of `options` with j/k or Up/Down, Enter to commit, Esc to
+    /// dismiss. Options are `(id, label)` so the caller can use a stable key
+    /// regardless of the rendered string.
+    Choice {
+        prompt: String,
+        options: Vec<ChoiceOption>,
+        cursor: usize,
+        /// When `Some`, the chosen id is forwarded through this modal kind
+        /// (e.g. committing the SSID picker opens the Wi-Fi password modal).
+        commit_kind: Option<ChoiceCommit>,
+    },
+    /// Multi-step flow (e.g. Wi-Fi Enterprise: pick EAP → identity → password).
+    /// `step` indexes into `state.steps()`; `advance()` returns the next state
+    /// or signals completion via `Wizard::done()`.
+    Wizard(Wizard),
+    /// Long-running action with progress. `done`/`total` are 0-based; total=0
+    /// means "indeterminate" (spinner). Esc closes the modal AND signals
+    /// cancellation via the oneshot in `cancel`.
+    Progress {
+        label: String,
+        done: u64,
+        total: u64,
+        cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    },
+    /// `pkexec` (or whatever Privilege::Sudo wrapper) returned non-zero.
+    /// The inner modal is what to retry once the user re-authenticates.
+    AuthFailure {
+        command: String,
+        stderr: String,
+        retry: Box<Modal>,
+    },
+}
+
+#[derive(Debug)]
+pub struct ChoiceOption {
+    pub id: String,
+    pub label: String,
+}
+
+/// Where a Choice commit lands. `PickInput` opens the named `InputKind`
+/// prompt with `id` pre-supplied via `prefill`; `RunAction` dispatches
+/// directly; `Next` re-enters the wizard with the picked step value.
+#[derive(Debug)]
+pub enum ChoiceCommit {
+    /// Open an Input/Secret modal with `prefill` already in the buffer.
+    PickInput {
+        kind: InputKind,
+        prompt: String,
+        masked: bool,
+        prefill: String,
+    },
+    /// Dispatch this RunAction verbatim.
+    RunAction(crate::app::action::RunAction),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +129,46 @@ pub enum InputKind {
     WifiPassword,
     ConnectSSID,
     KillPid,
+    WifiEnterpriseIdentity,
+    WifiEnterprisePassword,
+    HiddenSSID,
+}
+
+#[derive(Debug)]
+pub enum Wizard {
+    /// Wi-Fi Enterprise 802.1X connect. Steps:
+    /// 0: pick EAP method (PEAP/TTLS/TLS/PWD)
+    /// 1: identity (Input)
+    /// 2: password (Secret) — skipped for TLS
+    /// 3: optional anon identity or cert path (Input) — depends on method
+    WifiEnterprise {
+        ssid: String,
+        step: usize,
+        eap: Option<String>,
+        identity: Option<String>,
+        password: Option<String>,
+        anon_or_cert: Option<String>,
+    },
+}
+
+impl Wizard {
+    pub fn done(&self) -> bool {
+        match self {
+            Wizard::WifiEnterprise { identity, password, anon_or_cert, eap, .. } => {
+                if eap.is_none() || identity.is_none() {
+                    return false;
+                }
+                match eap.as_deref() {
+                    // `step` is the UI flow cursor; we don't gate `done()`
+                    // on it because callers set fields directly during tests
+                    // and via the dispatcher in production (which advances
+                    // step in lock-step with the fields anyway).
+                    Some("TLS") => anon_or_cert.is_some(),
+                    _ => password.is_some(),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -319,6 +419,63 @@ impl App {
             files_right: PathBuf::from("/"),
             files_right_entries: Vec::new(),
         }
+    }
+
+    /// Shortcut to open a `Modal::Input` with the given prompt and kind.
+    pub fn open_input(&mut self, prompt: impl Into<String>, kind: InputKind) {
+        self.modal = Modal::Input {
+            prompt: prompt.into(),
+            buf: String::new(),
+            kind,
+        };
+    }
+
+    /// Shortcut to open a `Modal::Secret` (masked text input).
+    pub fn open_secret(&mut self, prompt: impl Into<String>, kind: InputKind) {
+        self.modal = Modal::Secret {
+            prompt: prompt.into(),
+            buf: String::new(),
+            kind,
+        };
+    }
+
+    /// Shortcut to open a `Modal::Choice` picker.
+    pub fn open_choice(
+        &mut self,
+        prompt: impl Into<String>,
+        options: Vec<ChoiceOption>,
+        commit_kind: Option<ChoiceCommit>,
+    ) {
+        self.modal = Modal::Choice {
+            prompt: prompt.into(),
+            options,
+            cursor: 0,
+            commit_kind,
+        };
+    }
+
+    /// Shortcut to open a `Modal::Wizard` flow.
+    pub fn open_wizard(&mut self, w: Wizard) {
+        self.modal = Modal::Wizard(w);
+    }
+
+    /// Shortcut to open a `Modal::Progress` modal with a cancellable task.
+    pub fn open_progress(
+        &mut self,
+        label: impl Into<String>,
+        cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    ) {
+        self.modal = Modal::Progress {
+            label: label.into(),
+            done: 0,
+            total: 0,
+            cancel,
+        };
+    }
+
+    /// Shortcut to open a `Modal::AuthFailure` with an inner retry modal.
+    pub fn open_auth_failure(&mut self, command: String, stderr: String, retry: Box<Modal>) {
+        self.modal = Modal::AuthFailure { command, stderr, retry };
     }
 
     pub fn push_toast(&mut self, kind: toast::ToastKind, msg: impl Into<String>) {
