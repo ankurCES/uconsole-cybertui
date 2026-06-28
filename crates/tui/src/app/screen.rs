@@ -17,6 +17,11 @@ pub enum ScreenId {
     Files,
     Logs,
     Settings,
+    /// Module 4 — Files: in-TUI editor. Reachable only from the Files
+    /// screen via `e` on a selected file. `is_hidden` returns `true`
+    /// for the EditorScreen so Tab/Shift-Tab cycling (which uses
+    /// `ScreenId::cycle` in this module) skips it.
+    Editor,
 }
 
 impl ScreenId {
@@ -34,6 +39,7 @@ impl ScreenId {
         ScreenId::Files,
         ScreenId::Logs,
         ScreenId::Settings,
+        ScreenId::Editor,
     ];
 
     pub fn label(self) -> &'static str {
@@ -51,6 +57,7 @@ impl ScreenId {
             ScreenId::Files => "Files",
             ScreenId::Logs => "Logs",
             ScreenId::Settings => "Settings",
+            ScreenId::Editor => "Editor",
         }
     }
 
@@ -69,6 +76,7 @@ impl ScreenId {
             ScreenId::Files => "▢",
             ScreenId::Logs => "▥",
             ScreenId::Settings => "✱",
+            ScreenId::Editor => "✎",
         }
     }
 
@@ -192,9 +200,18 @@ mod tests {
     }
 
     fn all_visible() -> Vec<Box<dyn Screen>> {
+        // Mirror the runtime `Screen::is_hidden` answers here so the
+        // cycle tests line up with what the real renderer would do.
+        // Editor opts out of sidebar cycling (it's reachable only via
+        // `e` from Files and exits via Esc); mark it hidden in the
+        // test fake so wrap-around lands on `Settings` (the last
+        // truly-visible screen) instead of the Editor sink.
         ScreenId::ALL
             .iter()
-            .map(|id| Box::new(FakeScreen { id: *id, hidden: false }) as Box<dyn Screen>)
+            .map(|id| {
+                let hidden = matches!(id, ScreenId::Editor);
+                Box::new(FakeScreen { id: *id, hidden }) as Box<dyn Screen>
+            })
             .collect()
     }
 
@@ -232,7 +249,7 @@ mod tests {
         let mut screens: Vec<Box<dyn Screen>> = ScreenId::ALL
             .iter()
             .map(|id| {
-                let hidden = matches!(id, ScreenId::Network | ScreenId::Power);
+                let hidden = matches!(id, ScreenId::Network | ScreenId::Power | ScreenId::Editor);
                 Box::new(FakeScreen { id: *id, hidden }) as Box<dyn Screen>
             })
             .collect();

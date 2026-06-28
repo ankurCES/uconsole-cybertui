@@ -5,6 +5,7 @@
 pub mod audio;
 pub mod bluetooth;
 pub mod display;
+pub mod editor;
 pub mod files;
 pub mod logs;
 pub mod network;

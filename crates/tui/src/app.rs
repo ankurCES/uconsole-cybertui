@@ -122,6 +122,12 @@ pub enum ConfirmKind {
     Kill,
     Remove,
     DisconnectWifi,
+    /// Module 4 — Files: in-TUI editor. Confirms discarding an
+    /// unsaved editor buffer (Esc on a dirty editor). `arg` on the
+    /// owning `Modal::Confirm` carries the editor's path as a
+    /// human-readable string so the dialog can show "Discard
+    /// unsaved changes to {path}?".
+    Discard,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -382,6 +388,30 @@ pub struct App {
     pub nerd_font: bool,
     /// SSID that the wifi-password modal is collecting a password for.
     pub pending_ssid: Option<String>,
+    /// Module 4 — Files: in-TUI editor. The path of the file currently
+    /// loaded in the editor's buffer (empty PathBuf when the editor
+    /// is not active). Set by `App::enter_editor`; cleared when the
+    /// editor closes (clean Esc or Discard-confirmed Esc).
+    pub editor_path: std::path::PathBuf,
+    /// Module 4 — Files: in-TUI editor. The editor's in-memory text
+    /// buffer, split on `\n`. Lines do NOT carry their trailing `\n`
+    /// — `editor_buffer.join("\n") + "\n"` is the canonical on-disk
+    /// representation (matches `std::fs::write` round-trip for files
+    /// that ended with a newline; the trailing newline is added on
+    /// save to preserve POSIX text-file convention).
+    pub editor_buffer: Vec<String>,
+    /// Module 4 — cursor position as (line, column). Clamped on every
+    /// edit. Column is a byte index into `editor_buffer[line]`.
+    pub editor_cursor: (usize, usize),
+    /// Module 4 — true when the buffer has unsaved changes since the
+    /// last load or save. Drives the dirty-Esc confirm modal and the
+    /// dirty marker in the title.
+    pub editor_dirty: bool,
+    /// Module 4 — true when the editor is in read-only mode (file
+    /// too large or binary heuristic matched on entry). Ctrl-S is
+    /// a no-op + read-only toast; typing is dropped at the
+    /// buffer-insert step.
+    pub editor_read_only: bool,
     /// Files-screen navigation.
     pub files_cwd: std::path::PathBuf,
     pub files_entries: Vec<cyberdeck_core_files::DirEntry>,
@@ -446,6 +476,17 @@ impl App {
             clock: Local::now(),
             nerd_font: std::env::var("NERD_FONT").as_deref() != Ok("0"),
             pending_ssid: None,
+            // Module 4 — Files: in-TUI editor initial state. The editor
+            // is dormant until `App::enter_editor` is called from the
+            // Files screen (`e` arm). Empty PathBuf + empty buffer +
+            // cursor (0, 0) + dirty=false + read-only=false means the
+            // editor fields are always well-formed without forcing the
+            // App::new signature to grow.
+            editor_path: PathBuf::new(),
+            editor_buffer: Vec::new(),
+            editor_cursor: (0, 0),
+            editor_dirty: false,
+            editor_read_only: false,
             files_cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
             files_entries: Vec::new(),
             files_selected: 0,
@@ -522,6 +563,85 @@ impl App {
 
     pub fn tick_clock(&mut self) {
         self.clock = Local::now();
+    }
+
+    /// Module 4 — Files: in-TUI editor entry point.
+    ///
+    /// Called by the Files screen's `e` arm with the selected file's
+    /// path. Probes read-only via `screens::editor::should_open_read_only`,
+    /// reads the file into memory (capped at 1 MiB, matching the read-only
+    /// gate — a 1 MiB+1 byte file never reaches `read_to_string` because
+    /// the gate has already short-circuited it to read-only mode where
+    /// we still want a buffer), splits lines into the editor's buffer,
+    /// stamps the 5 editor fields, and swaps the focused pane to
+    /// `ScreenId::Editor`.
+    ///
+    /// Test 1 requires `editor_buffer == vec!["alpha", "beta", "gamma"]`
+    /// when the file is `"alpha\nbeta\ngamma\n"`. We split on `\n` and
+    /// trim the trailing empty entry that a terminal `\n` produces —
+    /// matches POSIX text-file convention where the trailing `\n` is
+    /// a line terminator, not an empty line.
+    pub fn enter_editor(&mut self, path: std::path::PathBuf) {
+        use crate::screens::editor::should_open_read_only;
+
+        let (read_only, _reason) = should_open_read_only(&path);
+
+        // Cap the read at 1 MiB so we never load a multi-GB file into
+        // memory. Mirrors the gate's `SIZE_CAP` exactly; a file over
+        // the cap was already flagged read-only by `should_open_read_only`
+        // (we still want *some* buffer for display, but a capped one).
+        const READ_CAP: u64 = 1024 * 1024;
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let capped: &[u8] = if bytes.len() as u64 > READ_CAP {
+            &bytes[..READ_CAP as usize]
+        } else {
+            &bytes[..]
+        };
+        // Lossy decode so a binary file still gets a buffer (the
+        // editor is already read-only in that branch).
+        let text = String::from_utf8_lossy(capped);
+        let mut buf: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+        // Drop the trailing empty entry caused by a terminal `\n`.
+        if buf.last().map(|s| s.is_empty()).unwrap_or(false) {
+            buf.pop();
+        }
+        // Empty file → one empty line so the editor always has a row.
+        if buf.is_empty() {
+            buf.push(String::new());
+        }
+
+        self.editor_path = path;
+        self.editor_buffer = buf;
+        self.editor_cursor = (0, 0);
+        self.editor_dirty = false;
+        self.editor_read_only = read_only;
+
+        // Swap the focused builtin to Editor.
+        self.manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(ScreenId::Editor));
+    }
+
+    /// Module 4 — discard the editor's in-memory buffer and return focus
+    /// to the Files screen. The mirror image of `enter_editor`:
+    ///   * `editor_path` → `PathBuf::new()` (dormant sentinel)
+    ///   * `editor_buffer` → empty
+    ///   * `editor_cursor` → `(0, 0)`
+    ///   * `editor_dirty` → `false`
+    ///   * `editor_read_only` → `false`
+    ///   * focused pane → `ScreenId::Files`
+    ///
+    /// Wired to the `Modal::Confirm { kind: ConfirmKind::Discard, .. }`
+    /// confirmation path in `main::run_confirm`. Pure in-memory state
+    /// reset — no disk I/O, since "discard" by definition means the
+    /// user has chosen to throw the buffer away.
+    pub fn discard_editor(&mut self) {
+        self.editor_path = std::path::PathBuf::new();
+        self.editor_buffer = Vec::new();
+        self.editor_cursor = (0, 0);
+        self.editor_dirty = false;
+        self.editor_read_only = false;
+        self.manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(ScreenId::Files));
     }
 
     /// A short summary line for the status bar.

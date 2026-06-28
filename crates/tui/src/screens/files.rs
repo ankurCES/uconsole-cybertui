@@ -77,6 +77,23 @@ impl Screen for FilesScreen {
                 }
                 true
             }
+            // Module 4 — open the in-TUI editor on `app.files_right`.
+            // The right pane is where the user "locks in" a file (Enter
+            // on a non-directory drops its path there and refreshes the
+            // right listing), so `e` reads from there. We only open the
+            // editor if the path is a real file — `is_file()` is false
+            // for missing paths, directories, and broken symlinks, all
+            // of which would otherwise trigger a confusing read-only
+            // fallback. Returns `true` so the key is consumed.
+            KeyCode::Char('e') => {
+                if app.files_right.is_file() {
+                    App::enter_editor(app, app.files_right.clone());
+                } else {
+                    app.status_message =
+                        Some("editor: not a regular file".to_string());
+                }
+                true
+            }
             _ => false,
         }
     }
