@@ -99,7 +99,7 @@ impl Screen for FilesScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(body_area);
 
         // Clamp selection to bounds.

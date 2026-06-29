@@ -159,7 +159,7 @@ impl Screen for NetworkScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(body_area);
 
         let iface_count = app.live.interfaces.try_read().map(|v| v.len()).unwrap_or(0);

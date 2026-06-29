@@ -274,4 +274,97 @@ mod tests {
             ScreenId::Network
         );
     }
+
+    /// Module 5b layout audit — locks the bucket classification from
+    /// `docs/superpowers/specs/2026-06-28-tui-ux-improvements-design.md`.
+    ///
+    /// Three buckets:
+    ///   * `multi` — every multi-pane screen renders a single
+    ///     `Layout::default().direction(Direction::Horizontal)` with
+    ///     `[Constraint::Percentage(60), Constraint::Percentage(40)]`.
+    ///     Left = list/form, right = status block. No nested
+    ///     `Layout` calls.
+    ///   * `single` — single-pane screens (Storage, Services,
+    ///     Processes, Logs, Settings, Bluetooth) render a single
+    ///     `Block::default()` outer + a `Block::default().borders(
+    ///     Borders::NONE)` inner list. No `Layout::Horizontal`,
+    ///     no nested `Layout`.
+    ///   * `exempt` — `editor` is off the sidebar (reachable only via
+    ///     `e` from Files, exits via Esc). The spec explicitly
+    ///     exempts it from the sidebar layout contract.
+    ///
+    /// Test reads each file as a `&str` via `include_str!` so the
+    /// invariants are pinned at the source level — no `TestBackend`
+    /// needed, no render cost. If a future edit breaks a bucket's
+    /// contract, this test fails before the rendered TUI can.
+    #[test]
+    fn screen_renders_layout_audit() {
+        // Path-relative to the crate root (`crates/tui/`).
+        const MULTI: &[(&str, &str)] = &[
+            ("system",    include_str!("../screens/system.rs")),
+            ("power",     include_str!("../screens/power.rs")),
+            ("display",   include_str!("../screens/display.rs")),
+            ("audio",     include_str!("../screens/audio.rs")),
+            ("packages",  include_str!("../screens/packages.rs")),
+            ("files",     include_str!("../screens/files.rs")),
+            ("network",   include_str!("../screens/network.rs")),
+        ];
+        const SINGLE: &[(&str, &str)] = &[
+            ("storage",   include_str!("../screens/storage.rs")),
+            ("services",  include_str!("../screens/services.rs")),
+            ("processes", include_str!("../screens/processes.rs")),
+            ("logs",      include_str!("../screens/logs.rs")),
+            ("settings",  include_str!("../screens/settings.rs")),
+            ("bluetooth", include_str!("../screens/bluetooth.rs")),
+        ];
+        // `editor` is exempt — skip.
+
+        // Canonical spec-compliant snippet.
+        const SPEC_SPLIT: &str =
+            "Layout::default()\n            .direction(Direction::Horizontal)\n            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])";
+
+        for (name, src) in MULTI {
+            // Must contain exactly one `Layout::default()` chain, and
+            // it must match the canonical spec snippet verbatim.
+            let count = src.matches("Layout::default()").count();
+            assert_eq!(
+                count, 1,
+                "{name}: multi-pane screen must have exactly one Layout::default() (got {count})"
+            );
+            assert!(
+                src.contains(SPEC_SPLIT),
+                "{name}: multi-pane split must be [Percentage(60), Percentage(40)] Horizontal — spec deviation"
+            );
+            // No nested Layout:: calls inside the render fn.
+            let nested = src
+                .split("fn render")
+                .nth(1)
+                .map(|rest| rest.matches("Layout::default()").count().saturating_sub(1))
+                .unwrap_or(0);
+            assert_eq!(
+                nested, 0,
+                "{name}: multi-pane screen must not nest additional Layout::default() inside render"
+            );
+        }
+
+        for (name, src) in SINGLE {
+            // Must not use a horizontal split — these screens are
+            // single-pane by design (a single list + a bottom hint
+            // strip).
+            assert!(
+                !src.contains("Direction::Horizontal"),
+                "{name}: single-pane screen must not use Direction::Horizontal"
+            );
+            assert!(
+                !src.contains("Layout::default()"),
+                "{name}: single-pane screen must not use Layout::default() (it has zero Layout splits)"
+            );
+            // Sanity: must still render at least one Block + one
+            // List/Table — a screen with neither is misclassified.
+            assert!(
+                src.contains("Block::default()") && src.contains("List::new"),
+                "{name}: single-pane screen must render a Block + a List"
+            );
+        }
+    }
 }

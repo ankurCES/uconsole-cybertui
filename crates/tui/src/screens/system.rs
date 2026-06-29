@@ -73,7 +73,7 @@ impl Screen for SystemScreen {
         // Two columns: facts left, recent log right.
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(body_area);
 
         // Left: facts. Read live data; fall back to placeholder if not ready.

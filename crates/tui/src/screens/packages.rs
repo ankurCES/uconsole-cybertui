@@ -124,7 +124,7 @@ impl Screen for PackagesScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(inner);
 
         // Left: upgradable — now a real scrollable list.
