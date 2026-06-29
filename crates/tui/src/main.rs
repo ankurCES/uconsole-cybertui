@@ -1110,10 +1110,27 @@ async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, va
                 return;
             }
         }
-        InputKind::ConnectSSID => RunAction::WifiConnect {
-            ssid: value,
-            password: None,
-        },
+        InputKind::ConnectSSID => {
+            // Hidden-SSID connect. Per Module 1 (orbital-style chain),
+            // do NOT dispatch WifiConnect directly with password: None —
+            // that silently connects to an open hidden network even if the
+            // user meant a WPA network. Instead, stash the typed SSID on
+            // `app.pending_ssid` and open `Modal::Secret` so the user can
+            // enter the password. The submit on that modal flows through
+            // the `InputKind::WifiPassword` arm above and dispatches
+            // `WifiConnect { ssid, password: Some(...) }`.
+            let ssid = value.trim().to_string();
+            if ssid.is_empty() {
+                app.push_toast(ToastKind::Error, "SSID cannot be empty");
+                return;
+            }
+            app.pending_ssid = Some(ssid.clone());
+            app.open_secret(
+                format!("Wi-Fi password for {ssid}"),
+                InputKind::WifiPassword,
+            );
+            return;
+        }
         InputKind::KillPid => match value.parse::<i32>() {
             Ok(p) => RunAction::ProcessKill(p),
             Err(_) => {
