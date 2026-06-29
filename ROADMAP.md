@@ -38,11 +38,29 @@ Rewritten with a `Region` enum and a clean D-pad contract:
 - Sub-focus borders on every multi-pane screen (System, Network, Files,
   Power, Display, Packages) — the focused half of each screen now
   lights up while the unfocused half dims.
+- Header chip — a three-segment `sidebar / left / right` pill under the
+  title bar that always reflects the focused region. (Came in after
+  the initial D-pad pass; the original Phase 1b copy only mentions the
+  status-bar label, which still exists as the spoken label.)
+- Focus gutter — a left-edge highlight rail on the sidebar and on the
+  focused content half, so D-pad users have a single visible focus
+  signal even when borders are off (narrow uconsole mode, dim themes).
+  Narrow mode replaces the right pane with a focus gutter and an honest
+  "single-pane" hint instead of pretending both halves exist.
+- Region-aware help modal — `?` now describes the keys for the focused
+  region, not a single static keymap.
+- Status-bar vocabulary aligned with the chip: `▶ sidebar`, `▶ left`,
+  `▶ right` (was `← content · left` / `content · right →`). The
+  `←`/`→` characters still appear in the hint strip itself
+  (`←/h sidebar`, `→/l other pane`) — only the region label changed.
 
 Regression tests pinned: `content_left_returns_to_sidebar`,
 `sidebar_left_returns_focus`, `router_walk_three_regions`,
 `number_keys_when_sidebar_focused_move_cursor_to_that_row`,
-`number_keys_when_content_focused_still_swap_pane_kind`. All 119
+`number_keys_when_content_focused_still_swap_pane_kind`, and the
+new `ui::status_region_vocabulary::{sidebar,content_left,content_right}`
+asserts that lock the `▶` label so a future revert of the chip-vs-label
+alignment trips the test instead of silently regressing. All 122
 tests in the binary pass.
 
 ## Phase 2 — PTY / ANSI / broadcaster (done, not wired)

@@ -461,3 +461,101 @@ pub fn chunks(area: Rect) -> (Rect, Rect, Rect) {
         .split(outer[1]);
     (outer[0], body[0], body[1])
 }
+
+#[cfg(test)]
+mod status_region_vocabulary {
+    //! Pin the status-bar region-label vocabulary to ▶ so it always
+    //! matches the header chip introduced in `ee1b197`. The header chip
+    //! and the status-bar `region_label` arm must read in the same
+    //! visual language; if a future revert reintroduces `← content · left`
+    //! or `content · right →`, these tests fail.
+    //!
+    //! Tests use `TestBackend` + buffer assertion, the same pattern as
+    //! `crates/tui/src/screens/services.rs::offset_tests::render_clips_to_offset`.
+    use super::*;
+    use crate::app::{App, Region};
+    use crate::theme::{Theme, ThemeName};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc;
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer().clone();
+        let mut rows: Vec<String> = Vec::new();
+        for y in 0..buffer.area.height {
+            let mut row = String::new();
+            for x in 0..buffer.area.width {
+                row.push(buffer[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            rows.push(row);
+        }
+        rows.join("\n")
+    }
+
+    fn fresh_app() -> App {
+        let (tx, rx) = mpsc::channel::<crate::app::Action>(8);
+        App::new(tx, rx)
+    }
+
+    fn render_status_with(region: Region) -> (String, String) {
+        let backend = TestBackend::new(80, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = region;
+        let area = terminal.backend().buffer().area;
+        let theme = Theme::by_name(ThemeName::Dark);
+        terminal
+            .draw(|f| draw_status(f, area, &app, &theme))
+            .unwrap();
+        let full = buffer_text(&terminal);
+        // The first non-empty row of the status bar starts with the
+        // `region_label` Span. Slice off the trailing hint strip so the
+        // assertion only governs the label, not legitimate `←/h` / `→/l`
+        // hint keys in the hint strip.
+        let label = full
+            .lines()
+            .filter(|r| !r.trim().is_empty())
+            .next_back()
+            .unwrap_or("")
+            .split('│')
+            .next()
+            .unwrap_or("")
+            .to_string();
+        (full, label)
+    }
+
+    #[test]
+    fn sidebar_uses_triangle_vocabulary() {
+        let (_, label) = render_status_with(Region::Sidebar);
+        assert!(
+            label.contains('▶'),
+            "sidebar region_label must contain ▶; got label slice: {:?}",
+            label
+        );
+        assert!(
+            label.contains("sidebar"),
+            "sidebar region_label must contain 'sidebar'; got: {:?}",
+            label
+        );
+        assert!(!label.contains("←"), "old ← form must not appear in label; got: {:?}", label);
+        assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
+    }
+
+    #[test]
+    fn content_left_uses_triangle_vocabulary() {
+        let (_, label) = render_status_with(Region::ContentLeft);
+        assert!(label.contains('▶'), "left region_label must contain ▶; got: {:?}", label);
+        assert!(label.contains("left"), "left region_label must contain 'left'; got: {:?}", label);
+        assert!(!label.contains("←"), "old ← form must not appear in label; got: {:?}", label);
+        assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
+    }
+
+    #[test]
+    fn content_right_uses_triangle_vocabulary() {
+        let (_, label) = render_status_with(Region::ContentRight);
+        assert!(label.contains('▶'), "right region_label must contain ▶; got: {:?}", label);
+        assert!(label.contains("right"), "right region_label must contain 'right'; got: {:?}", label);
+        assert!(!label.contains("←"), "old ← form must not appear in label; got: {:?}", label);
+        assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
+    }
+}
