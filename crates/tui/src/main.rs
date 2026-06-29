@@ -42,7 +42,7 @@ use tokio::sync::mpsc;
 use app::action::{Action, RunAction};
 use app::screen::{Screen, ScreenId};
 use app::toast::ToastKind;
-use app::{App, ChoiceCommit, ConfirmKind, InputKind, Modal, Wizard};
+use app::{App, ChoiceCommit, ConfirmKind, InputKind, Modal, Region, Wizard};
 use theme::Theme;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -334,6 +334,19 @@ async fn run_app(
 fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &Theme) {
     let (header, sidebar, content) = ui::chunks(f.area());
     ui::draw_header(f, header, app, theme);
+    // Region indicator chip: the right ~36 cols of the header. Mirrors
+    // the sidebar focus gutter and the status-bar label so the focused
+    // region is unmistakable from any glance — header, sidebar, status
+    // bar all tell the same story. On a 5" D-pad display this chip is
+    // the single most-glanced indicator of *where* focus is.
+    let chip_w = header.width.min(36);
+    let chip = ratatui::layout::Rect::new(
+        header.x + header.width.saturating_sub(chip_w),
+        header.y,
+        chip_w,
+        header.height,
+    );
+    ui::draw_region_chip(f, chip, app, theme);
     ui::draw_sidebar(f, sidebar, app, theme);
     ui::draw_status(f, content, app, theme);
     // content height = full content area minus status bar at bottom
@@ -406,19 +419,34 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
             // The keys themselves are split into two columns by
             // `render_with_hints`: the key gets `theme.key()` (the
             // accent register) and the description gets `theme.fg()`.
+            //
+            // Entries are organised by region so a first-time user can
+            // read top-to-bottom and learn the D-pad contract: sidebar
+            // first (the natural starting point), then content panes,
+            // then modals. The old "←/→ = switch focus" line was the
+            // exact wording that misled users into thinking the left
+            // pane and right pane were symmetric and interchangeable;
+            // they're not, and the new descriptions say so explicitly.
             crate::wm::popup::render_with_hints(
                 f,
                 area,
                 "help",
                 &[
-                    ("↑/↓ j/k", "navigate lists"),
-                    ("←/→ h/l", "switch focus"),
-                    ("enter", "open / confirm"),
-                    ("esc", "back / cancel"),
-                    ("1..9", "jump to screen"),
-                    ("r", "refresh current screen"),
-                    (":", "command palette"),
+                    ("region · sidebar", ""),
+                    ("↑/↓ j/k", "move cursor"),
+                    ("enter / →", "open screen"),
+                    ("1..9 0", "jump to screen"),
+                    ("region · content", ""),
+                    ("↑/↓ j/k", "scroll list"),
+                    ("←/h", "step back (or sidebar)"),
+                    ("→/l", "step right (multi-pane)"),
+                    ("tab", "next screen"),
+                    ("shift-tab", "previous screen"),
+                    ("esc", "leave to sidebar"),
+                    ("anytime", ""),
                     ("?", "this help"),
+                    (":", "command palette"),
+                    ("r", "refresh current screen"),
                     ("q", "quit"),
                 ],
                 theme,
@@ -695,10 +723,16 @@ fn palette_actions() -> Vec<(&'static str, String)> {
 /// without this, the sidebar would say "Network" but the content
 /// pane would keep showing whatever it last rendered.
 fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
-    if app.sidebar_focused {
+    if matches!(app.region, Region::Sidebar) {
         app.sidebar_idx = sidebar_row.min(ScreenId::ALL.len() - 1);
     }
     app.current = screen;
+    // Committing from the sidebar (Enter / 1-0 / "Go to N") lands the
+    // user in the content pane, not the sidebar. The new D-pad model
+    // always starts you inside the screen you just opened; `←`/`h`
+    // gets you back out. This replaces the old "Tab to switch panes"
+    // overload so arrow keys are deterministic.
+    app.set_region(Region::ContentLeft);
     let _ = app.manager.set_pane_kind(
         crate::wm::window::WindowKind::Builtin(screen),
     );
@@ -978,13 +1012,14 @@ async fn handle_key(
             app.palette_buf.clear();
             app.palette_idx = 0;
         }
-        // Sidebar navigation. Only active while `sidebar_focused` is true;
-        // otherwise these keys (Up/Down/k/j/Enter) belong to the focused
-        // pane. Up/Down (and k/j) move the sidebar cursor; Enter commits
-        // it as the current screen; Tab and Right (and l) hand focus back
-        // to the content pane; Esc cancels (back to content, leaving
-        // current screen unchanged).
-        Up | Char('k') if app.sidebar_focused => {
+        // Sidebar navigation. Only active while the sidebar owns the
+        // region focus; otherwise these keys belong to the focused pane.
+        // Up/Down (and k/j) move the sidebar cursor; Enter commits it as
+        // the current screen and flips region to ContentLeft. From the
+        // sidebar, Right/l and Esc hand focus back to the content pane;
+        // Tab/Shift-Tab cycles to the next/prev screen so a D-pad user
+        // can wander the screen list without ever touching the keyboard.
+        Up | Char('k') if app.region == Region::Sidebar => {
             if app.sidebar_idx == 0 {
                 app.sidebar_idx = ScreenId::ALL.len() - 1;
             } else {
@@ -992,37 +1027,128 @@ async fn handle_key(
             }
             return false;
         }
-        Down | Char('j') if app.sidebar_focused => {
+        Down | Char('j') if app.region == Region::Sidebar => {
             app.sidebar_idx = (app.sidebar_idx + 1) % ScreenId::ALL.len();
             return false;
         }
-        Enter if app.sidebar_focused => {
+        Enter if app.region == Region::Sidebar => {
             if let Some(id) = ScreenId::ALL.get(app.sidebar_idx) {
                 app.current = *id;
-                // The right-side content pane follows the sidebar: swap
-                // its kind so the next render redraws with the chosen
-                // screen. The single-pane WM means there's exactly one
-                // pane to update.
+                // Right-side content pane follows the sidebar: swap its
+                // kind so the next render redraws with the chosen screen,
+                // then drop focus inside it.
                 let _ = app.manager.set_pane_kind(
                     crate::wm::window::WindowKind::Builtin(*id),
                 );
+                app.set_region(Region::ContentLeft);
             }
             return false;
         }
-        Tab | Right | Char('l') if app.sidebar_focused => {
-            app.sidebar_focused = false;
+        Right | Char('l') if app.region == Region::Sidebar => {
+            // From the sidebar the only legal content region is the left
+            // half of the screen. Single-pane screens stay there;
+            // multi-pane screens opt further right on their own.
+            app.set_region(Region::ContentLeft);
             return false;
         }
-        Esc if app.sidebar_focused => {
-            app.sidebar_focused = false;
+        Esc if app.region == Region::Sidebar => {
+            app.set_region(Region::ContentLeft);
             return false;
         }
-        // Tab / Shift-Tab screen cycling (orbital-style hidden-widget skip).
-        // Only fires when content is focused and no modal is open, so it
-        // never steals Tab from inputs or the sidebar branch above.
-        Tab | BackTab if !app.sidebar_focused && matches!(app.modal, Modal::None) => {
-            let forward = matches!(key.code, KeyCode::Tab);
-            let _ = tx.send(Action::CycleScreen(forward)).await;
+        // Tab / Shift-Tab cycles between screens. Only fires on the
+        // content side and only when no modal is open, so it never
+        // collides with the input field's Tab key or the sidebar branch
+        // above. Replaces the old "Tab toggles sidebar" overload that
+        // made D-pad navigation unpredictable.
+        Tab if matches!(app.region, Region::ContentLeft | Region::ContentRight)
+            && matches!(app.modal, Modal::None) =>
+        {
+            let _ = tx.send(Action::CycleScreen(true)).await;
+            return false;
+        }
+        BackTab if matches!(app.region, Region::ContentLeft | Region::ContentRight)
+            && matches!(app.modal, Modal::None) =>
+        {
+            let _ = tx.send(Action::CycleScreen(false)).await;
+            return false;
+        }
+        // Content-side Left/h: from ContentLeft jumps to the Sidebar (no
+        // in-between column to step to); from ContentRight steps back to
+        // ContentLeft (the symmetric partner of Right/l's step forward).
+        // This is the critical D-pad contract: `←` always means "step
+        // one column left" with no screen defer, and `Esc` is the
+        // universal "leave to sidebar" verb. Previously `←/h` from
+        // ContentRight jumped all the way to Sidebar, which made the
+        // right pane a trap — Network's `← = jump to last iface row`
+        // semantics fought the region step and `Esc` was the only exit.
+        Left | Char('h') if app.region == Region::ContentLeft => {
+            app.set_region(Region::Sidebar);
+            return false;
+        }
+        // Content-side Right/l moves within the screen: from
+        // ContentLeft to ContentRight (only meaningful on multi-pane
+        // screens; single-pane screens leave it alone). The screen
+        // owns the inner-pair semantics via its own on_key.
+        // Content-side Right/l moves focus one column right, but
+        // defers to the screen first: screens that own their own
+        // Right-arrow semantics (e.g. Network's "jump to first wifi
+        // row" inside the unified list) get to handle the key and
+        // *not* flip the region. Only when the screen returns false
+        // does the router step the region forward. This is the
+        // critical piece that makes D-pad navigation flawless:
+        // `→` means "do the screen-thing if any, otherwise advance
+        // region"; `←` means "step back to the sidebar". No key
+        // overloading, no Tab ambiguity, no entry traps.
+        Right | Char('l')
+            if app.region == Region::ContentLeft
+                || app.region == Region::ContentRight
+            && matches!(app.modal, Modal::None) =>
+        {
+            // Forward first.
+            let consumed = {
+                let focused_id = app.manager.focused();
+                if let Some(w) = app.manager.window(focused_id) {
+                    match w.kind {
+                        crate::wm::window::WindowKind::Builtin(sid) => screens
+                            .iter_mut()
+                            .find(|s| s.id() == sid)
+                            .map(|s| s.on_key(key, app))
+                            .unwrap_or(false),
+                        crate::wm::window::WindowKind::Terminal => false,
+                    }
+                } else {
+                    false
+                }
+            };
+            if consumed {
+                return false;
+            }
+            // Step the region forward on the un-consumed path. From
+            // ContentLeft this lands on ContentRight; from ContentRight
+            // it stays put (right is the right edge). Single-pane
+            // screens consume every key they care about, so this branch
+            // is effectively a no-op for them in practice.
+            if app.region == Region::ContentLeft {
+                app.set_region(Region::ContentRight);
+            }
+            return false;
+        }
+        Left | Char('h')
+            if app.region == Region::ContentRight
+            && matches!(app.modal, Modal::None) =>
+        {
+            // `←/h` from ContentRight always steps back to ContentLeft.
+            // We deliberately do *not* defer to the screen here the way
+            // `→/l` does: from the rightmost column the only useful
+            // meaning of `←` is "step the region back," and screens like
+            // Network's `← = jump to last iface row` make that semantics
+            // collide with the region step. The D-pad contract is:
+            //   →  = screen-thing first, then advance region
+            //   ←  = retreat region first; the screen never sees `←`
+            //        as a region step (it can still handle it inside
+            //        `ContentLeft` because the router only fires this
+            //        arm from `ContentRight`).
+            app.set_region(Region::ContentLeft);
             return false;
         }
         Char('1') if !key.modifiers.contains(KeyModifiers::CONTROL) => switch_screen(app, ScreenId::System, 0),
@@ -1040,9 +1166,6 @@ async fn handle_key(
         // are not exposed. The dead arms are kept out of the match so
         // Ctrl-W + h/j/k/l/v/s/n/q/= doesn't fire surprise side
         // effects.
-        Tab => {
-            app.sidebar_focused = !app.sidebar_focused;
-        }
         _ => {
             // Forward to the focused pane (built-in screen OR terminal).
             let focused_id = app.manager.focused();
@@ -1078,6 +1201,9 @@ async fn run_palette(app: &mut App, tx: &mpsc::Sender<Action>, label: &str) {
         for id in ScreenId::ALL {
             if id.label() == rest {
                 app.current = *id;
+                // Mirrors `switch_screen`: a palette commit lands the
+                // user inside the screen, not on the sidebar.
+                app.set_region(Region::ContentLeft);
                 return;
             }
         }
@@ -1689,7 +1815,7 @@ mod tests {
     fn fresh_app_with_sidebar_focus() -> App {
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
-        app.sidebar_focused = true;
+        app.set_region(Region::Sidebar);
         app.sidebar_idx = 0;
         app
     }
@@ -1796,7 +1922,12 @@ mod tests {
     }
 
     #[test]
-    fn sidebar_tab_returns_focus_without_changing_current() {
+    fn sidebar_left_returns_focus_without_changing_current() {
+        // Replaces the old "sidebar_tab_returns_focus" test. Tab now
+        // means "cycle screen" on the content side; the new contract is
+        // that pressing Left (or h) while in the sidebar is a no-op
+        // (already there) and pressing Left from Content leaves the
+        // sidebar at the same screen.
         let mut app = fresh_app_with_sidebar_focus();
         let mut screens = build_screens();
         let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
@@ -1806,22 +1937,53 @@ mod tests {
                 &mut screens,
                 &mut app,
                 &tx,
-                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
             )
             .await;
         });
-        assert!(!app.sidebar_focused, "Tab should drop sidebar focus");
+        assert!(
+            matches!(app.region, Region::Sidebar),
+            "Left from the sidebar stays on the sidebar"
+        );
         assert_eq!(app.current, before);
     }
 
     #[test]
+    fn content_left_returns_to_sidebar() {
+        // The headline fix: from the content pane pressing Left (or h)
+        // jumps back to the sidebar without changing the current
+        // screen. The old design made this impossible — Tab cycled the
+        // screen instead.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.set_region(Region::ContentLeft);
+        app.current = ScreenId::Network;
+        let mut screens = build_screens();
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx2,
+                KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert!(
+            matches!(app.region, Region::Sidebar),
+            "Left from ContentLeft jumps to Sidebar"
+        );
+        assert_eq!(app.current, ScreenId::Network);
+    }
+
+    #[test]
     fn sidebar_keys_do_not_fire_when_content_focused() {
-        // Content-focused (sidebar_focused=false): Up/Down/Enter must NOT
+        // Content-focused (region = ContentLeft): Up/Down/Enter must NOT
         // mutate the sidebar cursor. Otherwise the focused pane's own
         // list navigation breaks.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
-        app.sidebar_focused = false;
+        app.set_region(Region::ContentLeft);
         let mut screens = build_screens();
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
         run(async {
@@ -1842,6 +2004,40 @@ mod tests {
         });
         assert_eq!(app.sidebar_idx, 0, "Down must not move sidebar cursor when content focused");
         assert_eq!(app.current, ScreenId::System, "Enter must not change current when content focused");
+    }
+
+    #[test]
+    fn router_walk_three_regions() {
+        // Full D-pad walk on a screen with both panes (Network):
+        //   start = Sidebar
+        //   → →        ContentLeft → ContentRight
+        //   ←          ContentRight → ContentLeft
+        //   ← ←        ContentLeft → Sidebar → Sidebar (already there)
+        //   final       Sidebar
+        // This pins the whole region lifecycle. If anyone regresses
+        // either the Sidebar→ContentLeft jump on `→` or the
+        // ContentLeft→Sidebar jump on `←`, this test breaks.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.set_region(Region::Sidebar);
+        app.current = ScreenId::Network;
+        let mut screens = build_screens();
+        let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
+        let left = || KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
+        let right = || KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        run(async {
+            handle_key(&mut screens, &mut app, &tx2, right()).await;
+            assert!(matches!(app.region, Region::ContentLeft), "→ from Sidebar → ContentLeft (got {:?})", app.region);
+            handle_key(&mut screens, &mut app, &tx2, right()).await;
+            assert!(matches!(app.region, Region::ContentRight), "→ from ContentLeft → ContentRight (got {:?})", app.region);
+            handle_key(&mut screens, &mut app, &tx2, left()).await;
+            assert!(matches!(app.region, Region::ContentLeft), "← from ContentRight → ContentLeft (got {:?})", app.region);
+            handle_key(&mut screens, &mut app, &tx2, left()).await;
+            assert!(matches!(app.region, Region::Sidebar), "← from ContentLeft → Sidebar (got {:?})", app.region);
+            handle_key(&mut screens, &mut app, &tx2, left()).await;
+            assert!(matches!(app.region, Region::Sidebar), "← at Sidebar stays at Sidebar (got {:?})", app.region);
+        });
+        assert_eq!(app.current, ScreenId::Network, "Region walk must not change the active screen");
     }
 
     #[test]

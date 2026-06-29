@@ -61,6 +61,21 @@ impl ScreenId {
         }
     }
 
+    /// True when the screen renders a left+right split so the region model
+    /// has somewhere to step to. Mirrors the multi-pane screens whose
+    /// `Borders::ALL` blocks both read `app.region`.
+    pub fn has_right_pane(self) -> bool {
+        matches!(
+            self,
+            ScreenId::System
+                | ScreenId::Network
+                | ScreenId::Files
+                | ScreenId::Power
+                | ScreenId::Display
+                | ScreenId::Packages
+        )
+    }
+
     pub fn glyph(self) -> &'static str {
         match self {
             ScreenId::System => "◉",

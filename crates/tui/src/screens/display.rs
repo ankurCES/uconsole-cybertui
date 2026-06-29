@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::action::{Action, RunAction};
 use crate::app::screen::{Screen, ScreenId};
 use crate::app::toast::ToastKind;
-use crate::app::App;
+use crate::app::{App, Region};
 use crate::theme::Theme;
 
 pub struct DisplayScreen;
@@ -151,12 +151,13 @@ impl Screen for DisplayScreen {
             None
         });
         *state.offset_mut() = offset;
+        let left_focused = matches!(app.region, Region::ContentLeft);
         let left = List::new(items)
             .block(
                 Block::default()
                     .title(Span::styled(" outputs ", theme.title()))
                     .borders(Borders::ALL)
-                    .border_style(theme.border(false)),
+                    .border_style(theme.border(left_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()
@@ -193,11 +194,12 @@ impl Screen for DisplayScreen {
             }
         }
         let _ = tx;
+        let right_focused = matches!(app.region, Region::ContentRight);
         let right = Paragraph::new(lines).block(
             Block::default()
                 .title(Span::styled(" brightness ", theme.title()))
                 .borders(Borders::ALL)
-                .border_style(theme.border(false)),
+                .border_style(theme.border(right_focused)),
         );
         f.render_widget(right, cols[1]);
 

@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::action::{Action, RunAction};
 use crate::app::screen::{Screen, ScreenId};
 use crate::app::toast::ToastKind;
-use crate::app::{App, InputKind, Modal};
+use crate::app::{App, InputKind, Modal, Region};
 use crate::theme::{glyphs, Theme};
 
 pub struct NetworkScreen;
@@ -217,12 +217,15 @@ impl Screen for NetworkScreen {
         let left_h = cols[0].height as usize;
         let mut left_state = ListState::default().with_selected(iface_selected);
         *left_state.offset_mut() = compute_offset(iface_selected.unwrap_or(0), items.len(), left_h);
+        // Sub-focus: the focused half (left or right) gets the brighter
+        // border so a D-pad user always sees which side ↑/↓ operates on.
+        let left_focused = !matches!(app.region, Region::ContentRight);
         let left = List::new(items)
             .block(
                 Block::default()
                     .title(Span::styled(" interfaces ", theme.title()))
                     .borders(Borders::ALL)
-                    .border_style(theme.border(false)),
+                    .border_style(theme.border(left_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()
@@ -302,12 +305,13 @@ impl Screen for NetworkScreen {
         let mut right_state = ListState::default().with_selected(wifi_selected);
         *right_state.offset_mut() =
             compute_offset(wifi_selected.unwrap_or(0), items.len(), right_h);
+        let right_focused = matches!(app.region, Region::ContentRight);
         let right = List::new(items)
             .block(
                 Block::default()
                     .title(Span::styled(" wifi ", theme.title()))
                     .borders(Borders::ALL)
-                    .border_style(theme.border(false)),
+                    .border_style(theme.border(right_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()

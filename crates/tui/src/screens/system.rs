@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 use ratatui::Frame;
 
 use crate::app::screen::{Screen, ScreenId};
-use crate::app::App;
+use crate::app::{App, Region};
 use crate::theme::{glyphs, Theme};
 use cyberdeck_core::sys;
 
@@ -174,11 +174,13 @@ impl Screen for SystemScreen {
         )));
 
         // Wrap so long fields (CPU model) stay inside the column.
+        let left_focused = !matches!(app.region, Region::ContentRight);
         let left = Paragraph::new(lines)
             .block(
                 Block::default()
-                    .borders(Borders::RIGHT)
-                    .border_style(theme.border(false)),
+                    .title(Span::styled(" facts ", theme.title()))
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(left_focused)),
             )
             .wrap(Wrap { trim: false })
             .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
@@ -219,6 +221,11 @@ impl Screen for SystemScreen {
             Some(recent.len().saturating_sub(1))
         };
         let mut state = ListState::default().with_selected(highlight);
+        // Sub-focus border. When region is ContentRight the right pane
+        // gets the brighter border so the user sees which column ↑/↓
+        // will move in. Otherwise (Sidebar or ContentLeft) the left
+        // pane — drawn further up — gets the focus border.
+        let right_focused = matches!(app.region, Region::ContentRight);
         let right = List::new(recent)
             .block(
                 Block::default()
@@ -230,7 +237,8 @@ impl Screen for SystemScreen {
                         ),
                         theme.title(),
                     ))
-                    .borders(Borders::NONE),
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(right_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()

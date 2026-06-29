@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::action::{Action, RunAction};
 use crate::app::screen::{Screen, ScreenId};
 use crate::app::toast::ToastKind;
-use crate::app::{App, ConfirmKind, Modal};
+use crate::app::{App, ConfirmKind, Modal, Region};
 use crate::theme::Theme;
 
 pub struct PackagesScreen;
@@ -155,12 +155,13 @@ impl Screen for PackagesScreen {
             None
         });
         *state.offset_mut() = offset;
+        let left_focused = matches!(app.region, Region::ContentLeft);
         let left = List::new(items)
             .block(
                 Block::default()
                     .title(Span::styled(" upgradable ", theme.title()))
                     .borders(Borders::ALL)
-                    .border_style(theme.border(false)),
+                    .border_style(theme.border(left_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()
@@ -212,10 +213,12 @@ impl Screen for PackagesScreen {
             "  j/k scroll upgradable list",
             theme.dim(),
         )));
+        let right_focused = matches!(app.region, Region::ContentRight);
         let right = Paragraph::new(lines).block(
             Block::default()
+                .title(Span::styled(" actions ", theme.title()))
                 .borders(Borders::ALL)
-                .border_style(theme.border(false)),
+                .border_style(theme.border(right_focused)),
         );
         f.render_widget(right, cols[1]);
     }

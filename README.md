@@ -227,19 +227,40 @@ headless deployments or for putting the cyberdeck behind a reverse proxy.
 
 ## Keys
 
+The TUI is built around a **three-region model** optimised for D-pad
+navigation on small displays (e.g. the ClockworkPi uconsole). Each region
+has exactly one job and exactly one set of verbs — no key is overloaded
+between regions.
+
+- **`Sidebar`** (left column) — screen picker. ↑/↓ (or j/k) move the
+  cursor, `Enter` or `→` (or `l`) enter the screen, `1`–`9`/`0` jump to
+  a numbered row.
+- **`ContentLeft`** — the screen's primary pane. ↑/↓ scroll, `←` (or `h`)
+  jumps back to the sidebar, `→` (or `l`) advances to the right pane
+  (only on multi-pane screens), `Tab` / `Shift-Tab` cycle screens.
+- **`ContentRight`** — the screen's secondary pane (only on
+  multi-pane screens). `←` (or `h`) steps back to `ContentLeft`, `→`
+  is a no-op (right edge), `Tab` / `Shift-Tab` cycle screens.
+
+`Esc` is the universal "leave to sidebar" verb from any content region,
+so even on a single-pane screen there is always a one-press exit.
+
 ### Global
 
-| Key            | Action                                       |
-| -------------- | -------------------------------------------- |
-| `q` / `Ctrl-C` | quit                                         |
-| `?`            | help modal                                   |
-| `:`            | command palette (`web start`, `web stop`, …) |
-| `1`..`9`/`0`   | jump to a screen                             |
-| `Tab`          | toggle sidebar ↔ content focus               |
-| `↑/↓` or `j/k` | navigate list in current focus               |
-| `Enter`        | confirm / open                               |
-| `Esc`          | back / cancel modal                          |
-| `r`            | refresh current screen                       |
+| Key            | Action                                                   |
+| -------------- | -------------------------------------------------------- |
+| `q` / `Ctrl-C` | quit                                                     |
+| `?`            | help modal                                               |
+| `:`            | command palette (`web start`, `web stop`, …)             |
+| `1`..`9`/`0`   | jump to a screen (always works, regardless of region)    |
+| `Tab`          | next screen (content region only)                        |
+| `Shift-Tab`    | previous screen (content region only)                    |
+| `↑/↓` or `j/k` | navigate list in current region                          |
+| `→` / `l`      | Sidebar → ContentLeft; ContentLeft → ContentRight (defers to screen if it owns the key) |
+| `←` / `h`      | ContentLeft → Sidebar; ContentRight → ContentLeft        |
+| `Enter`        | Sidebar: open screen; content: confirm / open            |
+| `Esc`          | back / cancel modal / leave to sidebar                   |
+| `r`            | refresh current screen                                   |
 
 ### Window manager (`Ctrl-W` prefix)
 

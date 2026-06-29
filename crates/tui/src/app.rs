@@ -336,14 +336,45 @@ pub struct App {
     pub current: ScreenId,
     pub manager: crate::wm::manager::Manager,
     pub modal: Modal,
-    /// True when the sidebar (screen list) has focus. Tab toggles this.
-    /// While false, key events are forwarded into the focused pane.
+    /// True when the sidebar (screen list) has focus. *Derived* from
+    /// `region`: it's `region == Region::Sidebar`. Kept as a `bool` for
+    /// compatibility with the old render and test paths that read it
+    /// directly; new code should prefer `app.region`.
     pub sidebar_focused: bool,
     /// Cursor position in the sidebar list (0-based index into ScreenId::ALL).
     /// Distinct from `current` so the user can navigate before committing
     /// with Enter. `current` is what's actually rendered in the content
     /// pane; `sidebar_idx` is what's highlighted in the menu.
     pub sidebar_idx: usize,
+    /// Which region of the TUI currently holds key focus. The redesign
+    /// replaces the previous single-`bool` model with three explicit
+    /// regions so D-pad navigation is deterministic:
+    ///
+    ///   * `Sidebar`         — the screen-list on the left owns keys.
+    ///   * `ContentLeft`     — the left half of a 60/40 multi-pane screen.
+    ///   * `ContentRight`    — the right half of a 60/40 multi-pane screen.
+    ///                         For single-pane screens this collapses back
+    ///                         to `ContentLeft` on every switch.
+    ///
+    /// `←` / `h` move toward the sidebar (Sidebar ← ContentLeft ← ContentRight
+    /// is wrong; it's actually Sidebar → ContentLeft → ContentRight in the
+    /// direction of reading). The exact walk is:
+    ///
+    ///     Left:
+    ///         ContentRight  →  ContentLeft
+    ///         ContentLeft   →  Sidebar
+    ///         Sidebar        →  Sidebar (no-op, already there)
+    ///     Right:
+    ///         Sidebar        →  ContentLeft
+    ///         ContentLeft    →  ContentRight  (only when screen has a
+    ///                                          right sub-pane; otherwise
+    ///                                          this is a no-op)
+    ///         ContentRight   →  ContentRight
+    ///
+    /// Inside a single-pane screen the only valid region is `ContentLeft`;
+    /// every screen sets `app.region = Region::ContentLeft` when it becomes
+    /// active so the arrow keys never strand on a phantom `ContentRight`.
+    pub region: Region,
     pub palette_buf: String,
     pub palette_idx: usize,
     pub toasts: Vec<Toast>,
@@ -438,6 +469,51 @@ pub mod cyberdeck_core_files {
     }
 }
 
+/// Which region of the TUI currently owns key focus. See `App::region`
+/// for the navigation rules. `Copy` so it can move through match arms
+/// without a borrow on `App`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Region {
+    Sidebar,
+    ContentLeft,
+    ContentRight,
+}
+
+impl Region {
+    /// Move region focus one step toward the sidebar.
+    /// Sidebar is already there, so it's a no-op.
+    pub fn go_left(self) -> Region {
+        match self {
+            Region::Sidebar => Region::Sidebar,
+            Region::ContentLeft => Region::Sidebar,
+            Region::ContentRight => Region::ContentLeft,
+        }
+    }
+
+    /// Move region focus one step toward the content. From the sidebar we
+    /// always land in `ContentLeft` (the only legal content region for
+    /// single-pane screens; multi-pane screens opt the user further right
+    /// via their own `on_key`). From `ContentLeft` we *don't* auto-jump
+    /// to `ContentRight` here; the screen owns that decision because only
+    /// some screens have a right half.
+    pub fn go_right(self) -> Region {
+        match self {
+            Region::Sidebar => Region::ContentLeft,
+            Region::ContentLeft => Region::ContentLeft,
+            Region::ContentRight => Region::ContentRight,
+        }
+    }
+
+    /// Human label for hints and audit messages. Stable across themes.
+    pub fn label(self) -> &'static str {
+        match self {
+            Region::Sidebar => "sidebar",
+            Region::ContentLeft => "content",
+            Region::ContentRight => "details",
+        }
+    }
+}
+
 impl App {
     pub fn new(tx: mpsc::Sender<Action>, rx: mpsc::Receiver<Action>) -> Self {
         Self {
@@ -447,6 +523,10 @@ impl App {
             modal: Modal::None,
             sidebar_focused: true,
             sidebar_idx: 0,
+            // Default region on launch is the sidebar — that's the natural
+            // D-pad start (user sees the screen list and moves with ↑/↓).
+            // `switch_screen` flips to `ContentLeft` when a screen commits.
+            region: Region::Sidebar,
             palette_buf: String::new(),
             palette_idx: 0,
             toasts: Vec::new(),
@@ -498,6 +578,19 @@ impl App {
             files_right: PathBuf::from("/"),
             files_right_entries: Vec::new(),
         }
+    }
+
+    /// Shortcut to open a `Modal::Help`.
+    pub fn open_help(&mut self) {
+        self.modal = Modal::Help;
+    }
+
+    /// Set the active region and keep the derived `sidebar_focused` flag
+    /// in sync. New code should call this instead of assigning
+    /// `sidebar_focused` directly so the two never drift.
+    pub fn set_region(&mut self, r: Region) {
+        self.region = r;
+        self.sidebar_focused = r == Region::Sidebar;
     }
 
     /// Shortcut to open a `Modal::Input` with the given prompt and kind.
@@ -620,9 +713,16 @@ impl App {
         self.editor_dirty = false;
         self.editor_read_only = read_only;
 
-        // Swap the focused builtin to Editor.
+        // Swap the focused builtin to Editor and force the region back
+        // to ContentLeft so the D-pad navigates as expected: arrow keys
+        // move inside the editor, ←/h lands on the sidebar, Tab cycles
+        // back into Files. Without this reset, a user who had the
+        // Files screen's right pane focused would land on the editor
+        // with region=ContentRight — a ghost-pane state that has no
+        // matching render and breaks arrow keys.
         self.manager
             .set_pane_kind(crate::wm::window::WindowKind::Builtin(ScreenId::Editor));
+        self.set_region(Region::ContentLeft);
     }
 
     /// Module 4 — discard the editor's in-memory buffer and return focus
@@ -646,6 +746,13 @@ impl App {
         self.editor_read_only = false;
         self.manager
             .set_pane_kind(crate::wm::window::WindowKind::Builtin(ScreenId::Files));
+        // Drop the user back into the Files content-left region so the
+        // arrow keys navigate the file list (not a ghost pane). Esc on
+        // a *clean* editor goes through the same path via
+        // `enter_editor`'s caller in `screens/editor.rs`, which also
+        // calls `set_region(Region::ContentLeft)` so this stays
+        // consistent.
+        self.set_region(Region::ContentLeft);
     }
 
     /// A short summary line for the status bar.
