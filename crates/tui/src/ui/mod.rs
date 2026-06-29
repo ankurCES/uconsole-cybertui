@@ -351,11 +351,13 @@ fn g() -> &'static crate::theme::Glyphs {
 pub fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     // Region label tells the user where focus is. With a 5" D-pad display
     // the focus cursor on the screen itself is small, so the status bar
-    // has to spell out the active region in plain English.
+    // has to spell out the active region in plain English. Uses the
+    // same ▶ vocabulary as the header chip so header / sidebar / status
+    // bar all read in the same visual language.
     let region_label = match app.region {
-        Region::Sidebar => Span::styled(" sidebar ", theme.title()),
-        Region::ContentLeft => Span::styled(" ← content · left ", theme.title()),
-        Region::ContentRight => Span::styled(" content · right → ", theme.title()),
+        Region::Sidebar => Span::styled(" ▶ sidebar ", theme.title()),
+        Region::ContentLeft => Span::styled(" content ▶ left ", theme.title()),
+        Region::ContentRight => Span::styled(" content ▶ right ", theme.title()),
     };
 
     let mut spans: Vec<Span<'static>> = Vec::new();
