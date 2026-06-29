@@ -439,7 +439,7 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
                     ("region · content", ""),
                     ("↑/↓ j/k", "scroll list"),
                     ("←/h", "step back (or sidebar)"),
-                    ("→/l", "step forward (or screen)"),
+                    ("→/l", "step right (multi-pane)"),
                     ("tab", "next screen"),
                     ("shift-tab", "previous screen"),
                     ("esc", "leave to sidebar"),

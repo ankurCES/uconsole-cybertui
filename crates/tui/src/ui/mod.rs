@@ -169,12 +169,32 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
     let list = List::new(items)
         .block(
             Block::default()
-                .title(Span::styled(" screens ", theme.title()))
+                .title(Span::styled(
+                    if focused { " ▶ screens " } else { " screens " },
+                    theme.title(),
+                ))
                 .borders(Borders::ALL)
                 .border_style(theme.border(focused)),
         )
         .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
     f.render_widget(list, area);
+
+    // Focus gutter on the inner right edge, mirroring the grid variant
+    // above. Filled cyan when the sidebar owns the region, dim accent
+    // when content is focused. The user should always be able to glance
+    // at the sidebar and read "focus is here" from the gutter alone.
+    if focused {
+        let inner = Rect::new(area.x + area.width - 1, area.y + 1, 1, area.height - 2);
+        if inner.height > 0 {
+            let marker = Paragraph::new("".repeat(inner.height as usize))
+                .style(
+                    ratatui::style::Style::default()
+                        .fg(theme.selection_fg)
+                        .bg(theme.selection_bg),
+                );
+            f.render_widget(marker, inner);
+        }
+    }
 }
 
 /// Wide-mode sidebar: two columns of numbered tiles. Each tile shows the
