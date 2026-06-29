@@ -9,7 +9,7 @@ use ratatui::Frame;
 use crate::app::action::{Action, RunAction};
 use crate::app::screen::{Screen, ScreenId};
 use crate::app::toast::ToastKind;
-use crate::app::{App, ConfirmKind, Modal};
+use crate::app::{App, ConfirmKind, Modal, Region};
 use crate::theme::{glyphs, Theme};
 
 pub struct PowerScreen;
@@ -158,14 +158,17 @@ impl Screen for PowerScreen {
             Span::styled("poweroff", theme.dim()),
         ]));
         let _ = g;
+        let left_focused = matches!(app.region, Region::ContentLeft);
         let left = Paragraph::new(left_lines).block(
             Block::default()
-                .borders(Borders::RIGHT)
-                .border_style(theme.border(false)),
+                .title(Span::styled(" Facts ", theme.title()))
+                .borders(Borders::ALL)
+                .border_style(theme.border(left_focused)),
         );
         f.render_widget(left, cols[0]);
 
         // Right: governor + thermals.
+        let right_focused = matches!(app.region, Region::ContentRight);
         let mut right: Vec<ListItem> = Vec::new();
         if let Ok(info) = app.live.info.try_read() {
             right.push(ListItem::new(Line::from(vec![
@@ -215,7 +218,12 @@ impl Screen for PowerScreen {
             "  g toggle governor (performance↔powersave)",
             theme.dim(),
         ))));
-        let list = List::new(right).block(Block::default().borders(Borders::NONE));
+        let list = List::new(right).block(
+            Block::default()
+                .title(Span::styled(" Governor ", theme.title()))
+                .borders(Borders::ALL)
+                .border_style(theme.border(right_focused)),
+        );
         f.render_widget(list, cols[1]);
     }
 }

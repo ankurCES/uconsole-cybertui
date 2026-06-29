@@ -10,6 +10,41 @@ chunk of work.
 13 screens, sidebar, status bar, modals (help / command palette / confirm /
 input), command palette, refreshers, web bridge. Build is clean.
 
+## Phase 1b — D-pad navigation redesign (done)
+
+The old TUI's left↔right panel navigation was broken: focus was a single
+`sidebar_focused: bool` while the surface actually has three regions
+(`Sidebar | ContentLeft | ContentRight`). `Tab` was overloaded for both
+"go back to sidebar" and "cycle screen," multi-pane screens didn't
+track sub-pane focus, and there was no `←` to *enter* the sidebar from
+the right pane.
+
+Rewritten with a `Region` enum and a clean D-pad contract:
+
+- `Region { Sidebar | ContentLeft | ContentRight }` on `App`; the
+  legacy `sidebar_focused` is derived via `set_region` so the two never
+  drift.
+- `←`/`h`: ContentLeft → Sidebar; ContentRight → ContentLeft
+  (always-step-left, no screen defer).
+- `→`/`l`: Sidebar → ContentLeft; ContentLeft → ContentRight (defers to
+  the screen's `on_key` first so screens like Network's `→ = jump to
+  first wifi` keep working).
+- `Tab`/`Shift-Tab` cycles screens only on the content side and only
+  when no modal is open.
+- Sidebar redesigned as a numbered two-column grid (D-pad friendly on a
+  5" uconsole) with a narrow-list fallback.
+- Region-aware status bar: shows the focused region's label and the
+  region-conditional hint strip.
+- Sub-focus borders on every multi-pane screen (System, Network, Files,
+  Power, Display, Packages) — the focused half of each screen now
+  lights up while the unfocused half dims.
+
+Regression tests pinned: `content_left_returns_to_sidebar`,
+`sidebar_left_returns_focus`, `router_walk_three_regions`,
+`number_keys_when_sidebar_focused_move_cursor_to_that_row`,
+`number_keys_when_content_focused_still_swap_pane_kind`. All 119
+tests in the binary pass.
+
 ## Phase 2 — PTY / ANSI / broadcaster (done, not wired)
 
 `wm/ansi.rs`, `wm/pty.rs`, `wm/broadcaster.rs` are implemented and tested but

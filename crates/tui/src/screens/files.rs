@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use crate::app::cyberdeck_core_files::DirEntry;
 use crate::app::screen::{Screen, ScreenId};
-use crate::app::App;
+use crate::app::{App, Region};
 use crate::theme::Theme;
 use std::path::PathBuf;
 
@@ -165,6 +165,7 @@ impl Screen for FilesScreen {
                 None
             });
         *left_state.offset_mut() = left_offset;
+        let left_focused = !matches!(app.region, Region::ContentRight);
         let left = List::new(left_items)
             .block(
                 Block::default()
@@ -173,7 +174,7 @@ impl Screen for FilesScreen {
                         theme.title(),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(theme.border(false)),
+                    .border_style(theme.border(left_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()
@@ -229,6 +230,7 @@ impl Screen for FilesScreen {
         };
         let mut right_state = ListState::default();
         *right_state.offset_mut() = right_offset;
+        let right_focused = matches!(app.region, Region::ContentRight);
         let right = List::new(right_items)
             .block(
                 Block::default()
@@ -237,7 +239,7 @@ impl Screen for FilesScreen {
                         theme.title(),
                     ))
                     .borders(Borders::ALL)
-                    .border_style(theme.border(false)),
+                    .border_style(theme.border(right_focused)),
             )
             .highlight_style(
                 ratatui::style::Style::default()
