@@ -406,19 +406,34 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
             // The keys themselves are split into two columns by
             // `render_with_hints`: the key gets `theme.key()` (the
             // accent register) and the description gets `theme.fg()`.
+            //
+            // Entries are organised by region so a first-time user can
+            // read top-to-bottom and learn the D-pad contract: sidebar
+            // first (the natural starting point), then content panes,
+            // then modals. The old "←/→ = switch focus" line was the
+            // exact wording that misled users into thinking the left
+            // pane and right pane were symmetric and interchangeable;
+            // they're not, and the new descriptions say so explicitly.
             crate::wm::popup::render_with_hints(
                 f,
                 area,
                 "help",
                 &[
-                    ("↑/↓ j/k", "navigate lists"),
-                    ("←/→ h/l", "switch focus"),
-                    ("enter", "open / confirm"),
-                    ("esc", "back / cancel"),
-                    ("1..9", "jump to screen"),
-                    ("r", "refresh current screen"),
-                    (":", "command palette"),
+                    ("region · sidebar", ""),
+                    ("↑/↓ j/k", "move cursor"),
+                    ("enter / →", "open screen"),
+                    ("1..9 0", "jump to screen"),
+                    ("region · content", ""),
+                    ("↑/↓ j/k", "scroll list"),
+                    ("←/h", "step back (or sidebar)"),
+                    ("→/l", "step forward (or screen)"),
+                    ("tab", "next screen"),
+                    ("shift-tab", "previous screen"),
+                    ("esc", "leave to sidebar"),
+                    ("anytime", ""),
                     ("?", "this help"),
+                    (":", "command palette"),
+                    ("r", "refresh current screen"),
                     ("q", "quit"),
                 ],
                 theme,

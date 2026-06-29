@@ -177,6 +177,29 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         let cursor = i == app.sidebar_idx;
         render_sidebar_cell(f, cell_area, i + 1, id, active, cursor, theme);
     }
+
+    // Focus gutter: a 1-cell-wide vertical bar along the sidebar's right
+    // border. Lit cyan when the sidebar owns the region focus (so the
+    // cursor is *here*), dim accent when content is focused (so the user
+    // can see at a glance "focus is on the right"). This is the single
+    // most important D-pad affordance on a 5" display where the cursor
+    // itself is small: the gutter is always visible regardless of which
+    // row the cursor sits on.
+    if inner.width >= 2 && rows >= 1 {
+        let gutter_x = area.x + area.width.saturating_sub(2);
+        let gutter_style = if focused {
+            ratatui::style::Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+        } else {
+            ratatui::style::Style::default().fg(theme.dim)
+        };
+        for row_area in row_areas.iter() {
+            let gutter = Rect::new(gutter_x, row_area.y, 1, 1);
+            let marker = Paragraph::new(Line::from(Span::styled("│", gutter_style)));
+            f.render_widget(marker, gutter);
+        }
+    }
 }
 
 /// Paint a single sidebar tile. Cursor wins over active wins over dim.
