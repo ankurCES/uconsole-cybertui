@@ -125,7 +125,7 @@ just routes the input to the focused leaf. See
    `Screen::palette_aliases`.
 6. Add tests under `#[cfg(test)] mod tests` in the screen file.
    Use `cargo check -p cyberdeck-tui --all-targets` to verify; only run
-   `cargo test -p cyberdeck-tui --bin cyberdeck-tui` once you've checked
+   `make test ARGS='-p cyberdeck-tui --bin cyberdeck-tui'` once you've checked
    the build is clean.
 
 ## Conventions

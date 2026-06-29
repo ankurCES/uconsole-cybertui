@@ -182,6 +182,6 @@ this never happens.
 Phase 5 modal tests are pure unit tests on the modal state machines
 (no PTY, no ANSI). They live under `#[cfg(test)] mod tests` in each
 modal file and use `cargo check -p cyberdeck-tui --all-targets` for
-verification. The full suite (`cargo test -p cyberdeck-tui --bin
-cyberdeck-tui`) finishes in ~1 s and does not exercise any modal
+verification. The full suite (`make test ARGS='-p cyberdeck-tui --bin
+cyberdeck-tui'`) finishes in ~1 s and does not exercise any modal
 PTY-touching path.

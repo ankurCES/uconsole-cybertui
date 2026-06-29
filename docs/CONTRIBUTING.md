@@ -22,21 +22,26 @@ Use these commands while you're iterating:
 ## Running the WM tests deliberately
 
 When you do want to run them — e.g. after editing `wm/tree.rs` or
-`wm/ansi.rs` — use:
+`wm/ansi.rs` — use the safe wrapper:
 
 ```bash
-cargo test -p cyberdeck-tui wm:: -- --test-threads=1
+make test ARGS='-p cyberdeck-tui wm:: -- --nocapture'
+# or, equivalently:
+scripts/safe-test -p cyberdeck-tui wm:: -- --nocapture
 ```
 
-`--test-threads=1` is the important bit. The PTY tests in `pty.rs` and
-`broadcaster.rs` both spawn a child process; running them in parallel
-sometimes exhausts the available PTYs and triggers a hang inside
-`portable-pty`. Sequential is slower but reliable.
+`scripts/safe-test` auto-injects `--test-threads=1` for any
+`cyberdeck-tui` run, so you don't have to remember it. The PTY tests
+in `pty.rs` and `broadcaster.rs` both spawn a child process; running
+them in parallel sometimes exhausts the available PTYs and triggers a
+hang inside `portable-pty`. Sequential is slower but reliable.
 
 If a test still hangs, the binary that's stuck is almost always
 `/bin/cat` or `/bin/sh` from a previous run that didn't reap cleanly:
 
 ```bash
+make clean-test-hang
+# or, equivalently:
 pkill -f 'target/debug/deps/cyberdeck_tui-*'
 ```
 
@@ -44,11 +49,17 @@ then re-run.
 
 ## Running the full test suite (CI parity)
 
+The only sanctioned blanket run on this repo. Use `make test-ci`:
+
 ```bash
-cargo test --workspace -- --test-threads=1
+make test-ci
+# or, equivalently:
+scripts/safe-test --ci --workspace -- --test-threads=1
 ```
 
-Run this before opening a PR. Expect 20-40 seconds on a quiet box.
+Run this before opening a PR. Expect 20-40 seconds on a quiet box. The
+`--ci` flag is what tells the safe wrapper this is intentional and not
+an accidental blanket run.
 
 ## Manual smoke test for Phase 3 (window manager)
 
@@ -86,7 +97,9 @@ string). No PTYs, no real DB, no network.
 Run it with:
 
 ```bash
-cargo test -p cyberdeck-web --test lan_smoke
+make test ARGS='-p cyberdeck-web --test lan_smoke'
+# or, equivalently:
+scripts/safe-test -p cyberdeck-web --test lan_smoke
 ```
 
 Expect ~10 seconds. Safe to run in the inner save loop — these tests

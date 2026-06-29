@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# scripts/safe-test — mechanical enforcement of the targeted-test rule.
+#
+# Background: the unit tests under crates/tui/src/wm/{ansi,pty,broadcaster,
+# window}.rs spin up real PTYs and shells. On the dev box, running them in
+# parallel can exhaust the PTY pool and hang the suite for ≥30 minutes.
+#
+# This wrapper is the canonical way to run `cargo test` on this repo. It:
+#
+#   1. Refuses a bare `cargo test` (no crate filter, no test-name filter).
+#      This catches the most common cause of the hang.
+#   2. Refuses `cargo test --workspace` outside of an explicit `--ci`
+#      opt-in. CI parity runs need it, inner loops don't.
+#   3. Auto-injects `--test-threads=1` whenever a cyberdeck-tui crate
+#      filter is in scope (or the user hasn't picked one). That alone
+#      sidesteps the PTY-pool exhaustion case.
+#   4. Caps the run with `timeout --kill-after=10s 600s` so even a
+#      misbehaving test can't deadlock the developer.
+#
+# Use this like `cargo test`, with the same flags. Examples:
+#
+#   scripts/safe-test -p cyberdeck-tui ui::status_region_vocabulary
+#   scripts/safe-test -p cyberdeck-tui wm:: -- --nocapture
+#   scripts/safe-test --ci --workspace -- --test-threads=1
+#
+# See CONTRIBUTING.md for the full rules.
+
+set -euo pipefail
+
+# ----- args ----------------------------------------------------------------
+
+ci_opt=0
+raw_args=()
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ci)
+            ci_opt=1
+            shift
+            ;;
+        -h|--help)
+            sed -n '2,40p' "$0"
+            exit 0
+            ;;
+        --)
+            # Everything from `--` onward is forwarded to the test binary
+            # untouched. Collect the rest as-is.
+            raw_args+=("$@")
+            shift $#
+            ;;
+        *)
+            raw_args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+# ----- blanket detection ---------------------------------------------------
+#
+# Rule: any `cargo test` invocation that doesn't narrow to a single crate
+# is a blanket run. The narrowings we accept are:
+#   * `-p <crate>` / `--package <crate>` / `--test <name>` in the args
+#   * `--bin <name>`
+#   * `--lib`
+#   * `--doc`
+#   * `--examples`
+#   * `--bench <name>`
+#   * one or more positional filters that contain `::` (a test path)
+#
+# Anything else (bare `cargo test`, `cargo test --workspace`,
+# `cargo test --all-targets`) is refused unless `--ci` is set.
+
+has_narrowing=0
+saw_dashdash=0
+positional=()
+
+i=0
+while [[ $i -lt ${#raw_args[@]} ]]; do
+    a="${raw_args[$i]}"
+    case "$a" in
+        -p|--package|--test|--bin|--lib|--doc|--examples|--bench|--bench=*)
+            has_narrowing=1
+            ;;
+        --workspace|--all|--all-targets|--all-features)
+            # These are blanket by definition; only `--ci` allows them.
+            ;;
+        --)
+            saw_dashdash=1
+            ;;
+        -*)
+            # Other cargo flags (--release, --no-fail-fast, etc.) are
+            # configuration, not scope narrowing. Don't count them.
+            ;;
+        *)
+            positional+=("$a")
+            # A positional with `::` is a test-path filter, which narrows
+            # even without `-p`. A bare word like `wm::` or
+            # `screens::foo::tests` counts.
+            if [[ "$a" == *::* ]]; then
+                has_narrowing=1
+            fi
+            ;;
+    esac
+    i=$((i + 1))
+done
+
+if [[ $has_narrowing -eq 0 && $ci_opt -eq 0 ]]; then
+    cat >&2 <<EOF
+safe-test: refusing blanket \`cargo test\`.
+
+This repo's tests pin real PTYs and shells; a parallel blanket run can
+hang the suite for ≥30 minutes on a busy dev box. Per CONTRIBUTING.md,
+tests must always be targeted — by crate, by module, or by test name.
+
+Examples:
+  scripts/safe-test -p cyberdeck-tui ui::status_region_vocabulary
+  scripts/safe-test -p cyberdeck-tui wm:: -- --nocapture
+  scripts/safe-test -p cyberdeck-tui screens::network::tests
+
+If you really need a workspace-wide run for CI parity, re-run with --ci:
+  scripts/safe-test --ci --workspace -- --test-threads=1
+EOF
+    exit 2
+fi
+
+# ----- flag injection ------------------------------------------------------
+#
+# If no --test-threads= is in scope, inject =1 for any cyberdeck-tui run.
+# cyberdeck-core and cyberdeck-web don't spin up PTYs, so they're fine
+# to run in parallel, but a single-threaded default keeps the wrapper
+# predictable.
+
+scope_is_tui=0
+if [[ $has_narrowing -eq 1 ]]; then
+    for a in "${raw_args[@]}"; do
+        case "$a" in
+            -p|--package)
+                # next arg is the crate name
+                ;;
+            cyberdeck-tui|cyberdeck_tui)
+                scope_is_tui=1
+                ;;
+        esac
+    done
+    # crude but sufficient: any `-p cyberdeck-tui` adjacency
+    for ((j = 0; j < ${#raw_args[@]} - 1; j++)); do
+        a="${raw_args[$j]}"
+        b="${raw_args[$((j + 1))]}"
+        if [[ "$a" == "-p" || "$a" == "--package" ]] && [[ "$b" == "cyberdeck-tui" ]]; then
+            scope_is_tui=1
+        fi
+    done
+fi
+
+# If the user already added --test-threads, don't override.
+already_has_threads=0
+for a in "${raw_args[@]}"; do
+    case "$a" in
+        --test-threads=*|--test-threads)
+            already_has_threads=1
+            ;;
+    esac
+done
+
+# Build the final argv.
+final_args=(cargo test)
+final_args+=("${raw_args[@]}")
+
+if [[ $scope_is_tui -eq 1 && $already_has_threads -eq 0 ]]; then
+    # cargo only forwards `--test-threads` to the test harness when it
+    # appears after `--`. If the user already has `--`, inject the flag
+    # after it; otherwise append `-- --test-threads=1`. cargo accepts
+    # `--` on its own (no preceding flags) and treats everything after
+    # as test-harness args.
+    if [[ $saw_dashdash -eq 1 ]]; then
+        new_args=()
+        inserted=0
+        for a in "${raw_args[@]}"; do
+            if [[ $a == "--" && $inserted -eq 0 ]]; then
+                new_args+=("$a")
+                new_args+=("--test-threads=1")
+                inserted=1
+            else
+                new_args+=("$a")
+            fi
+        done
+        final_args=(cargo test "${new_args[@]}")
+    else
+        final_args+=(-- --test-threads=1)
+    fi
+fi
+
+# ----- timeout -------------------------------------------------------------
+#
+# Cap the run so even a misbehaving test can't deadlock the developer.
+# 10 minutes is generous (the whole tui binary suite finishes in ~1s on
+# the dev box after the Phase-3 hardening).
+
+wall_cap="${SAFE_TEST_TIMEOUT_SECS:-600}"
+
+echo "+ ${final_args[*]}  (timeout=${wall_cap}s, threads=$([[ $scope_is_tui -eq 1 && $already_has_threads -eq 0 ]] && echo 1 || echo default))" >&2
+
+# shellcheck disable=SC2086
+exec timeout --kill-after=10 "${wall_cap}" "${final_args[@]}"

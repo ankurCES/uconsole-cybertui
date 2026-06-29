@@ -20,13 +20,19 @@ given change.
 
 ## Quick reference — pick the narrowest command that covers your change
 
+All commands below go through `scripts/safe-test` (via `make test`),
+which mechanically refuses blanket form and auto-injects
+`--test-threads=1` for `cyberdeck-tui`. The bare `cargo test …` form
+is shown here for readability — `scripts/safe-test` is a transparent
+wrapper.
+
 | You changed | Run |
 |---|---|
-| Anything in `crates/tui/src/wm/` | `cargo test -p cyberdeck-tui wm:: -- --test-threads=1` |
-| A specific screen module | `cargo test -p cyberdeck-tui screens::<module>::tests` |
-| Anything under `crates/web/` | `cargo test -p cyberdeck-web --test lan_smoke` |
-| Anything else | `cargo test -p <crate> <module_or_test_path>` |
-| The full workspace, before opening a PR (CI parity) | `cargo test --workspace -- --test-threads=1` |
+| Anything in `crates/tui/src/wm/` | `make test ARGS='-p cyberdeck-tui wm::'` |
+| A specific screen module | `make test ARGS='-p cyberdeck-tui screens::<module>::tests'` |
+| Anything under `crates/web/` | `make test ARGS='-p cyberdeck-web --test lan_smoke'` |
+| Anything else | `make test ARGS='-p <crate> <module_or_test_path>'` |
+| The full workspace, before opening a PR (CI parity) | `make test-ci` |
 
 The last row is the only sanctioned blanket run, and it's gated to
 pre-PR / CI. If you find yourself reaching for it during the inner

@@ -116,6 +116,9 @@ The contributing doc is explicit:
 >   binary.
 > - `cargo clippy -p cyberdeck-tui --all-targets -- -D warnings` —
 >   before sending a PR.
+> - `make test ARGS='-p cyberdeck-tui <module>::'` — the canonical
+>   way to run `cargo test`; delegates to `scripts/safe-test`, which
+>   refuses blanket form and auto-injects `--test-threads=1`.
 
 The inner save loop uses `cargo check -p cyberdeck-tui --all-targets`
 — which never spins up a PTY. Real PTY-touching tests are only run
