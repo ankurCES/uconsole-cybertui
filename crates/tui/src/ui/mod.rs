@@ -84,6 +84,50 @@ pub fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(p, area);
 }
 
+/// Region indicator chip rendered on the right edge of the header.
+/// Mirrors the sidebar focus gutter and the status bar label so all
+/// three places tell the same story: "focus is here." On a 5" D-pad
+/// display this is the single most-glanced indicator — the user looks
+/// at the header to see *which* screen they're on AND *where* focus
+/// sits inside it.
+pub fn draw_region_chip(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    // Region pill: bright filled block on the focused region, dim
+    // outline for the unfocused ones. Three chips side by side so the
+    // user sees the whole region topology at a glance.
+    let labels = ["sidebar", "left", "right"];
+    let active = match app.region {
+        Region::Sidebar => 0,
+        Region::ContentLeft => 1,
+        Region::ContentRight => 2,
+    };
+    let n = labels.len() as u16;
+    if area.width < n * 6 {
+        return; // not enough room — header is too narrow to host the chip
+    }
+    let cell_w = area.width / n;
+    for (i, label) in labels.iter().enumerate() {
+        let x = area.x + i as u16 * cell_w;
+        let cell = Rect::new(x, area.y, cell_w, area.height);
+        let is_active = i == active;
+        let style = if is_active {
+            ratatui::style::Style::default()
+                .fg(theme.selection_fg)
+                .bg(theme.selection_bg)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else {
+            ratatui::style::Style::default().fg(theme.dim)
+        };
+        let text = if is_active {
+            format!(" ▶ {} ", label)
+        } else {
+            format!("   {} ", label)
+        };
+        let p = Paragraph::new(Line::from(Span::styled(text, style)))
+            .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
+        f.render_widget(p, cell);
+    }
+}
+
 /// Draw the redesigned sidebar: a numbered grid of 13 tiles. Replaces the
 /// old cramped 24-col list strip with a layout that suits a 5" D-pad
 /// display — every screen gets its own row, with the cursor row in a

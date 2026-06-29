@@ -334,6 +334,19 @@ async fn run_app(
 fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &Theme) {
     let (header, sidebar, content) = ui::chunks(f.area());
     ui::draw_header(f, header, app, theme);
+    // Region indicator chip: the right ~36 cols of the header. Mirrors
+    // the sidebar focus gutter and the status-bar label so the focused
+    // region is unmistakable from any glance — header, sidebar, status
+    // bar all tell the same story. On a 5" D-pad display this chip is
+    // the single most-glanced indicator of *where* focus is.
+    let chip_w = header.width.min(36);
+    let chip = ratatui::layout::Rect::new(
+        header.x + header.width.saturating_sub(chip_w),
+        header.y,
+        chip_w,
+        header.height,
+    );
+    ui::draw_region_chip(f, chip, app, theme);
     ui::draw_sidebar(f, sidebar, app, theme);
     ui::draw_status(f, content, app, theme);
     // content height = full content area minus status bar at bottom
