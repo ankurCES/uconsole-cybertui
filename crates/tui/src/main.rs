@@ -356,6 +356,42 @@ fn rect(x: u16, y: u16, w: u16, h: u16) -> ratatui::layout::Rect {
 }
 
 use ratatui::Frame;
+use ratatui::text::{Line, Span};
+
+/// Pure line builder for `Modal::Input`. Extracted so tests can assert on
+/// the rendered text directly without spinning up a `Buffer`/`Frame`.
+/// Behaviour: prompt line, live buffer line, then an `[ OK ]   [ Cancel ]`
+/// row so the affordance is visible to the user. Enter / Esc behaviour is
+/// unchanged (handled in `handle_key`).
+fn modal_input_lines(prompt: &str, buf: &str) -> Vec<Line<'static>> {
+    vec![
+        Line::from(prompt.to_string()),
+        Line::from(format!("> {buf}")),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::raw("[ OK ]"),
+            Span::raw("      "),
+            Span::raw("[ Cancel ]"),
+        ]),
+    ]
+}
+
+/// Pure line builder for `Modal::Secret`. Same shape as `modal_input_lines`
+/// but the buffer is masked with `•` so the real value never leaks into
+/// the rendered text.
+fn modal_secret_lines(prompt: &str, buf: &str) -> Vec<Line<'static>> {
+    let masked: String = std::iter::repeat('•').take(buf.chars().count()).collect();
+    vec![
+        Line::from(prompt.to_string()),
+        Line::from(format!("> {masked}▏")),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::raw("[ OK ]"),
+            Span::raw("      "),
+            Span::raw("[ Cancel ]"),
+        ]),
+    ]
+}
 
 fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &Theme) {
     match &app.modal {
@@ -451,9 +487,8 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
             f.render_widget(p, rect);
         }
         Modal::Input { prompt, buf, .. } => {
-            use ratatui::text::Line;
             use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-            let lines = vec![Line::from(prompt.clone()), Line::from(format!("> {buf}"))];
+            let lines = modal_input_lines(prompt, buf);
             let w = 60.min(area.width.saturating_sub(4));
             let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
             let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -469,15 +504,8 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
             f.render_widget(p, rect);
         }
         Modal::Secret { prompt, buf, .. } => {
-            // Render the underlying value masked as `•`. The real `buf` is
-            // kept on the modal so the dispatcher can read it on submit.
-            use ratatui::text::Line;
             use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-            let masked: String = std::iter::repeat('•').take(buf.chars().count()).collect();
-            let lines = vec![
-                Line::from(prompt.clone()),
-                Line::from(format!("> {masked}▏")),
-            ];
+            let lines = modal_secret_lines(prompt, buf);
             let w = 60.min(area.width.saturating_sub(4));
             let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
             let x = area.x + (area.width.saturating_sub(w)) / 2;
@@ -779,8 +807,15 @@ async fn handle_key(
                     run_input(app, tx, k, value).await;
                 }
                 Char(c) => {
-                    // Push into the live buffer via a re-borrow.
-                    if let Modal::Input { buf, .. } = &mut app.modal {
+                    // Push into the live buffer via a re-borrow. For
+                    // `InputKind::BluetoothPasskey` only digits are
+                    // accepted; letters and other characters are silently
+                    // dropped at the insert step so the user can't
+                    // accidentally type a letter into a numeric passkey
+                    // field.
+                    if matches!(k, InputKind::BluetoothPasskey) && !c.is_ascii_digit() {
+                        // drop non-digit chars on the floor
+                    } else if let Modal::Input { buf, .. } = &mut app.modal {
                         buf.push(c);
                     }
                 }
@@ -805,7 +840,10 @@ async fn handle_key(
                     run_input(app, tx, k, value).await;
                 }
                 Char(c) => {
-                    if let Modal::Secret { buf, .. } = &mut app.modal {
+                    if matches!(k, InputKind::BluetoothPasskey) && !c.is_ascii_digit() {
+                        // drop non-digit chars on the floor — see the
+                        // matching arm in the Modal::Input handler above.
+                    } else if let Modal::Secret { buf, .. } = &mut app.modal {
                         buf.push(c);
                     }
                 }
@@ -1142,6 +1180,19 @@ async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, va
             ssid: value,
             password: None,
         },
+        InputKind::BluetoothPasskey => {
+            // The passkey modal is in place (Module 2: numeric filter +
+            // masked Modal::Secret + OK/Cancel row). The actual pairing
+            // dispatch is wired in Module 3 (Bluetooth screen refactor)
+            // via `RunAction::BluetoothPairWithPasskey(mac, pin)` once
+            // the device is selected. Until then, gracefully refuse to
+            // submit so the modal is at least usable today.
+            app.push_toast(
+                ToastKind::Warn,
+                "BT pairing wires up in Module 3 — passkey captured",
+            );
+            return;
+        }
         InputKind::WifiEnterpriseIdentity => {
             // Stash on the wizard so advance_wizard can read it.
             if let Modal::Wizard(crate::app::Wizard::WifiEnterprise { identity, step, .. }) =
@@ -2233,5 +2284,133 @@ mod tests {
             .toasts
             .iter()
             .any(|t| t.kind == ToastKind::Error && t.text.contains("invalid pid")));
+    }
+
+    // ===== Module 2 — Modal OK/Cancel polish + BluetoothPasskey =====
+
+    // `Modal::Input` rendered lines must include an "OK" and "Cancel" button
+    // row so the affordance is visible to the user (orbital-style modal
+    // chrome). Behaviour of Enter/Esc is unchanged.
+    #[test]
+    fn modal_input_ok_cancel_button_renders() {
+        let lines = modal_input_lines("Connect to SSID:", "");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            text.contains("OK"),
+            "Modal::Input lines must include an OK button, got {text:?}"
+        );
+        assert!(
+            text.contains("Cancel"),
+            "Modal::Input lines must include a Cancel button, got {text:?}"
+        );
+        // The prompt must still be there so the user knows what they're filling in.
+        assert!(
+            text.contains("Connect to SSID:"),
+            "Modal::Input lines must still include the prompt, got {text:?}"
+        );
+        // And the live buffer (empty here) must still be visible.
+        assert!(
+            text.contains(">"),
+            "Modal::Input lines must still include the buffer caret '>', got {text:?}"
+        );
+    }
+
+    // Same affordance for `Modal::Secret`. The mask `•` is unaffected — OK /
+    // Cancel ride alongside it.
+    #[test]
+    fn modal_secret_ok_cancel_button_renders() {
+        let lines = modal_secret_lines("Wi-Fi password for HomeNet", "hunter2");
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(text.contains("OK"), "Modal::Secret lines must include an OK button, got {text:?}");
+        assert!(
+            text.contains("Cancel"),
+            "Modal::Secret lines must include a Cancel button, got {text:?}"
+        );
+        assert!(
+            text.contains("Wi-Fi password for HomeNet"),
+            "Modal::Secret lines must still include the prompt, got {text:?}"
+        );
+        // The mask is rendered as bullets — one per char in the real buf.
+        assert!(
+            text.contains("•"),
+            "Modal::Secret lines must still mask the buffer as bullets, got {text:?}"
+        );
+        // The real password must NOT leak through the rendered text.
+        assert!(
+            !text.contains("hunter2"),
+            "Modal::Secret must not leak the real password into rendered text, got {text:?}"
+        );
+    }
+
+    // `InputKind::BluetoothPasskey` must accept only digits. Any non-digit
+    // char pressed while this kind is active must be silently dropped at
+    // the buffer-insert step (no error toast, no buf mutation).
+    #[tokio::test]
+    async fn bluetooth_passkey_rejects_letters() {
+        let (tx, _rx, mut app) = make_app();
+        app.modal = Modal::Secret {
+            prompt: "Bluetooth passkey".into(),
+            buf: String::new(),
+            kind: InputKind::BluetoothPasskey,
+        };
+
+        // Press `a` — must be ignored.
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Char('a'))).await;
+        match &app.modal {
+            Modal::Secret { buf, kind: InputKind::BluetoothPasskey, .. } => {
+                assert!(
+                    buf.is_empty(),
+                    "letter `a` must not append to BluetoothPasskey buffer, got buf={buf:?}"
+                );
+            }
+            other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
+        }
+
+        // Press `5` — must append.
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Char('5'))).await;
+        match &app.modal {
+            Modal::Secret { buf, kind: InputKind::BluetoothPasskey, .. } => {
+                assert_eq!(buf, "5", "digit `5` must append to BluetoothPasskey buffer");
+            }
+            other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
+        }
+
+        // Press `b` again — must still be ignored (cumulative).
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Char('b'))).await;
+        match &app.modal {
+            Modal::Secret { buf, kind: InputKind::BluetoothPasskey, .. } => {
+                assert_eq!(
+                    buf, "5",
+                    "letters after a digit must still be rejected, got buf={buf:?}"
+                );
+            }
+            other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
+        }
+
+        // Press `0` — must append.
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Char('0'))).await;
+        match &app.modal {
+            Modal::Secret { buf, kind: InputKind::BluetoothPasskey, .. } => {
+                assert_eq!(buf, "50", "digit `0` must append after `5`, got buf={buf:?}");
+            }
+            other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
+        }
+
+        // Backspace removes the last char as usual.
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Backspace)).await;
+        match &app.modal {
+            Modal::Secret { buf, kind: InputKind::BluetoothPasskey, .. } => {
+                assert_eq!(buf, "5", "Backspace must remove the last char");
+            }
+            other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
+        }
     }
 }
