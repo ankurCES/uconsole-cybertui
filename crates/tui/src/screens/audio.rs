@@ -176,7 +176,7 @@ impl Screen for AudioScreen {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(1), Constraint::Length(40)])
+            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(inner);
         let _ = cols;
 
