@@ -79,6 +79,12 @@ impl Manager {
     pub fn focused(&self) -> PaneId { self.focused }
     pub fn window(&self, id: PaneId) -> Option<&Window> { self.windows.get(&id) }
     pub fn window_mut(&mut self, id: PaneId) -> Option<&mut Window> { self.windows.get_mut(&id) }
+    /// Module 4 — return the `WindowKind` of the focused pane, if any.
+    /// Used by the Files `e` arm and editor tests to assert that
+    /// `App::enter_editor` swapped the focused builtin to `Editor`.
+    pub fn focused_pane_kind(&self) -> Option<WindowKind> {
+        self.windows.get(&self.focused).map(|w| w.kind)
+    }
 
     /// Return the `PaneId` of the leaf at DFS `index`, matching the
     /// order `pane_ids()` and `layout()` use. `None` for out-of-range.

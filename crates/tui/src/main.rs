@@ -1124,13 +1124,27 @@ async fn run_palette(app: &mut App, tx: &mpsc::Sender<Action>, label: &str) {
     }
 }
 
-async fn run_confirm(_app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind, arg: String) {
+async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind, arg: String) {
     let act = match kind {
         ConfirmKind::Reboot => RunAction::Reboot,
         ConfirmKind::Shutdown => RunAction::Shutdown,
         ConfirmKind::Kill => RunAction::ProcessKill(arg.parse().unwrap_or(0)),
         ConfirmKind::Remove => RunAction::PackageRemove(arg),
         ConfirmKind::DisconnectWifi => RunAction::WifiDisconnect,
+        // Module 4 — discard-confirm. Discarding the editor buffer is
+        // a pure in-memory state reset on App (clear the 5 editor
+        // fields + swap focus back to Files), so we apply it directly
+        // here instead of routing it through a `RunAction`. The other
+        // arms *do* need the async dispatch path because they invoke
+        // `cyberdeck_core::*` commands; this one doesn't.
+        //
+        // `arg` is the file path that was being edited — kept in scope
+        // for parity with the other `ConfirmKind` arms, but unused.
+        ConfirmKind::Discard => {
+            let _ = arg;
+            app.discard_editor();
+            return;
+        }
     };
     let _ = tx.send(Action::Run(act)).await;
 }
