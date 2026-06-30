@@ -746,25 +746,15 @@ mod status_region_vocabulary {
     // track height of `visible` when windowed, and keep thumb_pos ∈
     // [0, visible - thumb_size]. These are pure-math pin tests so they
     // can't regress silently.
-
-    /// Same formula the implementation uses. Re-declared here (rather
-    /// than calling the production helper, which lives in the parent
-    /// module) so the test pins the contract independently.
-    fn thumb_for(total: usize, visible: usize, offset: usize) -> (usize, usize) {
-        if total <= visible || visible == 0 {
-            return (0, 0);
-        }
-        let thumb_size = ((visible * visible) / total).max(1);
-        let max_off = total.saturating_sub(visible);
-        let thumb_pos = ((offset * (visible.saturating_sub(thumb_size))) / max_off)
-            .min(visible.saturating_sub(thumb_size));
-        (thumb_size, thumb_pos)
-    }
+    //
+    // They call `sidebar_scrollbar_thumb` (defined in the parent
+    // module and brought into scope by `use super::*;` above) directly
+    // so they pin the real algorithm — not a copy of it.
 
     #[test]
     fn sidebar_scrollbar_thumb_math_full_window_hides_gutter() {
         // When all rows fit, total <= visible → no thumb should render.
-        let (thumb_size, thumb_pos) = thumb_for(15, 15, 0);
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 15, 0);
         assert_eq!(thumb_size, 0, "thumb_size must be 0 when window fits");
         assert_eq!(thumb_pos, 0, "thumb_pos must be 0 when window fits");
     }
@@ -772,7 +762,7 @@ mod status_region_vocabulary {
     #[test]
     fn sidebar_scrollbar_thumb_math_short_window_top_of_list() {
         // 15 screens, 5 visible, offset=0 → thumb should sit at the top.
-        let (thumb_size, thumb_pos) = thumb_for(15, 5, 0);
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 5, 0);
         // floor(5*5/15) = 1 → thumb_size = 1
         assert_eq!(thumb_size, 1, "thumb_size for 5/15 ≈ 1 row");
         // (0 * (5 - 1)) / (15 - 5) = 0
@@ -782,7 +772,7 @@ mod status_region_vocabulary {
     #[test]
     fn sidebar_scrollbar_thumb_math_short_window_bottom_of_list() {
         // 15 screens, 5 visible, offset=10 (max) → thumb at the bottom.
-        let (thumb_size, thumb_pos) = thumb_for(15, 5, 10);
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 5, 10);
         assert_eq!(thumb_size, 1);
         // (10 * 4) / 10 = 4, clamped to (5 - 1) = 4
         assert_eq!(thumb_pos, 4, "offset=max must pin thumb to bottom");
@@ -791,7 +781,7 @@ mod status_region_vocabulary {
     #[test]
     fn sidebar_scrollbar_thumb_math_long_list_two_thirds() {
         // 15 screens, 5 visible, offset=7 → thumb is ~70% down the track.
-        let (thumb_size, thumb_pos) = thumb_for(15, 5, 7);
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 5, 7);
         assert_eq!(thumb_size, 1);
         // (7 * 4) / 10 = 2 (integer division)
         assert_eq!(thumb_pos, 2);
@@ -800,7 +790,7 @@ mod status_region_vocabulary {
     #[test]
     fn sidebar_scrollbar_thumb_math_thumb_size_grows_with_visible() {
         // 15 screens, 10 visible → thumb_size = floor(10*10/15) = 6.
-        let (thumb_size, thumb_pos) = thumb_for(15, 10, 0);
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 10, 0);
         assert_eq!(thumb_size, 6);
         assert_eq!(thumb_pos, 0);
     }
