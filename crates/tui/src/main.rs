@@ -1629,6 +1629,54 @@ async fn handle_action(
             let _ = id;
             let _ = screens;
         }
+        // Module 2.4 — explicit "give me the last 60s of logs now" from
+        // the user pressing `r` on the Logs screen. We spawn the
+        // journalctl call off the dispatcher (it can take hundreds of
+        // ms on a busy box) and route the resulting lines back through
+        // the normal `LogPushed` arm, so dedupe + ordering keep
+        // working. The screen's `on_key` only enqueues this Action —
+        // the actual I/O lives here, keeping the screen handler
+        // trivially non-blocking.
+        //
+        // 60s matches the Q2 lock-in (one minute of context — enough to
+        // cover the typical "what just happened?" investigation but
+        // tight enough to avoid flooding the buffer on a noisy box).
+        // The 1Hz refiller (Module 2.2) continues to feed live updates
+        // in parallel via the same `LogPushed` arm.
+        Action::RefreshLogs => {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let entries = match cyberdeck_core::logs::recent_since(60).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!("logs::RefreshLogs: recent_since(60) failed: {e}");
+                        // Surface as a toast so the user knows their
+                        // keypress registered even when journalctl
+                        // refused (no perms, missing binary, etc.).
+                        let _ = tx
+                            .send(Action::Toast(
+                                ToastKind::Error,
+                                format!("refresh failed: {e}"),
+                            ))
+                            .await;
+                        return;
+                    }
+                };
+                for (ts, message) in entries {
+                    if message.is_empty() {
+                        continue;
+                    }
+                    let line = crate::app::LogLine {
+                        ts: ts.with_timezone(&chrono::Local),
+                        message,
+                    };
+                    if tx.send(Action::LogPushed(line)).await.is_err() {
+                        // Receiver dropped — app is shutting down.
+                        break;
+                    }
+                }
+            });
+        }
         Action::WifiScanResult(networks) => {
             app.wifi_scan_results = networks;
         }

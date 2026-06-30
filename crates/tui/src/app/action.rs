@@ -32,6 +32,14 @@ pub enum Action {
     SubmitInput(String),
     /// Push a line into the log buffer (sent by the logs screen fetch task).
     LogPushed(crate::app::LogLine),
+    /// Module 2.4 — user pressed `r` on the Logs screen. Dispatcher
+    /// reacts by spawning an immediate `recent_since(60)` fetch (vs.
+    /// the 1Hz refiller's 2s sliding window) and routes results back
+    /// through the normal `LogPushed` pipeline so dedupe + ordering
+    /// keep working. The screen only enqueues this Action; the actual
+    /// journalctl invocation lives in the dispatcher so the UI thread
+    /// never blocks on a process spawn.
+    RefreshLogs,
     /// Live refresh of a specific resource (manual `r` press).
     Refresh(crate::app::screen::ScreenId),
     /// Result of a Wi-Fi scan. Written into `app.wifi_scan_results` so the

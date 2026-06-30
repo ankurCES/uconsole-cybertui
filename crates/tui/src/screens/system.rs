@@ -50,6 +50,17 @@ impl Screen for SystemScreen {
                 app.system_log_offset = 0;
                 return true;
             }
+            // Module 2.4 — `r` requests an immediate 60s fetch for
+            // the right-hand "recent log" pane. Same contract as the
+            // Logs screen: the handler is a tiny enqueue
+            // (`try_send` on `app.tx`), the actual journalctl call
+            // lives in the dispatcher's `Action::RefreshLogs` arm.
+            // The 1Hz refiller continues to feed live updates in
+            // parallel via the same `LogPushed` pipeline.
+            KeyCode::Char('r') => {
+                let _ = app.tx.try_send(crate::app::action::Action::RefreshLogs);
+                return true;
+            }
             _ => return false,
         }
     }
@@ -257,7 +268,9 @@ impl Screen for SystemScreen {
             Span::styled(mode, theme.dim()),
             Span::raw("  "),
             Span::styled(" r ", theme.key()),
-            Span::styled("refresh  ", theme.dim()),
+            // Module 2.4 — match the Logs screen's hint so the user
+            // sees the same affordance everywhere `r` is bound.
+            Span::styled("refresh (live)  ", theme.dim()),
             Span::styled(" ? ", theme.key()),
             Span::styled("help", theme.dim()),
         ]));
@@ -276,5 +289,68 @@ fn trim(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..n])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Module 2.4 — pin the System screen's `r` handler. The right
+    //! "recent log" pane is the Logs screen's more compact cousin;
+    //! pressing `r` here should also enqueue `Action::RefreshLogs`,
+    //! so the dispatcher triggers the same 60s `recent_since` fetch
+    //! and routes results back via `LogPushed`.
+    use super::*;
+    use crate::app::action::Action;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    fn fresh_app_with_observer() -> (App, mpsc::Receiver<Action>) {
+        // `App::new` consumes both endpoints of its channel, but the
+        // field is effectively dead (the dispatcher lives in
+        // `main.rs`). Hand a dummy pair to `App::new`, then overwrite
+        // `app.tx` with a fresh sender so we can observe what the
+        // screen sends.
+        let (_app_tx, app_rx) = mpsc::channel::<Action>(8);
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        let mut app = App::new(_app_tx, app_rx);
+        app.tx = tx;
+        (app, rx)
+    }
+
+    #[test]
+    fn system_screen_r_sends_refresh_logs_action() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mut app, mut rx) = fresh_app_with_observer();
+            app.current = ScreenId::System;
+
+            let mut screen = SystemScreen;
+            let start = Instant::now();
+            let consumed = screen.on_key(
+                KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE),
+                &mut app,
+            );
+            let elapsed = start.elapsed();
+
+            assert!(
+                consumed,
+                "r must be consumed by the System screen (it has its own handler)"
+            );
+            assert!(
+                elapsed < Duration::from_millis(50),
+                "r handler must be non-blocking (elapsed = {:?})",
+                elapsed
+            );
+
+            let action = rx.try_recv().expect("r must enqueue Action::RefreshLogs");
+            assert!(
+                matches!(action, Action::RefreshLogs),
+                "r must enqueue Action::RefreshLogs, got {:?}",
+                action
+            );
+        });
     }
 }

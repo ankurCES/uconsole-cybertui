@@ -28,6 +28,25 @@ impl Screen for LogsScreen {
                 app.logs_offset = 0;
                 return true;
             }
+            // Module 2.4 — `r` requests an immediate 60s fetch. The handler
+            // is intentionally tiny: it enqueues `Action::RefreshLogs`
+            // synchronously (the channel is bounded to 256 actions,
+            // and this is a tiny control message — no payload). The
+            // dispatcher arm (main.rs) does the journalctl invocation
+            // on a Tokio task and routes results back through
+            // `Action::LogPushed` so dedupe + ordering keep working.
+            // The screen's `on_key` MUST stay non-blocking — a 60s
+            // journalctl on a busy box can take hundreds of ms, so we
+            // don't even attempt to send it from here.
+            //
+            // `try_send` is sync (no await) so the test can observe
+            // the action with `rx.try_recv()` immediately after
+            // `on_key` returns. If the channel is ever full we drop
+            // the request silently — the 1Hz refiller will catch up.
+            KeyCode::Char('r') => {
+                let _ = app.tx.try_send(crate::app::action::Action::RefreshLogs);
+                return true;
+            }
             KeyCode::Char('f') => {
                 // Spawn a one-shot journalctl -n 50 fetch (no -f so we don't block).
                 // Module 2.3: `recent_since` returns (ts, message) tuples
@@ -194,10 +213,17 @@ impl Screen for LogsScreen {
             "  ⏸ paused — press G to jump back to live tail"
         };
         let pos = format!("  {} lines  ", total);
+        // Module 2.4 — `r` triggers an immediate 60s fetch (vs. the 1Hz
+        // refiller's 2s sliding window). The fetch happens off the UI
+        // thread inside the dispatcher's `Action::RefreshLogs` arm, and
+        // results flow back through the normal `LogPushed` pipeline so
+        // dedupe + ordering keep working.
         let hints = Paragraph::new(Line::from(vec![
             Span::styled(pos, theme.dim()),
             Span::styled(mode, theme.dim()),
             Span::raw("  "),
+            Span::styled(" r ", theme.key()),
+            Span::styled("refresh (live)  ", theme.dim()),
             Span::styled(" f ", theme.key()),
             Span::styled("fetch  ", theme.dim()),
             Span::styled(" c ", theme.key()),
@@ -210,5 +236,118 @@ impl Screen for LogsScreen {
             1,
         );
         f.render_widget(hints, hint_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Module 2.4 — pin the `r` handler's contract:
+    //! - It routes through the action channel (no in-line `journalctl`
+    //!   spawn), so the UI thread never blocks on a process invocation.
+    //! - It dispatches `Action::RefreshLogs`, which the dispatcher arm
+    //!   in `main.rs` catches and turns into a 60s `recent_since` fetch
+    //!   on a Tokio task.
+    //! - It returns `true` so the screen consumes the key (matches the
+    //!   other Logs-screen handlers' contract).
+    use super::*;
+    use crate::app::action::Action;
+    use std::time::{Duration, Instant};
+    use tokio::sync::mpsc;
+
+    fn fresh_app_with_observer() -> (App, mpsc::Receiver<Action>) {
+        // `App::new` consumes both endpoints of its channel, but the
+        // field is effectively dead — the actual dispatcher lives in
+        // `main.rs` and consumes a separate `rx`. For tests we hand a
+        // dummy `tx`/`rx` pair to `App::new` (so it constructs) and a
+        // *separate* pair as our observation channel. The screen
+        // sends via `app.tx`, which is the App's own clone — we
+        // observe through the second channel.
+        //
+        // Concretely: build the App's channel (consumed by App::new),
+        // then build a second channel and *replace* `app.tx` with its
+        // sender. That gives us the contract: "the screen uses
+        // `app.tx` to send" without fighting `App::new`'s ownership
+        // of `rx`.
+        let (_app_tx, app_rx) = mpsc::channel::<Action>(8);
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        let mut app = App::new(_app_tx, app_rx);
+        app.tx = tx;
+        (app, rx)
+    }
+
+    fn key_r() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('r'), crossterm::event::KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn logs_screen_r_sends_refresh_logs_action() {
+        // Synchronous test: drive the screen's on_key handler and assert
+        // an `Action::RefreshLogs` arrives on the observation channel.
+        // We use a dedicated runtime so we can poll the receiver
+        // without an async fn signature.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mut app, mut rx) = fresh_app_with_observer();
+            app.current = ScreenId::Logs;
+
+            let mut screen = LogsScreen;
+            let start = Instant::now();
+            let consumed = screen.on_key(key_r(), &mut app);
+            let elapsed = start.elapsed();
+
+            assert!(
+                consumed,
+                "r must be consumed by the Logs screen (it has its own handler)"
+            );
+            assert!(
+                elapsed < Duration::from_millis(50),
+                "r handler must be non-blocking (elapsed = {:?})",
+                elapsed
+            );
+
+            // The dispatcher hasn't run yet, but the action is queued
+            // on the channel the screen sent it through.
+            let action = rx.try_recv().expect("r must enqueue Action::RefreshLogs");
+            assert!(
+                matches!(action, Action::RefreshLogs),
+                "r must enqueue Action::RefreshLogs, got {:?}",
+                action
+            );
+        });
+    }
+
+    #[test]
+    fn logs_screen_other_keys_still_unaffected_by_r_handler() {
+        // `c` still clears the buffer; `r` does not. This pins that
+        // the new arm doesn't accidentally shadow the existing
+        // handlers.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (mut app, mut rx) = fresh_app_with_observer();
+            app.current = ScreenId::Logs;
+            // Seed a line so we can prove `c` cleared it.
+            app.logs.push(crate::app::LogLine {
+                ts: Local::now(),
+                message: "seed".into(),
+            });
+
+            let mut screen = LogsScreen;
+            let consumed = screen.on_key(
+                KeyEvent::new(KeyCode::Char('c'), crossterm::event::KeyModifiers::NONE),
+                &mut app,
+            );
+            assert!(consumed, "c must still be consumed");
+            assert!(app.logs.is_empty(), "c must still clear the buffer");
+            assert!(
+                rx.try_recv().is_err(),
+                "c must not enqueue an Action (no channel send)"
+            );
+        });
     }
 }
