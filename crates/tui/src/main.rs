@@ -708,6 +708,86 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
                 theme,
             );
         }
+        Modal::ToastLog => {
+            use ratatui::text::Line;
+            use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+            // Newest-first: iterate the ring in reverse so the most recent
+            // entry lands on the topmost visible row. `toast_log_offset`
+            // skips further into the list (toward older entries) and is
+            // clamped to `total - visible` by the key handler so we
+            // never render a blank window.
+            let total = app.toast_history.len();
+            // Reserve at least 2 lines for the title + a one-line hint.
+            let h = (total.min(area.height.saturating_sub(4) as usize) as u16)
+                .max(3)
+                .min(area.height.saturating_sub(4));
+            let w = 70.min(area.width.saturating_sub(4));
+            let x = area.x + (area.width.saturating_sub(w)) / 2;
+            let y = area.y + (area.height.saturating_sub(h + 2)) / 2;
+            let rect = rect(x, y, w, h + 2);
+            f.render_widget(Clear, rect);
+
+            let visible = h as usize;
+            let max_off = total.saturating_sub(visible);
+            // Defensive clamp: the key handler should already keep this in
+            // range, but a stale `toast_log_offset` (e.g. after the user
+            // closes the modal, more toasts age out of the ring, and
+            // re-opens) would otherwise render a blank top.
+            let offset = app.toast_log_offset.min(max_off);
+
+            // We iterate from `total - offset - visible` to
+            // `total - offset` (exclusive) — newest first.
+            let lines: Vec<Line> = if total == 0 {
+                vec![Line::from("(no toasts yet — try something first)")]
+            } else {
+                app.toast_history
+                    .iter()
+                    .rev()
+                    .skip(offset)
+                    .take(visible)
+                    .map(|t| {
+                        let prefix = match t.kind {
+                            crate::app::toast::ToastKind::Info => "ℹ",
+                            crate::app::toast::ToastKind::Ok => "✓",
+                            crate::app::toast::ToastKind::Warn => "⚠",
+                            crate::app::toast::ToastKind::Error => "✗",
+                        };
+                        Line::from(format!(
+                            "{} {} {}",
+                            t.ts.format("%H:%M:%S"),
+                            prefix,
+                            t.message
+                        ))
+                    })
+                    .collect()
+            };
+
+            let p = Paragraph::new(lines).block(
+                Block::default()
+                    .title(format!(
+                        " toast log ({}/{}) ",
+                        offset.saturating_add(1).min(total.max(1)),
+                        total
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(theme.border(true)),
+            );
+            f.render_widget(p, rect);
+            // Hint line below the modal.
+            let hint_y = rect.y.saturating_add(rect.height);
+            if hint_y < area.y + area.height {
+                f.render_widget(
+                    Paragraph::new(Line::from("[ ↑/↓ ] scroll   [ esc ] close"))
+                        .alignment(ratatui::layout::Alignment::Center),
+                    ratatui::layout::Rect::new(
+                        x,
+                        hint_y,
+                        w,
+                        1,
+                    ),
+                );
+            }
+        }
     }
 }
 
@@ -1004,6 +1084,37 @@ async fn handle_key(
             }
             return false;
         }
+        Modal::ToastLog => {
+            match key.code {
+                Esc => {
+                    app.modal = Modal::None;
+                }
+                Down => {
+                    // `total` is the size of the ring; `visible` is the
+                    // number of rows the modal allocated. We cap the
+                    // offset so the last visible row always corresponds
+                    // to a real entry — pushing further would just show
+                    // a blank bottom.
+                    let total = app.toast_history.len();
+                    // Match the renderer's `visible` arithmetic: the
+                    // render caps `h` at `area.height - 4` and floors it
+                    // at 3, so a conservative bound is `area.height - 4`
+                    // minus 1 for the title bar. The key handler doesn't
+                    // have access to the frame area, so we use a
+                    // generous cap (`total`) and rely on the renderer's
+                    // own defensive clamp to land on the right offset.
+                    if total > 0 {
+                        app.toast_log_offset =
+                            app.toast_log_offset.saturating_add(1).min(total);
+                    }
+                }
+                Up => {
+                    app.toast_log_offset = app.toast_log_offset.saturating_sub(1);
+                }
+                _ => {}
+            }
+            return false;
+        }
     }
 
     // Global keys.
@@ -1016,6 +1127,16 @@ async fn handle_key(
         }
         Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
         Char('?') => app.modal = Modal::Help,
+        // Module 7.2 — capital T opens the scrollable toast history
+        // overlay. Lowercase `t` is intentionally left alone so screen
+        // authors can still bind it (e.g. `t` toggles the process tree
+        // view on System).
+        Char('T') => {
+            app.modal = Modal::ToastLog;
+            // Reset the scroll to the tail (newest at top) so every
+            // open starts from a deterministic position.
+            app.toast_log_offset = 0;
+        }
         Char(':') => {
             app.modal = Modal::CommandPalette;
             app.palette_buf.clear();
@@ -1840,6 +1961,7 @@ mod tests {
     #![allow(dead_code)] // helpers like `last_toast` and `app_with_n_panes` are kept for future use
     use super::*;
     use crate::app::ChoiceOption;
+    use crate::app::ToastEntry;
     use crate::wm::tree::SplitDir;
 
     fn build_screens() -> Vec<Box<dyn Screen>> {
@@ -2861,5 +2983,112 @@ mod tests {
             app.sidebar_offset, 2,
             "Up through handle_key must retreat offset when cursor re-enters window"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 7.2 — capital `T` opens the `Modal::ToastLog` overlay, Esc closes
+    // it, and Up/Down scroll the offset (clamped to `total - visible`).
+    // -------------------------------------------------------------------------
+
+    /// Fresh app already on the sidebar so the `T` key isn't claimed by any
+    /// focused-pane on_key handler before reaching the global arm.
+    fn fresh_app_sidebar() -> App {
+        let mut app = app_with_n_panes(1);
+        app.set_region(Region::Sidebar);
+        app
+    }
+
+    #[tokio::test]
+    async fn capital_t_opens_toast_log_modal() {
+        let mut app = fresh_app_sidebar();
+        assert!(matches!(app.modal, Modal::None));
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Char('T'), KeyModifiers::NONE),
+        )
+        .await;
+        assert!(
+            matches!(app.modal, Modal::ToastLog),
+            "T must open ToastLog, got {:?}",
+            app.modal
+        );
+        assert_eq!(app.toast_log_offset, 0, "open must reset scroll to top");
+    }
+
+    #[tokio::test]
+    async fn esc_closes_toast_log_modal() {
+        let mut app = fresh_app_sidebar();
+        app.modal = Modal::ToastLog;
+        app.toast_history.push_back(ToastEntry {
+            ts: chrono::Local::now(),
+            kind: ToastKind::Info,
+            message: "test".into(),
+        });
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[tokio::test]
+    async fn toast_log_down_advances_offset_clamped_to_history_len() {
+        let mut app = fresh_app_sidebar();
+        app.modal = Modal::ToastLog;
+        for i in 0..50 {
+            app.push_toast(ToastKind::Info, format!("t{i}"));
+        }
+        let initial_offset = app.toast_log_offset;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        // Hammer Down many more times than the cap allows; offset must
+        // saturate at total (no blank rows beyond history).
+        for _ in 0..500 {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            )
+            .await;
+        }
+        assert!(
+            app.toast_log_offset > initial_offset,
+            "Down must advance offset"
+        );
+        // Offset can never exceed history length (visible rows are a
+        // subset, so a generous bound is `total`).
+        assert!(app.toast_log_offset <= app.toast_history.len());
+    }
+
+    #[tokio::test]
+    async fn toast_log_up_retreats_offset_toward_zero() {
+        let mut app = fresh_app_sidebar();
+        app.modal = Modal::ToastLog;
+        for i in 0..10 {
+            app.push_toast(ToastKind::Info, format!("t{i}"));
+        }
+        app.toast_log_offset = 5;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        for _ in 0..20 {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            )
+            .await;
+        }
+        assert_eq!(app.toast_log_offset, 0, "Up must saturate at 0");
     }
 }

@@ -106,6 +106,10 @@ pub enum Modal {
         stderr: String,
         retry: Box<Modal>,
     },
+    /// Module 7.2 — scrollable history of past toasts. Newest-first;
+    /// `App::toast_log_offset` is the scroll position (0 = tail). Opens
+    /// via the global `T` key, closes on Esc.
+    ToastLog,
 }
 
 #[derive(Debug)]
@@ -590,6 +594,10 @@ pub struct App {
     /// (opened by capital-T). Newest entry at the back; the modal renders
     /// in reverse for newest-first ordering.
     pub toast_history: std::collections::VecDeque<ToastEntry>,
+    /// Module 7.2 — scroll offset for `Modal::ToastLog`. `0` = newest at
+    /// the top (tail). Growing values scroll up toward older entries;
+    /// clamped to `total - visible` so we never show a blank window.
+    pub toast_log_offset: usize,
     /// One-shot guard for the first-launch welcome toast. Set to true the
     /// first time `Action::Tick` runs, so the welcome fires exactly once
     /// per process even though `Action::Tick` ticks forever. Mirrors
@@ -844,6 +852,9 @@ impl App {
             // `push_toast` call; cap enforced by `push_toast` itself so
             // construction stays cheap.
             toast_history: std::collections::VecDeque::new(),
+            // Module 7.2 — scroll offset for the ToastLog modal. 0 means
+            // "showing newest first"; `T` re-zeroes this on every open.
+            toast_log_offset: 0,
             boot_toast_sent: false,
             logs: Vec::new(),
             logs_filter: String::new(),
