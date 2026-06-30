@@ -354,6 +354,15 @@ pub struct App {
     /// top of the pane. See `crates/tui/src/ui/mod.rs::sidebar_clamps_offset_*`
     /// for the clamp contract.
     pub sidebar_offset: usize,
+    /// Visible row count for the sidebar — set by the renderer after
+    /// computing it from the layout area and read by the Up/Down handlers
+    /// so cursor (`sidebar_idx`) and offset (`sidebar_offset`) stay in
+    /// sync. Defaults to 0, which `clamp_sidebar_offset` treats as "no
+    /// window" and collapses `sidebar_offset` to 0 — this guarantees that
+    /// before the first frame renders, no spurious offset survives into
+    /// the handler. Single source of truth for the visible-row count;
+    /// never recomputed in handlers.
+    pub sidebar_visible: usize,
     /// Which region of the TUI currently holds key focus. The redesign
     /// replaces the previous single-`bool` model with three explicit
     /// regions so D-pad navigation is deterministic:
@@ -552,6 +561,10 @@ impl App {
             sidebar_focused: true,
             sidebar_idx: 0,
             sidebar_offset: 0,
+            // Renderer overwrites this on every frame; 0 means "no
+            // window yet" and is the safe default (clamp collapses the
+            // offset to 0 instead of leaking it).
+            sidebar_visible: 0,
             // Default region on launch is the sidebar — that's the natural
             // D-pad start (user sees the screen list and moves with ↑/↓).
             // `switch_screen` flips to `ContentLeft` when a screen commits.
@@ -833,5 +846,140 @@ mod tests {
         assert_eq!(panes.len(), 1);
         let w = app.manager.window(app.manager.focused()).unwrap();
         assert_eq!(w.kind, crate::wm::window::WindowKind::Builtin(ScreenId::System));
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 1.5 — `sidebar_visible` is the single source of truth for the
+    // sidebar's visible-row count, set by the renderer and read by the Up/Down
+    // handlers. These tests pin the contract of `clamp_sidebar_offset` against
+    // realistic `(total, visible, offset, idx)` tuples so the handler can
+    // trust `app.sidebar_visible` and the renderer can write to it without
+    // re-checking arithmetic on its own.
+    //
+    // Why pin these here: the previous handler called
+    // `clamp_sidebar_offset(total, total)` which is a no-op (offset already
+    // clamped at 0 when all rows fit). The bug was that on short terminals
+    // the offset never advanced, so overflow rows were invisible but
+    // selectable. The fix is for the renderer to record `visible` and the
+    // handler to pass it through; these tests lock the arithmetic so neither
+    // side can silently regress.
+    // -------------------------------------------------------------------------
+
+    fn fresh_app() -> App {
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        App::new(tx, rx)
+    }
+
+    #[test]
+    fn sidebar_down_advances_offset_when_cursor_exits_visible_window() {
+        // total=15, visible=5, offset starts at 0, idx at 4 (last row of
+        // window [0..5)). After Down: idx=5, which exits the bottom of
+        // the window. `clamp_sidebar_offset` must advance offset to 1
+        // so the cursor stays visible.
+        let mut app = fresh_app();
+        app.sidebar_idx = 4;
+        app.sidebar_offset = 0;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        // Initial clamp at idx=4 (inside the window) — offset stays 0.
+        assert_eq!(app.sidebar_offset, 0);
+        // Simulate Down: idx += 1, then clamp with the renderer's
+        // recorded visible count.
+        app.sidebar_idx = (app.sidebar_idx + 1).min(14);
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_idx, 5);
+        assert_eq!(
+            app.sidebar_offset, 1,
+            "offset must advance when cursor exits bottom"
+        );
+    }
+
+    #[test]
+    fn sidebar_up_advances_offset_when_cursor_still_below_window_top() {
+        // total=15, visible=5, offset=3, idx=10 is an INVALID pre-state
+        // (cursor 10 is outside window [3..8)). `clamp_sidebar_offset`
+        // must immediately correct offset to 6 so the cursor lives
+        // inside [6..11). After Up: idx=9; clamp must retreat offset
+        // to 5 (window [5..10) contains idx=9).
+        let mut app = fresh_app();
+        app.sidebar_idx = 10;
+        app.sidebar_offset = 3;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 6,
+            "clamp actively advances offset to keep idx visible"
+        );
+        app.sidebar_idx -= 1; // 9
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 5,
+            "offset retreats as cursor re-enters from above"
+        );
+    }
+
+    #[test]
+    fn sidebar_up_retreats_offset_when_cursor_re_enters_window_top() {
+        // total=15, visible=5.
+        // Start: idx=10 — outside any sensible window so clamp picks the
+        // minimum offset that keeps idx visible: desired=(10-5+1).min(10)=6.
+        // Window is [6..11), contains idx=10. ✓
+        // After Up: idx=9 → desired=5. Offset retreats 6→5.
+        // After Up: idx=8 → desired=4. Offset retreats 5→4.
+        // After Up: idx=4 → idx<visible so desired=0. Full collapse.
+        // This pins the retreat contract: each Up moves the offset closer
+        // to 0 as long as the cursor stays visible.
+        let mut app = fresh_app();
+        app.sidebar_idx = 10;
+        app.sidebar_offset = 0;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 6, "minimum offset for idx=10");
+
+        app.sidebar_idx = 9;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 5, "retreats as cursor moves up");
+
+        app.sidebar_idx = 8;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 4, "continues retreating");
+
+        app.sidebar_idx = 4;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 0,
+            "collapses to 0 once idx drops below visible"
+        );
+    }
+
+    #[test]
+    fn sidebar_visible_defaults_to_zero_and_clamp_clamps_offset_to_zero() {
+        // Before the first frame renders, `sidebar_visible` is still 0.
+        // `clamp_sidebar_offset` treats 0 visible as "no window" and
+        // collapses `sidebar_offset` to 0 — guaranteeing the handler
+        // can't leak an old offset into the first render.
+        let mut app = fresh_app();
+        assert_eq!(app.sidebar_visible, 0, "default visible is 0");
+        app.sidebar_offset = 99;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 0,
+            "visible=0 collapses any prior offset to 0"
+        );
+    }
+
+    #[test]
+    fn sidebar_offset_clamps_to_total_minus_visible_when_cursor_at_end() {
+        // Boundary: cursor at the very last index, offset must saturate
+        // at total - visible (10 in this case), never overshoot.
+        let mut app = fresh_app();
+        app.sidebar_idx = 14; // last
+        app.sidebar_offset = 0;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 10,
+            "offset saturates at total - visible"
+        );
     }
 }

@@ -1034,13 +1034,21 @@ async fn handle_key(
             } else {
                 app.sidebar_idx -= 1;
             }
-            app.clamp_sidebar_offset(total, total); // full visibility: no-op
+            // Module 1.5 — pass the renderer's recorded visible-row count
+            // so the offset actually retreats when the cursor re-enters
+            // the top of the window. `app.sidebar_visible` is set every
+            // frame by `draw_sidebar_narrow` / `draw_sidebar_grid`.
+            app.clamp_sidebar_offset(total, app.sidebar_visible);
             return false;
         }
         Down | Char('j') if app.region == Region::Sidebar => {
             let total = ScreenId::ALL.len();
             app.sidebar_idx = (app.sidebar_idx + 1) % total;
-            app.clamp_sidebar_offset(total, total); // full visibility: no-op
+            // Module 1.5 — same single source of truth as Up above.
+            // Before this, `(total, total)` was a no-op clamp that
+            // never advanced the offset, leaving overflow rows invisible
+            // but selectable on short terminals.
+            app.clamp_sidebar_offset(total, app.sidebar_visible);
             return false;
         }
         Enter if app.region == Region::Sidebar => {
@@ -2648,5 +2656,72 @@ mod tests {
             }
             other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
         }
+    }
+
+    // Module 1.5 — end-to-end handler test. Simulates a short terminal
+    // by pre-seeding `app.sidebar_visible` to a value smaller than
+    // `ScreenId::ALL.len()`, then driving Down/Up through `handle_key`
+    // and verifying the offset actually moves. Before this commit the
+    // handler called `clamp_sidebar_offset(total, total)` — a no-op —
+    // so the offset never advanced and overflow rows stayed invisible
+    // but selectable. This test pins the new wire-up: renderer's
+    // `sidebar_visible` reaches the clamp.
+    #[test]
+    fn sidebar_down_advances_offset_when_visible_window_shorter_than_total() {
+        let mut app = fresh_app_with_sidebar_focus();
+        // Pretend the renderer drew a 3-row sidebar (e.g. narrow
+        // terminal). Place cursor at the bottom of that window.
+        app.sidebar_visible = 3;
+        app.sidebar_idx = 2; // last row of [0..3)
+        app.sidebar_offset = 0;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.sidebar_idx, 3);
+        assert_eq!(
+            app.sidebar_offset, 1,
+            "Down through handle_key must advance offset when cursor exits bottom"
+        );
+    }
+
+    #[test]
+    fn sidebar_up_retreats_offset_when_visible_window_shorter_than_total() {
+        let mut app = fresh_app_with_sidebar_focus();
+        // Cursor at row 5, visible=3 → clamp picked offset=3 (window
+        // [3..6) contains idx=5). Move up; cursor should re-enter the
+        // top of the window and the offset should retreat.
+        app.sidebar_visible = 3;
+        app.sidebar_idx = 5;
+        app.sidebar_offset = 3;
+        // Pre-clamp once to lock the initial state (defensive — handler
+        // will clamp on every keypress, so this just confirms the
+        // starting offset is plausible).
+        app.clamp_sidebar_offset(ScreenId::ALL.len(), app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 3);
+
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(app.sidebar_idx, 4);
+        assert_eq!(
+            app.sidebar_offset, 2,
+            "Up through handle_key must retreat offset when cursor re-enters window"
+        );
     }
 }

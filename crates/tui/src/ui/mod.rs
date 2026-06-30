@@ -175,6 +175,13 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, 
     // the top/bottom borders consume two rows.
     let total = items.len();
     let visible = area.height.saturating_sub(2) as usize;
+    // Module 1.5 — publish the visible-row count back to App so the
+    // Up/Down handlers in `main.rs` can call
+    // `clamp_sidebar_offset(total, app.sidebar_visible)` with the same
+    // value the renderer is windowing against. Without this, the
+    // handler's clamp is a no-op and the offset never advances on
+    // short terminals — the symptom that drove the bug.
+    app.sidebar_visible = visible;
     let max_off = total.saturating_sub(visible);
     if app.sidebar_offset > max_off {
         app.sidebar_offset = max_off;
@@ -235,6 +242,11 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, fo
     let visible = inner.height as usize;
 
     // Clamp sidebar_offset so the window is always valid.
+    // Module 1.5 — publish the visible-row count back to App so the
+    // Up/Down handlers in `main.rs` can pass `app.sidebar_visible`
+    // to `clamp_sidebar_offset`, keeping cursor and offset in lockstep
+    // with the renderer's windowing.
+    app.sidebar_visible = visible;
     let max_off = total.saturating_sub(visible);
     if app.sidebar_offset > max_off {
         app.sidebar_offset = max_off;
