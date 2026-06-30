@@ -282,13 +282,13 @@ async fn run_app(
         Box::new(screens::files::FilesScreen),
         Box::new(screens::logs::LogsScreen),
         Box::new(screens::settings::SettingsScreen),
-        // Mesh screen: longfast channel chat (left) + nodes-with-hops (right).
-        // The transport is owned by `MeshScreen` itself so `MeshScreen::poll`
-        // doesn't need to reach into `App`. Held in a `Box<dyn MeshTransport
-        // + Send>` so a real USB transport can swap in at runtime without
+        // LoRa screen: longfast channel chat (left) + nodes-with-hops (right).
+        // The transport is owned by `LoraScreen` itself so `LoraScreen::poll`
+        // doesn't need to reach into `App`. Held in a `Box<dyn LoraTransport
+        // + Send>` so a real HTTP transport can swap in at runtime without
         // touching the screen or any test code path.
-        Box::new(screens::mesh::MeshScreen::new(Box::new(
-            screens::mesh::FakeTransport::new(),
+        Box::new(screens::lora::LoraScreen::new(Box::new(
+            screens::lora::FakeTransport::new(),
         ))),
     ];
 
@@ -1614,6 +1614,27 @@ pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: In
             // sufficient. Close the modal by returning.
             return;
         }
+        InputKind::LoraNodeIp => {
+            // LoRa (Meshtastic over LAN HTTP) — user typed an IP for the
+            // node they want to talk to. Stash the trimmed value on
+            // `app.lora_node_ip`; the render loop on the LoRa screen
+            // (Slice 4 wiring) sees the change and swaps the screen's
+            // transport from `FakeTransport` to an `HttpLoraTransport`
+            // pointed at that address. Empty submit is a no-op so the
+            // modal doesn't accidentally wipe an existing IP — same
+            // pattern as `PackageSearch`.
+            let ip = value.trim().to_string();
+            if ip.is_empty() {
+                app.push_toast(ToastKind::Warn, "node IP cannot be empty");
+                return;
+            }
+            app.lora_node_ip = Some(ip);
+            app.push_toast(
+                ToastKind::Info,
+                "LoRa: connecting to node (next tick) — see status footer",
+            );
+            return;
+        }
         InputKind::WifiEnterpriseIdentity => {
             // Stash on the wizard so advance_wizard can read it.
             if let Modal::Wizard(crate::app::Wizard::WifiEnterprise { identity, step, .. }) =
@@ -1777,17 +1798,17 @@ async fn handle_action(
                     "Welcome — Tab to switch panes, ? for help, r to rescan",
                 );
             }
-            // Refresh the Mesh screen's snapshot from its transport.
+            // Refresh the LoRa screen's snapshot from its transport.
             // Non-blocking: the in-process `FakeTransport` returns
-            // immediately and the real serial transport (when wired in)
+            // immediately and the real HTTP transport (when wired in)
             // is bounded by a short read; either way no `select!` wait
             // can hang the renderer.
-            if let Some(s) = screens.iter_mut().find(|s| s.id() == ScreenId::Mesh) {
+            if let Some(s) = screens.iter_mut().find(|s| s.id() == ScreenId::LoRa) {
                 if let Some(any) = s.as_any_mut() {
-                    if let Some(mesh) =
-                        any.downcast_mut::<crate::screens::mesh::MeshScreen>()
+                    if let Some(lora) =
+                        any.downcast_mut::<crate::screens::lora::LoraScreen>()
                     {
-                        mesh.poll(app);
+                        lora.poll(app);
                     }
                 }
             }

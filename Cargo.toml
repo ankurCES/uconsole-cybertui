@@ -50,6 +50,12 @@ vte = "0.13"
 parking_lot = "0.12"
 crossbeam-channel = "0.5"
 
+# http: optional Meshtastic-over-LAN HTTP bridge (LoRa screen).
+# Pinned to match `crates/web`'s choice so the workspace shares one
+# resolver entry — only enabled when the user opts into the
+# `cyberdeck-tui/http` feature.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

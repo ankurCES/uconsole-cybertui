@@ -14,10 +14,16 @@ web = ["dep:cyberdeck-web"]
 # feature just changes the *default* so an unattended build for the
 # device boots straight into uconsole behaviour.
 uconsole-keymap = []
+# http: pulls in `reqwest` and builds the `HttpLoraTransport` so the LoRa
+# screen can talk to a Meshtastic node over LAN HTTP. Off by default so
+# a default `cargo build` doesn't grow the dep graph for users who don't
+# own a node. Enable with `--features http`.
+http = ["dep:reqwest"]
 
 [dependencies]
 cyberdeck-core = { path = "../core" }
 cyberdeck-web = { path = "../web", optional = true }
+reqwest = { workspace = true, optional = true }
 
 ratatui.workspace = true
 crossterm.workspace = true

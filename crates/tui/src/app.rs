@@ -168,6 +168,12 @@ pub enum InputKind {
     /// the modal UI + `/` hotkey on the Packages screen itself; this
     /// variant is just the variant + dispatch plumbing.
     PackageSearch,
+    /// LoRa (Meshtastic) screen — node IP for the HTTP transport.
+    /// Submitted value goes into `App::lora_node_ip`; the main loop
+    /// then swaps the screen's `FakeTransport` for an `HttpLoraTransport`
+    /// pointed at that IP (Slice 4). IP-only at the modal layer; the
+    /// port + URL prefix are appended by the transport constructor.
+    LoraNodeIp,
 }
 
 #[derive(Debug)]
@@ -674,6 +680,14 @@ pub struct App {
     /// (`run_input`). The Packages screen's render loop reads this each
     /// frame; tasks 3.2–3.4 wire the render-time poll.
     pub packages_search_query: Option<String>,
+    /// LoRa (Meshtastic over LAN HTTP) — when `Some`, the LoRa screen
+    /// should be talking to the node at this IP. Set by the
+    /// `InputKind::LoraNodeIp` submit handler in `main.rs`. The LoRa
+    /// screen's render loop reads it and, on change, swaps the screen's
+    /// `FakeTransport` for an `HttpLoraTransport` pointed at the IP.
+    /// `None` means "no node configured yet" and the screen stays on
+    /// the FakeTransport (Slice 4 swaps the transport on first set).
+    pub lora_node_ip: Option<String>,
     pub theme_name: screen::ThemeNameReexport,
     pub mouse: bool,
     pub show_help: bool,
@@ -716,26 +730,27 @@ pub struct App {
     pub files_show_hidden: bool,
     pub files_right: std::path::PathBuf,
     pub files_right_entries: Vec<cyberdeck_core_files::DirEntry>,
-    /// Mesh screen (Meshtastic over USB). Snapshot of known nodes, copied
+    /// LoRa screen (Meshtastic over LAN HTTP). Snapshot of known nodes, copied
     /// from the screen's transport on every poll. Empty by default — the
-    /// poll path fills it in once a device is reachable. `App` keeps the
-    /// snapshot (not the `Box<dyn MeshTransport>`) so test code can build
-    /// an `App` without any USB handle open.
-    pub mesh_nodes: Vec<crate::screens::mesh::MeshNode>,
-    /// Longfast channel chat history. Same lifecycle as `mesh_nodes`:
-    /// populated by `MeshScreen::poll`, never read directly by other
+    /// poll path fills it in once a node IP is configured via the `i`
+    /// modal and the transport's first round-trip succeeds. `App` keeps
+    /// the snapshot (not the `Box<dyn LoraTransport>`) so test code can
+    /// build an `App` without any HTTP handle open.
+    pub lora_nodes: Vec<crate::screens::lora::LoraNode>,
+    /// Longfast channel chat history. Same lifecycle as `lora_nodes`:
+    /// populated by `LoraScreen::poll`, never read directly by other
     /// screens.
-    pub mesh_chat: Vec<crate::screens::mesh::MeshChatLine>,
+    pub lora_chat: Vec<crate::screens::lora::LoraChatLine>,
     /// Live tail offset for the chat list. `0` = tail; growing values
     /// scroll up (away from the tail). `usize::MAX` (set on `g`) jumps
     /// to the start of the buffer.
-    pub mesh_chat_offset: usize,
+    pub lora_chat_offset: usize,
     /// Current input buffer for the chat compose line. Cleared after a
     /// successful send.
-    pub mesh_input: String,
-    /// `true` when the underlying transport has an active serial handle.
+    pub lora_input: String,
+    /// `true` when the underlying transport has an active HTTP session.
     /// Drives the connect/disconnect dot in the input strip.
-    pub mesh_connected: bool,
+    pub lora_connected: bool,
     /// Last 60 seconds of RX/TX byte counts per interface. Updated at
     /// 1Hz by the network sampler in `Live::spawn_refreshers`. Key =
     /// interface name (e.g. `"eth0"`, `"wlan0"`); value = `(rx ring,
@@ -920,6 +935,7 @@ impl App {
             pkgs_filter: String::new(),
             pkg_search_results: Vec::new(),
             packages_search_query: None,
+            lora_node_ip: None,
             theme_name: screen::ThemeNameReexport::Dark,
             mouse: true,
             show_help: false,
@@ -947,11 +963,11 @@ impl App {
             files_show_hidden: false,
             files_right: PathBuf::from("/"),
             files_right_entries: Vec::new(),
-            mesh_nodes: Vec::new(),
-            mesh_chat: Vec::new(),
-            mesh_chat_offset: 0,
-            mesh_input: String::new(),
-            mesh_connected: false,
+            lora_nodes: Vec::new(),
+            lora_chat: Vec::new(),
+            lora_chat_offset: 0,
+            lora_input: String::new(),
+            lora_connected: false,
             // Module 5.2 — initialise empty. The 1Hz refiller populates
             // this on its first tick; the header sparkline falls back to
             // a dashed placeholder until something lands.
