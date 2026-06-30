@@ -29,8 +29,8 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -84,7 +84,12 @@ fn parse_args() -> Args {
 
 fn restore_terminal() {
     let _ = disable_raw_mode();
-    let _ = execute!(stdout(), LeaveAlternateScreen, DisableMouseCapture);
+    let _ = execute!(
+        stdout(),
+        LeaveAlternateScreen,
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -108,7 +113,13 @@ async fn main() -> anyhow::Result<()> {
 
     enable_raw_mode().context("enable raw mode")?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
+    execute!(
+        out,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("enter alt screen")?;
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend).context("init terminal")?;
 
@@ -325,13 +336,36 @@ async fn run_app(
                     let _ = tx.try_send(Action::Tick);
                 }
                 if event::poll(Duration::from_millis(0))? {
-                    if let Event::Key(k) = event::read()? {
-                        if k.kind == KeyEventKind::Press {
-                            if handle_key(&mut screens, app, tx, k).await {
-                                return Ok(());
-                            }
+                    match event::read()? {
+                        // Terminal-emitted paste. Bracketed-paste mode is
+                        // enabled at startup so modern terminals bundle
+                        // pasted text into one `Event::Paste` instead of
+                        // synthesizing keystrokes. Forward to the active
+                        // input modal buffer.
+                        Event::Paste(text) => {
+                            handle_paste(&mut *app, text);
                             redraw = true;
                         }
+                        Event::Key(k) if k.kind == KeyEventKind::Press => {
+                            // Ctrl+Shift+V fallback. Some terminals (older
+                            // xterm, Alacritty before a config option, plain
+                            // sshd with no TERM=xterm-256color) don't emit
+                            // `Event::Paste` even with bracketed-paste on,
+                            // so the user has to invoke it manually. Same
+                            // routing arm as `Event::Paste`.
+                            if k.code == KeyCode::Char('v')
+                                && k.modifiers
+                                    .contains(KeyModifiers::CONTROL | KeyModifiers::SHIFT)
+                            {
+                                handle_paste(&mut *app, read_clipboard_for_paste());
+                                redraw = true;
+                            } else if handle_key(&mut screens, app, tx, k).await {
+                                return Ok(());
+                            } else {
+                                redraw = true;
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1415,6 +1449,93 @@ async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind
         }
     };
     let _ = tx.send(Action::Run(act)).await;
+}
+
+/// Append clipboard contents to the active text-entry modal buffer.
+///
+/// Called from the main event loop for both:
+///   - `crossterm::event::Event::Paste(text)` (terminal-emitted, the
+///     modern path — requires bracketed paste mode to be enabled in
+///     the terminal, which we do via `EnableBracketedPaste` at startup).
+///   - `KeyEvent { Char('v'), CONTROL|SHIFT }` (the legacy fallback for
+///     terminals that don't emit `Event::Paste` or have bracketed paste
+///     disabled).
+///
+/// The trailing whitespace strip (`\n`, `\r`, ` `, `\t`) keeps the
+/// buffer clean of the stray newline that `xclip -o`, `wl-paste`, and
+/// most GUI clipboards add when the source text is a single line.
+///
+/// No-op when no `Modal::Input` or `Modal::Secret` is active.
+pub(crate) fn handle_paste(app: &mut App, mut text: String) {
+    while matches!(
+        text.chars().last(),
+        Some('\n') | Some('\r') | Some(' ') | Some('\t')
+    ) {
+        text.pop();
+    }
+    match &mut app.modal {
+        Modal::Input { buf, .. } => buf.push_str(&text),
+        Modal::Secret { buf, .. } => buf.push_str(&text),
+        _ => {}
+    }
+}
+
+/// Read the system clipboard for the Ctrl+Shift+V fallback path.
+///
+/// Tries, in order:
+///   1. `wl-paste -n` (Wayland)
+///   2. `xclip -selection clipboard -o` (X11)
+///   3. `xsel --clipboard --output` (X11 alt)
+///   4. `pbcopy` (macOS)
+///
+/// Each spawn is short-lived (1s timeout via `Command::spawn` + manual
+/// `try_wait` loop so we don't block the TUI on a hung clipboard daemon).
+/// Returns an empty string on any failure (no clipboard tool, hung
+/// daemon, empty selection) — `handle_paste` is then a clean no-op.
+fn read_clipboard_for_paste() -> String {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    let candidates: &[&[&str]] = &[
+        &["wl-paste", "-n"],
+        &["xclip", "-selection", "clipboard", "-o"],
+        &["xsel", "--clipboard", "--output"],
+        &["pbpaste"],
+    ];
+    for cmd in candidates {
+        let mut child = match Command::new(cmd[0])
+            .args(&cmd[1..])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => continue, // tool not installed; try next
+        };
+        // Poll for up to 1s total.
+        let deadline = std::time::Instant::now() + Duration::from_millis(1000);
+        let mut out = String::new();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    if let Some(mut stdout) = child.stdout.take() {
+                        let _ = stdout.read_to_string(&mut out);
+                    }
+                    return out;
+                }
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    String::new()
 }
 
 pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, value: String) {
@@ -3229,5 +3350,155 @@ mod tests {
             text.contains("no toasts yet"),
             "empty history must render the placeholder, got:\n{text}"
         );
+    }
+
+    // ---- Module 9: clipboard paste into modal buffers -------------------
+    //
+    // The TUI uses modal input for Wi-Fi passwords, hidden SSIDs, package
+    // search, kill PID, etc. Long values are best entered by pasting from
+    // the system clipboard. These tests pin `handle_paste`'s contract:
+    //
+    //   - paste into an Input modal appends the trimmed text to its buffer
+    //   - paste into a Secret modal appends the trimmed text to its buffer
+    //   - paste with no modal open is a no-op (no panic)
+    //   - empty paste is a no-op (clipboard cleared or empty)
+    //   - trailing whitespace (common from `xclip -o` / `wl-paste`) is
+    //     stripped before the append so a stray `\n` doesn't slip in
+    //
+    // The Ctrl+Shift+V fallback (KeyEvent path) is exercised in a separate
+    // test so the routing arm can be checked without a real terminal.
+
+    #[test]
+    fn paste_appends_to_input_modal_buffer() {
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::Input {
+            prompt: "search packages".into(),
+            buf: "rip".into(),
+            kind: InputKind::PackageSearch,
+        };
+        handle_paste(&mut app, "grep".to_string());
+        match &app.modal {
+            Modal::Input { buf, .. } => assert_eq!(buf, "ripgrep"),
+            _ => panic!("expected Modal::Input, got {:?}", app.modal),
+        }
+    }
+
+    #[test]
+    fn paste_appends_to_secret_modal_buffer() {
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::Secret {
+            prompt: "wifi password".into(),
+            buf: "abc".into(),
+            kind: InputKind::WifiPassword,
+        };
+        handle_paste(&mut app, "def".to_string());
+        match &app.modal {
+            Modal::Secret { buf, .. } => assert_eq!(buf, "abcdef"),
+            _ => panic!("expected Modal::Secret, got {:?}", app.modal),
+        }
+    }
+
+    #[test]
+    fn paste_with_no_modal_is_noop() {
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::None;
+        // Must not panic and must not change the modal.
+        handle_paste(&mut app, "anything".to_string());
+        assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[test]
+    fn paste_handles_empty_string() {
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::Input {
+            prompt: "x".into(),
+            buf: "abc".into(),
+            kind: InputKind::PackageSearch,
+        };
+        handle_paste(&mut app, String::new());
+        match &app.modal {
+            Modal::Input { buf, .. } => assert_eq!(buf, "abc"),
+            _ => panic!("expected Modal::Input, got {:?}", app.modal),
+        }
+    }
+
+    #[test]
+    fn paste_strips_trailing_newlines() {
+        // Clipboard from `xclip -o` or `wl-paste` often has a trailing
+        // `\n`. Stripping it at the paste boundary keeps the modal buffer
+        // free of accidental whitespace.
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::Input {
+            prompt: "x".into(),
+            buf: String::new(),
+            kind: InputKind::PackageSearch,
+        };
+        handle_paste(&mut app, "hello\n".to_string());
+        match &app.modal {
+            Modal::Input { buf, .. } => assert_eq!(buf, "hello"),
+            _ => panic!("expected Modal::Input, got {:?}", app.modal),
+        }
+    }
+
+    #[test]
+    fn paste_strips_trailing_crlf_and_tabs() {
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::Secret {
+            prompt: "p".into(),
+            buf: String::new(),
+            kind: InputKind::WifiPassword,
+        };
+        handle_paste(&mut app, "hunter2\r\n\t ".to_string());
+        match &app.modal {
+            Modal::Secret { buf, .. } => assert_eq!(buf, "hunter2"),
+            _ => panic!("expected Modal::Secret, got {:?}", app.modal),
+        }
+    }
+
+    #[test]
+    fn paste_into_choice_modal_is_noop() {
+        // Pastes only target text-entry modals. Other modal kinds must
+        // remain unchanged.
+        let (_tx, _rx, mut app) = make_app();
+        app.modal = Modal::Choice {
+            prompt: "Pick".into(),
+            options: vec![ChoiceOption {
+                id: "a".into(),
+                label: "A".into(),
+            }],
+            cursor: 0,
+            commit_kind: None,
+        };
+        handle_paste(&mut app, "anything".to_string());
+        assert!(matches!(app.modal, Modal::Choice { .. }));
+    }
+
+    #[test]
+    fn read_clipboard_for_paste_returns_empty_when_no_tool() {
+        // On a headless test runner with no X server and no Wayland,
+        // every candidate (wl-paste, xclip, xsel, pbpaste) fails to
+        // spawn. The helper must return an empty string rather than
+        // panic, so `handle_paste` can route it as a no-op.
+        //
+        // We force-fail by pointing PATH at an empty tempdir.
+        let orig_path = std::env::var_os("PATH");
+        let empty = std::env::temp_dir().join("cyberdeck-test-empty-path-9f4c");
+        let _ = std::fs::create_dir_all(&empty);
+        // SAFETY: tests are single-threaded; env mutation is fine.
+        unsafe {
+            std::env::set_var("PATH", &empty);
+        }
+        let result = read_clipboard_for_paste();
+        if let Some(p) = orig_path {
+            unsafe {
+                std::env::set_var("PATH", p);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("PATH");
+            }
+        }
+        let _ = std::fs::remove_dir(&empty);
+        assert_eq!(result, "");
     }
 }
