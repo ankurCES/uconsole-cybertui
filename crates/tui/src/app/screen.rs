@@ -22,9 +22,10 @@ pub enum ScreenId {
     /// for the EditorScreen so Tab/Shift-Tab cycling (which uses
     /// `ScreenId::cycle` in this module) skips it.
     Editor,
-    /// Meshtastic over USB: longfast channel chat (left pane) + nodes with
-    /// hops_away (right pane). Reachable from the sidebar.
-    Mesh,
+    /// Meshtastic over LAN HTTP: longfast channel chat (left pane) + nodes with
+    /// hops_away (right pane). The IP for the on-LAN node is supplied at
+    /// runtime via the `i` modal — see `screens::lora` + `InputKind::LoraNodeIp`.
+    LoRa,
 }
 
 impl ScreenId {
@@ -43,7 +44,7 @@ impl ScreenId {
         ScreenId::Logs,
         ScreenId::Settings,
         ScreenId::Editor,
-        ScreenId::Mesh,
+        ScreenId::LoRa,
     ];
 
     pub fn label(self) -> &'static str {
@@ -62,7 +63,7 @@ impl ScreenId {
             ScreenId::Logs => "Logs",
             ScreenId::Settings => "Settings",
             ScreenId::Editor => "Editor",
-            ScreenId::Mesh => "Mesh",
+            ScreenId::LoRa => "LoRa",
         }
     }
 
@@ -78,7 +79,7 @@ impl ScreenId {
                 | ScreenId::Power
                 | ScreenId::Display
                 | ScreenId::Packages
-                | ScreenId::Mesh
+                | ScreenId::LoRa
         )
     }
 
@@ -98,8 +99,8 @@ impl ScreenId {
             ScreenId::Logs => "▥",
             ScreenId::Settings => "✱",
             ScreenId::Editor => "✎",
-            // Mesh = stacked nodes glyph (works as Nerd Font + ASCII fallback).
-            ScreenId::Mesh => "≣",
+            // LoRa = stacked nodes glyph (works as Nerd Font + ASCII fallback).
+            ScreenId::LoRa => "≣",
         }
     }
 
@@ -175,9 +176,9 @@ pub trait Screen {
         false
     }
     /// Downcast hook for screens that need to be reached through a trait
-    /// object. `main.rs` uses this on `MeshScreen` only to call `poll` on
+    /// object. `main.rs` uses this on `LoraScreen` only to call `poll` on
     /// each `Action::Tick`. Default returns `None` for screens that don't
-    /// need it; `MeshScreen` overrides it. `None` keeps the trait
+    /// need it; `LoraScreen` overrides it. `None` keeps the trait
     /// default-implementable and avoids forcing `Any` on every screen.
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
@@ -258,20 +259,20 @@ mod tests {
     fn cycle_backward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From System (position 0) going backward must wrap to Mesh
+        // From System (position 0) going backward must wrap to LoRa
         // (the last visible screen — Editor is hidden in all_visible()),
         // mirroring orbital's wrap-around tab navigation.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::Mesh);
+        assert_eq!(prev, ScreenId::LoRa);
     }
 
     #[test]
     fn cycle_forward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From Mesh (last visible screen — Editor is hidden) going forward
+        // From LoRa (last visible screen — Editor is hidden) going forward
         // must wrap back to System.
-        let next = ScreenId::cycle(&screens, &app, ScreenId::Mesh, true);
+        let next = ScreenId::cycle(&screens, &app, ScreenId::LoRa, true);
         assert_eq!(next, ScreenId::System);
     }
 
@@ -291,9 +292,9 @@ mod tests {
         let next = ScreenId::cycle(&screens, &app, ScreenId::System, true);
         assert_eq!(next, ScreenId::Bluetooth);
         // And the backward step from System must skip Power too, wrapping
-        // all the way around the visible list (Editor is hidden) to Mesh.
+        // all the way around the visible list (Editor is hidden) to LoRa.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::Mesh);
+        assert_eq!(prev, ScreenId::LoRa);
         // Sanity: with everything visible, the first forward step lands on
         // Network itself, proving the skip is what made the test above pass.
         for s in screens.iter_mut() {
@@ -326,17 +327,17 @@ mod tests {
         );
     }
 
-    /// `ScreenId::Mesh` resolves to the `Mesh` label/glyph and is listed in
+    /// `ScreenId::LoRa` resolves to the `LoRa` label/glyph and is listed in
     /// `ScreenId::ALL` so the sidebar can find it.
     #[test]
-    fn mesh_screen_is_registered() {
-        let id = ScreenId::Mesh;
-        assert_eq!(id.label(), "Mesh");
+    fn lora_screen_is_registered() {
+        let id = ScreenId::LoRa;
+        assert_eq!(id.label(), "LoRa");
         assert_eq!(id.glyph(), "≣");
-        assert!(ScreenId::ALL.contains(&ScreenId::Mesh));
+        assert!(ScreenId::ALL.contains(&ScreenId::LoRa));
         assert!(
             id.has_right_pane(),
-            "Mesh is a multi-pane screen (chat | nodes) and must report has_right_pane() == true"
+            "LoRa is a multi-pane screen (chat | nodes) and must report has_right_pane() == true"
         );
     }
 
