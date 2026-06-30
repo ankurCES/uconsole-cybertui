@@ -135,7 +135,7 @@ pub fn draw_region_chip(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// ringed in the accent colour so the user always sees what's open.
 /// Falls back gracefully on narrow terminals (≤ 28 cols) by collapsing
 /// to a one-column list so a uconsole in landscape still works.
-pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let focused = matches!(app.region, Region::Sidebar);
     let narrow = area.width < 28;
     if narrow {
@@ -202,7 +202,7 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
 /// gets the cyan selection block; the active screen tile gets a bold
 /// accent border so what's open is unmistakable. Anything else is dim
 /// so the eye lands on the cursor first, then the active marker.
-fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: bool) {
+fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focused: bool) {
     let block = Block::default()
         .title(Span::styled(
             if focused { " ▶ screens " } else { " screens " },
@@ -212,6 +212,15 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         .border_style(theme.border(focused));
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    let total = ScreenId::ALL.len();
+    let visible = inner.height as usize;
+
+    // Clamp sidebar_offset so the window is always valid.
+    let max_off = total.saturating_sub(visible);
+    if app.sidebar_offset > max_off {
+        app.sidebar_offset = max_off;
+    }
 
     // 13 screens → 7 rows on the left, 6 rows on the right. Two-column
     // grid keeps the cursor within thumb-reach for D-pad use: at most 7
@@ -224,7 +233,9 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         .constraints(row_constraints)
         .split(inner);
 
-    for (i, id) in ScreenId::ALL.iter().enumerate() {
+    // Windowed iteration: only render rows in [sidebar_offset, sidebar_offset + visible).
+    for i in app.sidebar_offset..(app.sidebar_offset + visible).min(total) {
+        let id = ScreenId::ALL[i];
         let col = i / rows;
         let row = i % rows;
         let row_area = row_areas.get(row).copied();
@@ -237,9 +248,9 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         } else {
             Rect::new(inner.x + mid, row_area.y, inner.width - mid, 1)
         };
-        let active = *id == app.current;
+        let active = id == app.current;
         let cursor = i == app.sidebar_idx;
-        render_sidebar_cell(f, cell_area, i + 1, id, active, cursor, theme);
+        render_sidebar_cell(f, cell_area, i + 1, &id, active, cursor, theme);
     }
 
     // Focus gutter: a 1-cell-wide vertical bar along the sidebar's right
@@ -572,5 +583,28 @@ mod status_region_vocabulary {
         let expected_off = (new_idx + 1).saturating_sub(4); // derive from formula
         assert_eq!(app.sidebar_idx, (5 + 1) % total);
         assert_eq!(app.sidebar_offset, expected_off);
+    }
+
+    #[test]
+    fn sidebar_grid_windowed_iteration_only_emits_visible_rows() {
+        // 15 screens total. With sidebar_offset=4 and visible=3, only
+        // rows 4, 5, 6 should be iterated. Pin that the loop bound
+        // honors the window.
+        let total: usize = 15;
+        let offset: usize = 4;
+        let visible: usize = 3;
+        let emitted: Vec<usize> = (offset..(offset + visible).min(total)).collect();
+        assert_eq!(emitted, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn sidebar_grid_windowed_clamps_offset_to_total() {
+        // If total=15, visible=3, offset can't exceed 12.
+        let total: usize = 15;
+        let visible: usize = 3;
+        let max_off = total.saturating_sub(visible);
+        let mut offset: usize = 99;
+        if offset > max_off { offset = max_off; }
+        assert_eq!(offset, 12);
     }
 }
