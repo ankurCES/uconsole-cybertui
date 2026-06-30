@@ -258,18 +258,20 @@ mod tests {
     fn cycle_backward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From System (position 0) going backward must wrap to Settings
-        // (the last screen), mirroring orbital's wrap-around tab navigation.
+        // From System (position 0) going backward must wrap to Mesh
+        // (the last visible screen — Editor is hidden in all_visible()),
+        // mirroring orbital's wrap-around tab navigation.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::Settings);
+        assert_eq!(prev, ScreenId::Mesh);
     }
 
     #[test]
     fn cycle_forward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From Settings (last) going forward must wrap back to System.
-        let next = ScreenId::cycle(&screens, &app, ScreenId::Settings, true);
+        // From Mesh (last visible screen — Editor is hidden) going forward
+        // must wrap back to System.
+        let next = ScreenId::cycle(&screens, &app, ScreenId::Mesh, true);
         assert_eq!(next, ScreenId::System);
     }
 
@@ -288,9 +290,10 @@ mod tests {
         // First forward step must skip the hidden Network.
         let next = ScreenId::cycle(&screens, &app, ScreenId::System, true);
         assert_eq!(next, ScreenId::Bluetooth);
-        // And the backward step from System must skip Power too.
+        // And the backward step from System must skip Power too, wrapping
+        // all the way around the visible list (Editor is hidden) to Mesh.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::Settings);
+        assert_eq!(prev, ScreenId::Mesh);
         // Sanity: with everything visible, the first forward step lands on
         // Network itself, proving the skip is what made the test above pass.
         for s in screens.iter_mut() {
