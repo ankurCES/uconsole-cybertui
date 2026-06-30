@@ -556,6 +556,13 @@ pub struct App {
     /// `true` when the underlying transport has an active serial handle.
     /// Drives the connect/disconnect dot in the input strip.
     pub mesh_connected: bool,
+    /// Last 60 seconds of RX/TX byte counts per interface. Updated at
+    /// 1Hz by the network sampler in `Live::spawn_refreshers`. Key =
+    /// interface name (e.g. `"eth0"`, `"wlan0"`); value = `(rx ring,
+    /// tx ring)` of byte deltas, oldest-to-newest. The header sparkline
+    /// (Module 5.4) reads the RX ring of the active interface. Empty
+    /// until the sampler has run at least once.
+    pub net_history: std::collections::HashMap<String, (crate::util::ring::RingU64, crate::util::ring::RingU64)>,
 }
 
 /// Tiny shim so the TUI can depend on a single `cyberdeck_core::files` module
@@ -739,6 +746,10 @@ impl App {
             mesh_chat_offset: 0,
             mesh_input: String::new(),
             mesh_connected: false,
+            // Module 5.2 — initialise empty. The 1Hz refiller populates
+            // this on its first tick; the header sparkline falls back to
+            // a dashed placeholder until something lands.
+            net_history: std::collections::HashMap::new(),
         }
     }
 

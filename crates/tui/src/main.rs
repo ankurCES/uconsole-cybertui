@@ -15,6 +15,7 @@ mod app;
 mod screens;
 mod theme;
 mod ui;
+mod util;
 mod wm;
 
 #[cfg(feature = "web")]
