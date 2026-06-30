@@ -8,8 +8,7 @@ use ratatui::Frame;
 
 use crate::app::action::{Action, RunAction};
 use crate::app::screen::{Screen, ScreenId};
-use crate::app::toast::ToastKind;
-use crate::app::{App, ConfirmKind, Modal, Region};
+use crate::app::{App, ConfirmKind, InputKind, Modal, Region};
 use crate::theme::Theme;
 
 pub struct PackagesScreen;
@@ -83,25 +82,18 @@ impl Screen for PackagesScreen {
                 return true;
             }
             KeyCode::Char('s') => {
-                let tx = app.tx.clone();
-                let q = app.pkgs_filter.clone();
-                tokio::spawn(async move {
-                    match cyberdeck_core::packages::search(&q).await {
-                        Ok(v) => {
-                            let _ = tx
-                                .send(Action::Toast(
-                                    ToastKind::Info,
-                                    format!("{} matches for `{}`", v.len(), q),
-                                ))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(Action::Toast(ToastKind::Error, format!("{e}")))
-                                .await;
-                        }
-                    }
-                });
+                // Open the search input modal so the user can type a query.
+                // Submit is handled by `run_input` in `main.rs` (Task 3.1):
+                // trimmed query is stashed on `app.packages_search_query` and
+                // the modal is closed. Pre-fix, this arm spawned an
+                // empty-string `cyberdeck_core::packages::search("")` task,
+                // which silently produced a `"0 matches for ``"` toast and
+                // never showed a modal.
+                app.modal = Modal::Input {
+                    prompt: "search packages".into(),
+                    buf: String::new(),
+                    kind: InputKind::PackageSearch,
+                };
                 return true;
             }
             KeyCode::Char('/') => {
@@ -251,4 +243,90 @@ fn selected_upgradable(app: &App) -> Option<String> {
     }
     let idx = app.pkg_selected.min(u.len() - 1);
     u.get(idx).map(|p| p.name.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the Packages screen's key dispatcher.
+    //!
+    //! Module 3.1 introduced `InputKind::PackageSearch` and the submit arm in
+    //! `run_input` that stashes a trimmed query on `app.packages_search_query`.
+    //! Module 3.3 wires the user-facing affordance: pressing `s` on the
+    //! Packages screen must open `Modal::Input(InputKind::PackageSearch, "")`
+    //! so the user can type their query — instead of firing an empty-string
+    //! search directly (the pre-fix behaviour, which produced a
+    //! `"0 matches for ``"` toast and never showed a modal).
+
+    use super::*;
+    use crate::app::InputKind;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use tokio::sync::mpsc;
+
+    fn make_app() -> App {
+        let (tx, rx) = mpsc::channel::<crate::app::action::Action>(8);
+        App::new(tx, rx)
+    }
+
+    fn kc(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
+    /// Pressing `s` on the Packages screen must open the search input modal
+    /// with an empty buffer — not fire an empty-string search against
+    /// `pkgs_filter`. This is the user-facing half of the Module 3 fix
+    /// (Module 3.1 added the submit arm; Module 3.3 wires the open).
+    #[test]
+    fn packages_screen_s_key_opens_search_input_modal() {
+        let mut app = make_app();
+        app.current = ScreenId::Packages;
+        // Sanity: no modal at rest.
+        assert!(matches!(app.modal, Modal::None));
+        // Pre-fill the live filter so we can also assert the modal doesn't
+        // copy it into its buffer (the modal opens empty; the user types
+        // from scratch).
+        app.pkgs_filter = "stale-filter".into();
+
+        let mut screen = PackagesScreen;
+        let consumed = screen.on_key(kc('s'), &mut app);
+
+        assert!(consumed, "`s` must be consumed on the Packages screen");
+        match &app.modal {
+            Modal::Input { prompt, buf, kind } => {
+                assert_eq!(*kind, InputKind::PackageSearch, "modal kind");
+                assert!(buf.is_empty(), "modal buffer starts empty: got {buf:?}");
+                // Prompt should mention searching so the user knows what
+                // they're typing into. Pin a non-empty prompt — the exact
+                // string is renderer copy and may evolve.
+                assert!(!prompt.is_empty(), "modal prompt must not be empty");
+            }
+            other => panic!("expected Modal::Input(PackageSearch, \"\"), got {other:?}"),
+        }
+
+        // The previous broken behaviour spawned a tokio task that called
+        // `cyberdeck_core::packages::search("")`. No Action::Run(...) was
+        // ever queued, so we don't need to assert on the channel — the
+        // modal assertion above is sufficient evidence that the new code
+        // path is in effect.
+    }
+
+    /// Pressing `s` while a different modal is open should still flip the
+    /// modal to the PackageSearch input. (Pre-existing modals get clobbered
+    /// by this — same as the pre-fix `s` arm didn't check either, so this
+    /// is a "no regression beyond prior behaviour" pin rather than a
+    /// redesign.)
+    #[test]
+    fn packages_screen_s_key_overwrites_existing_help_modal() {
+        let mut app = make_app();
+        app.current = ScreenId::Packages;
+        app.modal = Modal::Help;
+
+        let mut screen = PackagesScreen;
+        assert!(screen.on_key(kc('s'), &mut app));
+
+        assert!(
+            matches!(&app.modal, Modal::Input { kind: InputKind::PackageSearch, .. }),
+            "Help modal must be replaced by PackageSearch input, got {:?}",
+            app.modal
+        );
+    }
 }
