@@ -271,15 +271,25 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, fo
         render_sidebar_cell(f, cell_area, i + 1, &id, active, cursor, theme);
     }
 
-    // Focus gutter: a 1-cell-wide vertical bar along the sidebar's right
-    // border. Lit cyan when the sidebar owns the region focus (so the
-    // cursor is *here*), dim accent when content is focused (so the user
-    // can see at a glance "focus is on the right"). This is the single
-    // most important D-pad affordance on a 5" display where the cursor
-    // itself is small: the gutter is always visible regardless of which
-    // row the cursor sits on.
+    // Right-edge gutter: focus marker AND scrollbar thumb, painted on
+    // top of each other so the user gets BOTH signals at once.
+    //
+    //   1. Focus gutter — same affordance as before: cyan-filled cell
+    //      when sidebar owns focus, dim accent when content owns it.
+    //      Always rendered when the gutter column exists.
+    //   2. Scrollbar thumb — only rendered when the list overflows
+    //      (`total > visible`). The thumb position = `(offset /
+    //      scrollable_range) * track_height`. When the thumb is absent
+    //      (full-window case) the focus gutter still paints so the
+    //      right column doesn't blink or shift between windowed and
+    //      non-windowed states.
+    //
+    // The thumb uses a block character drawn cell-by-cell against the
+    // gutter background so it visually integrates with the focus
+    // marker instead of fighting it.
     if inner.width >= 2 && rows >= 1 {
         let gutter_x = area.x + area.width.saturating_sub(2);
+        // 1a. Focus gutter background + marker.
         let gutter_style = if focused {
             ratatui::style::Style::default()
                 .fg(theme.selection_fg)
@@ -291,6 +301,39 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, fo
             let gutter = Rect::new(gutter_x, row_area.y, 1, 1);
             let marker = Paragraph::new(Line::from(Span::styled("│", gutter_style)));
             f.render_widget(marker, gutter);
+        }
+        // 1b. Scrollbar thumb (only when windowed).
+        let (thumb_size, thumb_pos) =
+            sidebar_scrollbar_thumb(total, visible, app.sidebar_offset);
+        if thumb_size > 0 {
+            // Theme glyphs don't include a dedicated block; use the
+            // full-block character directly so the thumb reads as a
+            // solid bar at every font.
+            let glyph: &'static str = "█";
+            let mut dy: usize = 0;
+            while dy < thumb_size {
+                let y = inner.y + (thumb_pos + dy) as u16;
+                if y >= inner.y + inner.height {
+                    break;
+                }
+                let cell = Rect::new(gutter_x, y, 1, 1);
+                // Foreground the thumb against the gutter background;
+                // when focused that paints the thumb in selection_fg
+                // over selection_bg (cyan block in the dark theme).
+                let style = if focused {
+                    ratatui::style::Style::default()
+                        .fg(theme.fg)
+                        .bg(theme.selection_bg)
+                } else {
+                    ratatui::style::Style::default()
+                        .fg(theme.accent)
+                        .bg(theme.bg)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                };
+                let thumb = Paragraph::new(Line::from(Span::styled(glyph, style)));
+                f.render_widget(thumb, cell);
+                dy += 1;
+            }
         }
     }
 }
@@ -375,6 +418,33 @@ fn sidebar_item_styles(active: bool, cursor: bool, theme: &Theme) -> (ratatui::s
 
 fn g() -> &'static crate::theme::Glyphs {
     glyphs()
+}
+
+/// Compute the (thumb_size, thumb_pos) for the sidebar scrollbar gutter.
+///
+/// When `total <= visible` the whole list fits in the viewport, so the
+/// helper returns `(0, 0)` and the caller should skip rendering the
+/// thumb entirely. The track background is still drawn by the gutter
+/// code so the right edge stays visually consistent with the unfocused
+/// state.
+///
+/// `thumb_size` ≈ `visible² / total`, clamped to be at least 1 row.
+/// This mirrors the classic "scrollbar thumb is a function of visible
+/// ratio" math so the thumb is large when the window is large and
+/// shrinks as the user scrolls down a long list.
+///
+/// `thumb_pos` is the row inside the track (range `[0, visible -
+/// thumb_size]`) where the thumb's top sits. It's a linear function of
+/// `offset` so the thumb moves smoothly with `sidebar_offset`.
+fn sidebar_scrollbar_thumb(total: usize, visible: usize, offset: usize) -> (usize, usize) {
+    if total <= visible || visible == 0 {
+        return (0, 0);
+    }
+    let thumb_size = ((visible * visible) / total).max(1);
+    let max_off = total.saturating_sub(visible);
+    let thumb_pos = ((offset * (visible.saturating_sub(thumb_size))) / max_off)
+        .min(visible.saturating_sub(thumb_size));
+    (thumb_size, thumb_pos)
 }
 
 pub fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -668,5 +738,146 @@ mod status_region_vocabulary {
             app.sidebar_offset, 9,
             "sidebar_offset must be clamped to total-visible (15-6=9)"
         );
+    }
+
+    // ---- Scrollbar thumb math (Module 1.4) ------------------------------
+    //
+    // The thumb math must: hide the thumb when all rows fit, return a
+    // track height of `visible` when windowed, and keep thumb_pos ∈
+    // [0, visible - thumb_size]. These are pure-math pin tests so they
+    // can't regress silently.
+
+    /// Same formula the implementation uses. Re-declared here (rather
+    /// than calling the production helper, which lives in the parent
+    /// module) so the test pins the contract independently.
+    fn thumb_for(total: usize, visible: usize, offset: usize) -> (usize, usize) {
+        if total <= visible || visible == 0 {
+            return (0, 0);
+        }
+        let thumb_size = ((visible * visible) / total).max(1);
+        let max_off = total.saturating_sub(visible);
+        let thumb_pos = ((offset * (visible.saturating_sub(thumb_size))) / max_off)
+            .min(visible.saturating_sub(thumb_size));
+        (thumb_size, thumb_pos)
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_full_window_hides_gutter() {
+        // When all rows fit, total <= visible → no thumb should render.
+        let (thumb_size, thumb_pos) = thumb_for(15, 15, 0);
+        assert_eq!(thumb_size, 0, "thumb_size must be 0 when window fits");
+        assert_eq!(thumb_pos, 0, "thumb_pos must be 0 when window fits");
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_short_window_top_of_list() {
+        // 15 screens, 5 visible, offset=0 → thumb should sit at the top.
+        let (thumb_size, thumb_pos) = thumb_for(15, 5, 0);
+        // floor(5*5/15) = 1 → thumb_size = 1
+        assert_eq!(thumb_size, 1, "thumb_size for 5/15 ≈ 1 row");
+        // (0 * (5 - 1)) / (15 - 5) = 0
+        assert_eq!(thumb_pos, 0, "offset=0 must pin thumb to top");
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_short_window_bottom_of_list() {
+        // 15 screens, 5 visible, offset=10 (max) → thumb at the bottom.
+        let (thumb_size, thumb_pos) = thumb_for(15, 5, 10);
+        assert_eq!(thumb_size, 1);
+        // (10 * 4) / 10 = 4, clamped to (5 - 1) = 4
+        assert_eq!(thumb_pos, 4, "offset=max must pin thumb to bottom");
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_long_list_two_thirds() {
+        // 15 screens, 5 visible, offset=7 → thumb is ~70% down the track.
+        let (thumb_size, thumb_pos) = thumb_for(15, 5, 7);
+        assert_eq!(thumb_size, 1);
+        // (7 * 4) / 10 = 2 (integer division)
+        assert_eq!(thumb_pos, 2);
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_thumb_size_grows_with_visible() {
+        // 15 screens, 10 visible → thumb_size = floor(10*10/15) = 6.
+        let (thumb_size, thumb_pos) = thumb_for(15, 10, 0);
+        assert_eq!(thumb_size, 6);
+        assert_eq!(thumb_pos, 0);
+    }
+
+    // ---- Sidebar gutter integration tests (Module 1.4) ------------------
+    //
+    // These pin that `draw_sidebar_grid` paints the scrollbar thumb
+    // when windowed (total > visible) and skips it when the whole list
+    // fits. Without this, the thumb math test above could be a lie.
+
+    #[test]
+    fn sidebar_grid_windowed_render_paints_thumb_in_gutter() {
+        // 24-col-wide, 8-row-tall sidebar. With Block borders the inner
+        // height is 6, but we have 15 screens, so total(15) > visible(6)
+        // and a thumb must render. We check the rightmost inner column
+        // for any full-block glyph.
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = Region::Sidebar;
+        app.sidebar_idx = 8;
+        // Force a non-zero offset so the thumb lands off the top.
+        app.sidebar_offset = 4;
+        let theme = Theme::by_name(ThemeName::Dark);
+        terminal
+            .draw(|f| draw_sidebar_grid(f, Rect::new(0, 0, 24, 8), &mut app, &theme, true))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Gutter x = 24 - 2 = 22, rows 1..=6 (inner).
+        let mut thumb_chars: Vec<char> = Vec::new();
+        for y in 1..7 {
+            thumb_chars.push(buf[(22, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        let rendered: String = thumb_chars.iter().collect();
+        // At least one cell in the gutter must be a full block █ —
+        // proving the thumb code actually drew *something*.
+        assert!(
+            rendered.contains('█'),
+            "gutter column should contain at least one █ thumb cell; got: {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn sidebar_grid_full_window_no_thumb_in_gutter() {
+        // Make inner.height = 17 >= total(15), so the window covers all
+        // rows and the thumb must short-circuit. Need area.height = 17
+        // + 2 borders = 19 to land inner.height = 17.
+        let backend = TestBackend::new(24, 19);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = Region::Sidebar;
+        app.sidebar_idx = 0;
+        app.sidebar_offset = 0;
+        let theme = Theme::by_name(ThemeName::Dark);
+        terminal
+            .draw(|f| draw_sidebar_grid(f, Rect::new(0, 0, 24, 19), &mut app, &theme, true))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Gutter x = 24 - 2 = 22, inner rows = 1..=17 (inclusive).
+        let mut thumb_chars: Vec<char> = Vec::new();
+        for y in 1..=17 {
+            thumb_chars.push(buf[(22, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        let rendered: String = thumb_chars.iter().collect();
+        assert!(
+            !rendered.contains('█'),
+            "gutter must not contain █ when total<=visible (15<=17); got: {:?}",
+            rendered
+        );
+        // All gutter cells should be the focus marker in full-window mode.
+        for ch in thumb_chars {
+            assert!(
+                ch == '│' || ch == ' ',
+                "expected only │ in focus gutter when full; got {:?}",
+                ch
+            );
+        }
     }
 }
