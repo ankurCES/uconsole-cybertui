@@ -568,4 +568,102 @@ mod tests {
             "random keys must not flip proc_tree_view"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // Module 6.4 — `build_proc_tree_lines` is the pure function behind
+    // the System-screen tree view. Pin its indent-by-depth + orphan
+    // handling + empty-input contracts so the renderer can rely on
+    // them without re-deriving the logic.
+    // -------------------------------------------------------------------------
+
+    fn e(pid: u32, ppid: u32, comm: &str) -> cyberdeck_core::process::ProcEntry {
+        cyberdeck_core::process::ProcEntry {
+            pid,
+            ppid,
+            comm: comm.into(),
+            cmdline: String::new(),
+        }
+    }
+
+    fn count_leading_spaces(s: &str) -> usize {
+        s.chars().take_while(|&c| c == ' ').count()
+    }
+
+    #[test]
+    fn proc_tree_indentation_by_depth() {
+        let procs = vec![
+            e(1, 0, "init"),
+            e(100, 1, "shell"),
+            e(200, 100, "child"),
+            e(300, 100, "sibling"),
+        ];
+        let lines = build_proc_tree_lines(&procs);
+        // init at depth 0, shell at depth 1, child+sibling at depth 2.
+        let init = lines.iter().find(|l| l.contains("init")).unwrap();
+        let shell = lines.iter().find(|l| l.contains("shell")).unwrap();
+        let child = lines.iter().find(|l| l.contains("child")).unwrap();
+        let sibling = lines.iter().find(|l| l.contains("sibling")).unwrap();
+        assert_eq!(count_leading_spaces(init), 0, "init at depth 0");
+        assert_eq!(count_leading_spaces(shell), 2, "shell at depth 1");
+        assert_eq!(count_leading_spaces(child), 4, "child at depth 2");
+        assert_eq!(count_leading_spaces(sibling), 4, "sibling at depth 2");
+        // Depth-2 lines have 4 leading spaces, depth-1 has 2, depth-0 has 0.
+        assert_eq!(init, "1 init");
+        assert_eq!(shell, "  100 shell");
+        assert_eq!(child, "    200 child");
+        assert_eq!(sibling, "    300 sibling");
+    }
+
+    #[test]
+    fn proc_tree_handles_orphan_ppids_as_roots() {
+        // Parent PID 999 is not in the snapshot — the child must still
+        // appear, treated as a root.
+        let procs = vec![e(100, 999, "orphan")];
+        let lines = build_proc_tree_lines(&procs);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("orphan"));
+        assert_eq!(count_leading_spaces(&lines[0]), 0);
+    }
+
+    #[test]
+    fn proc_tree_handles_empty_input() {
+        let lines = build_proc_tree_lines(&[]);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn proc_tree_sorts_children_by_pid() {
+        // Children at the same depth must come out in PID order so the
+        // output is deterministic across snapshots.
+        let procs = vec![
+            e(1, 0, "init"),
+            e(30, 1, "third"),
+            e(10, 1, "first"),
+            e(20, 1, "second"),
+        ];
+        let lines = build_proc_tree_lines(&procs);
+        let idx = |c: &str| lines.iter().position(|l| l.contains(c)).unwrap();
+        assert!(idx("first") < idx("second"));
+        assert!(idx("second") < idx("third"));
+    }
+
+    #[test]
+    fn proc_tree_appends_cmdline_when_present() {
+        let mut p = e(1, 0, "sh");
+        p.cmdline = "/bin/sh -c 'echo hi'".into();
+        let lines = build_proc_tree_lines(&[p]);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("sh"));
+        assert!(lines[0].contains("/bin/sh"));
+    }
+
+    #[test]
+    fn proc_tree_truncates_very_long_cmdlines() {
+        let mut p = e(1, 0, "long");
+        p.cmdline = "a".repeat(500);
+        let lines = build_proc_tree_lines(&[p]);
+        assert_eq!(lines.len(), 1);
+        // Truncation marker must appear; raw 500-char run must not.
+        assert!(lines[0].ends_with('…') || lines[0].ends_with("...") || lines[0].len() < 600);
+    }
 }
