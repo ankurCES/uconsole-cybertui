@@ -37,7 +37,21 @@ use tokio::time::interval;
 
 pub use action::Action;
 pub use screen::ScreenId;
-pub use toast::Toast;
+pub use toast::{Toast, ToastKind};
+
+// Module 7 — toast history ring (capped at 200 entries). Each entry records
+// when the toast was emitted so the modal can render an HH:MM:SS prefix.
+#[derive(Debug, Clone)]
+pub struct ToastEntry {
+    pub ts: chrono::DateTime<chrono::Local>,
+    pub kind: ToastKind,
+    pub message: String,
+}
+
+/// Hard cap on `App::toast_history`. When the ring is full, `push_toast`
+/// drops the oldest entry. 200 is large enough to cover a busy session
+/// (~3 minutes of one toast/sec) without bloating memory.
+pub const TOAST_HISTORY_CAP: usize = 200;
 
 #[derive(Debug)]
 pub enum Modal {
@@ -569,6 +583,13 @@ pub struct App {
     pub palette_buf: String,
     pub palette_idx: usize,
     pub toasts: Vec<Toast>,
+    /// Module 7 — persistent history of every toast ever shown, capped at
+    /// `TOAST_HISTORY_CAP`. Unlike `toasts` (which `cleanup_toasts` ages out
+    /// after the TTL expires), this ring survives for the life of the
+    /// process and is the data source for the `Modal::ToastLog` overlay
+    /// (opened by capital-T). Newest entry at the back; the modal renders
+    /// in reverse for newest-first ordering.
+    pub toast_history: std::collections::VecDeque<ToastEntry>,
     /// One-shot guard for the first-launch welcome toast. Set to true the
     /// first time `Action::Tick` runs, so the welcome fires exactly once
     /// per process even though `Action::Tick` ticks forever. Mirrors
@@ -819,6 +840,10 @@ impl App {
             palette_buf: String::new(),
             palette_idx: 0,
             toasts: Vec::new(),
+            // Module 7.1 — toast history ring. Empty until the first
+            // `push_toast` call; cap enforced by `push_toast` itself so
+            // construction stays cheap.
+            toast_history: std::collections::VecDeque::new(),
             boot_toast_sent: false,
             logs: Vec::new(),
             logs_filter: String::new(),
@@ -973,7 +998,19 @@ impl App {
     }
 
     pub fn push_toast(&mut self, kind: toast::ToastKind, msg: impl Into<String>) {
-        self.toasts.push(Toast::new(kind, msg.into()));
+        let text = msg.into();
+        // Module 7.1 — append to the persistent history ring FIRST so the
+        // entry is preserved even if the visible toast ages out via TTL.
+        let entry = ToastEntry {
+            ts: chrono::Local::now(),
+            kind,
+            message: text.clone(),
+        };
+        self.toast_history.push_back(entry);
+        while self.toast_history.len() > TOAST_HISTORY_CAP {
+            self.toast_history.pop_front();
+        }
+        self.toasts.push(Toast::new(kind, text));
     }
 
     /// Module 5.3 — apply a `Action::NetSample` to `net_history`.
@@ -1496,5 +1533,54 @@ mod tests {
             "proc_tree_view must default to false (facts view)"
         );
         assert!(app.proc_tree.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 7.1 — `toast_history` is a `VecDeque<ToastEntry>` capped at 200.
+    // `push_toast` is the only writer and enforces the cap by dropping the
+    // oldest entry each time the ring fills. Tests pin:
+    //   - empty by default
+    //   - append at under-cap grows unbounded
+    //   - cap-200 trim drops oldest on overflow
+    //   - kind is preserved on insert
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn toast_history_starts_empty() {
+        let app = fresh_app();
+        assert!(app.toast_history.is_empty());
+    }
+
+    #[test]
+    fn toast_history_push_helper_returns_unit_and_preserves_kind() {
+        let mut app = fresh_app();
+        app.push_toast(crate::app::toast::ToastKind::Warn, "warning".to_string());
+        assert_eq!(app.toast_history.len(), 1);
+        assert_eq!(app.toast_history[0].kind, crate::app::toast::ToastKind::Warn);
+        assert_eq!(app.toast_history[0].message, "warning");
+    }
+
+    #[test]
+    fn toast_history_appends_and_trims_at_cap() {
+        let mut app = fresh_app();
+        for i in 0..250 {
+            app.push_toast(
+                crate::app::toast::ToastKind::Info,
+                format!("toast {i}"),
+            );
+        }
+        assert_eq!(app.toast_history.len(), 200);
+        // The 50 oldest (toasts 0..50) should have been dropped; toast 50
+        // is the oldest survivor and toast 249 is the newest.
+        assert!(
+            app.toast_history.front().unwrap().message.contains("toast 50"),
+            "oldest surviving entry should be toast 50, got {:?}",
+            app.toast_history.front().unwrap().message
+        );
+        assert!(
+            app.toast_history.back().unwrap().message.contains("toast 249"),
+            "newest entry should be toast 249, got {:?}",
+            app.toast_history.back().unwrap().message
+        );
     }
 }
