@@ -627,6 +627,24 @@ impl App {
         self.sidebar_focused = r == Region::Sidebar;
     }
 
+    /// Advance/retreat `sidebar_offset` so the cursor at `sidebar_idx`
+    /// is always visible inside a window of `visible` rows. Top-aligned:
+    /// shifts only when the cursor scrolls past the bottom edge of the
+    /// visible window. Called by the sidebar Up/Down handlers in main.rs.
+    pub fn clamp_sidebar_offset(&mut self, total: usize, visible: usize) {
+        if visible == 0 || total <= visible {
+            self.sidebar_offset = 0;
+            return;
+        }
+        let max_off = total - visible;
+        let desired = if self.sidebar_idx >= visible {
+            (self.sidebar_idx - visible + 1).min(max_off)
+        } else {
+            0
+        };
+        self.sidebar_offset = desired;
+    }
+
     /// Shortcut to open a `Modal::Input` with the given prompt and kind.
     pub fn open_input(&mut self, prompt: impl Into<String>, kind: InputKind) {
         self.modal = Modal::Input {

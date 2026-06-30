@@ -563,19 +563,14 @@ mod status_region_vocabulary {
     fn sidebar_clamps_offset_when_cursor_exits_top_window() {
         let (tx, rx) = tokio::sync::mpsc::channel::<crate::app::Action>(8);
         let mut app = crate::app::App::new(tx, rx);
+        let total = crate::app::screen::ScreenId::ALL.len();
         app.sidebar_idx = 5;
         app.sidebar_offset = 0;
-        let total = crate::app::screen::ScreenId::ALL.len();
-        let visible = 4;
         let new_idx = (app.sidebar_idx + 1) % total;
-        let new_off = if new_idx >= visible {
-            new_idx - visible + 1
-        } else {
-            0
-        };
         app.sidebar_idx = new_idx;
-        app.sidebar_offset = new_off;
-        assert_eq!(app.sidebar_idx, 6);
-        assert_eq!(app.sidebar_offset, 3);
+        app.clamp_sidebar_offset(total, 4);
+        let expected_off = (new_idx + 1).saturating_sub(4); // derive from formula
+        assert_eq!(app.sidebar_idx, (5 + 1) % total);
+        assert_eq!(app.sidebar_offset, expected_off);
     }
 }

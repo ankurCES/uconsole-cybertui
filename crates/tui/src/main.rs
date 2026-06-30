@@ -1028,15 +1028,19 @@ async fn handle_key(
         // Tab/Shift-Tab cycles to the next/prev screen so a D-pad user
         // can wander the screen list without ever touching the keyboard.
         Up | Char('k') if app.region == Region::Sidebar => {
+            let total = ScreenId::ALL.len();
             if app.sidebar_idx == 0 {
-                app.sidebar_idx = ScreenId::ALL.len() - 1;
+                app.sidebar_idx = total - 1;
             } else {
                 app.sidebar_idx -= 1;
             }
+            app.clamp_sidebar_offset(total, total); // full visibility: no-op
             return false;
         }
         Down | Char('j') if app.region == Region::Sidebar => {
-            app.sidebar_idx = (app.sidebar_idx + 1) % ScreenId::ALL.len();
+            let total = ScreenId::ALL.len();
+            app.sidebar_idx = (app.sidebar_idx + 1) % total;
+            app.clamp_sidebar_offset(total, total); // full visibility: no-op
             return false;
         }
         Enter if app.region == Region::Sidebar => {
