@@ -454,6 +454,26 @@ pub struct App {
     pub files_show_hidden: bool,
     pub files_right: std::path::PathBuf,
     pub files_right_entries: Vec<cyberdeck_core_files::DirEntry>,
+    /// Mesh screen (Meshtastic over USB). Snapshot of known nodes, copied
+    /// from the screen's transport on every poll. Empty by default — the
+    /// poll path fills it in once a device is reachable. `App` keeps the
+    /// snapshot (not the `Box<dyn MeshTransport>`) so test code can build
+    /// an `App` without any USB handle open.
+    pub mesh_nodes: Vec<crate::screens::mesh::MeshNode>,
+    /// Longfast channel chat history. Same lifecycle as `mesh_nodes`:
+    /// populated by `MeshScreen::poll`, never read directly by other
+    /// screens.
+    pub mesh_chat: Vec<crate::screens::mesh::MeshChatLine>,
+    /// Live tail offset for the chat list. `0` = tail; growing values
+    /// scroll up (away from the tail). `usize::MAX` (set on `g`) jumps
+    /// to the start of the buffer.
+    pub mesh_chat_offset: usize,
+    /// Current input buffer for the chat compose line. Cleared after a
+    /// successful send.
+    pub mesh_input: String,
+    /// `true` when the underlying transport has an active serial handle.
+    /// Drives the connect/disconnect dot in the input strip.
+    pub mesh_connected: bool,
 }
 
 /// Tiny shim so the TUI can depend on a single `cyberdeck_core::files` module
@@ -577,6 +597,11 @@ impl App {
             files_show_hidden: false,
             files_right: PathBuf::from("/"),
             files_right_entries: Vec::new(),
+            mesh_nodes: Vec::new(),
+            mesh_chat: Vec::new(),
+            mesh_chat_offset: 0,
+            mesh_input: String::new(),
+            mesh_connected: false,
         }
     }
 

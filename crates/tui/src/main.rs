@@ -270,6 +270,14 @@ async fn run_app(
         Box::new(screens::files::FilesScreen),
         Box::new(screens::logs::LogsScreen),
         Box::new(screens::settings::SettingsScreen),
+        // Mesh screen: longfast channel chat (left) + nodes-with-hops (right).
+        // The transport is owned by `MeshScreen` itself so `MeshScreen::poll`
+        // doesn't need to reach into `App`. Held in a `Box<dyn MeshTransport
+        // + Send>` so a real USB transport can swap in at runtime without
+        // touching the screen or any test code path.
+        Box::new(screens::mesh::MeshScreen::new(Box::new(
+            screens::mesh::FakeTransport::new(),
+        ))),
     ];
 
     let mut redraw = true;
@@ -1495,6 +1503,20 @@ async fn handle_action(
                     ToastKind::Info,
                     "Welcome — Tab to switch panes, ? for help, r to rescan",
                 );
+            }
+            // Refresh the Mesh screen's snapshot from its transport.
+            // Non-blocking: the in-process `FakeTransport` returns
+            // immediately and the real serial transport (when wired in)
+            // is bounded by a short read; either way no `select!` wait
+            // can hang the renderer.
+            if let Some(s) = screens.iter_mut().find(|s| s.id() == ScreenId::Mesh) {
+                if let Some(any) = s.as_any_mut() {
+                    if let Some(mesh) =
+                        any.downcast_mut::<crate::screens::mesh::MeshScreen>()
+                    {
+                        mesh.poll(app);
+                    }
+                }
             }
         }
         Action::Key(_) => {}
