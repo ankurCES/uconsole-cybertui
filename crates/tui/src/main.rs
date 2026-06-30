@@ -1850,6 +1850,13 @@ async fn handle_action(
             // The render path reads `app.proc_tree` on the next frame.
             app.apply_proc_tree(procs);
         }
+        Action::SavedConnectionsRefreshed(conns) => {
+            // Module 8.2 — overwrite the saved-Wi-Fi list. The 30s
+            // refiller (App::spawn_refreshers) is the only writer; the
+            // render path reads `app.saved_connections` on every frame
+            // and the right pane redraws automatically.
+            app.saved_connections = conns;
+        }
     }
     false
 }

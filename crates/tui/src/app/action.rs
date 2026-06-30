@@ -67,6 +67,11 @@ pub enum Action {
     /// would just have to undo it). PIDs that disappear between refills
     /// fall out of the next snapshot naturally.
     ProcTreeRefreshed(Vec<cyberdeck_core::process::ProcEntry>),
+    /// Module 8.2 — 30s refiller of `cyberdeck_core::net::saved_connections`.
+    /// Replaces `App::saved_connections` wholesale so the right pane can
+    /// re-render on the next frame. Empty Vec on missing nmcli / non-NM
+    /// box (the call site never returns `Err`).
+    SavedConnectionsRefreshed(Vec<cyberdeck_core::net::SavedConnection>),
 }
 
 #[derive(Debug, Clone)]

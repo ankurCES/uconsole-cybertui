@@ -506,6 +506,35 @@ impl Live {
                 let _ = any_sent;
             }
         });
+
+        // Module 8.2 — 30s refiller that lists every saved Wi-Fi profile
+        // via `cyberdeck_core::net::saved_connections`. We off-load to
+        // `spawn_blocking` because the call shells out to `nmcli` (sync
+        // child process) and we don't want to pin a runtime worker for
+        // the duration. 30s is well above the perceived "real-time"
+        // threshold — saved profiles rarely change during a session,
+        // and the user can always press `s`/rescan for an instant read.
+        let tx_saved = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(30));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                t.tick().await;
+                let conns = tokio::task::spawn_blocking(|| {
+                    cyberdeck_core::net::saved_connections().unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                if tx_saved
+                    .send(Action::SavedConnectionsRefreshed(conns))
+                    .await
+                    .is_err()
+                {
+                    // Receiver dropped — main loop is shutting down.
+                    return;
+                }
+            }
+        });
     }
 }
 
@@ -612,6 +641,14 @@ pub struct App {
     pub net_selected: usize,
     pub net_show_wifi: bool,
     pub wifi_scan_results: Vec<cyberdeck_core::net::WifiNetwork>,
+    /// Module 8.2 — when true and on the Network screen, render the
+    /// saved-Wi-Fi pane on the right. Toggled by `s`. Off by default so
+    /// the existing 60/40 iface/wifi layout is unaffected.
+    pub net_show_saved: bool,
+    /// Module 8.2 — known saved Wi-Fi profiles, refreshed every 30s by
+    /// a dedicated tokio task. Read by the render path on every frame;
+    /// the dispatcher overwrites the `Vec` wholesale on each tick.
+    pub saved_connections: Vec<cyberdeck_core::net::SavedConnection>,
     pub bt_selected: usize,
     /// Sink currently highlighted on the Audio screen.
     pub audio_selected: usize,
@@ -864,6 +901,13 @@ impl App {
             net_selected: 0,
             net_show_wifi: false,
             wifi_scan_results: Vec::new(),
+            // Module 8.2 — saved-Wi-Fi pane: off by default so the
+            // existing 60/40 iface/wifi layout is unchanged unless the
+            // user opts in with `s`. Empty Vec until the 30s refiller
+            // first fires; the render path degrades to "(loading…)" in
+            // that case.
+            net_show_saved: false,
+            saved_connections: Vec::new(),
             bt_selected: 0,
             audio_selected: 0,
             display_selected: 0,

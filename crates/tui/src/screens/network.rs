@@ -141,6 +141,15 @@ impl Screen for NetworkScreen {
                 }
                 return true;
             }
+            // Module 8.2 — toggle the saved-Wi-Fi right pane. Off by
+            // default so the existing 60/40 iface/wifi layout is the
+            // default landing view; turning it on splits the screen
+            // into three columns (iface | wifi | saved). Independent
+            // of `region` because the saved list is read-only.
+            KeyCode::Char('s') => {
+                app.net_show_saved = !app.net_show_saved;
+                return true;
+            }
             _ => return false,
         }
         true
@@ -162,10 +171,25 @@ impl Screen for NetworkScreen {
             inner.height.saturating_sub(1),
         );
 
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(body_area);
+        let cols = if app.net_show_saved {
+            // Module 8.2 — `s` toggles a third column on the right with
+            // the saved-Wi-Fi profiles. Equal-thirds so the SSID column
+            // never has to truncate aggressively. Falls back to the
+            // 2-col 60/40 when off.
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(45),
+                    Constraint::Percentage(30),
+                    Constraint::Percentage(25),
+                ])
+                .split(body_area)
+        } else {
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+                .split(body_area)
+        };
 
         let iface_count = app.live.interfaces.try_read().map(|v| v.len()).unwrap_or(0);
         let wifi_count = app.wifi_scan_results.len();
@@ -321,13 +345,21 @@ impl Screen for NetworkScreen {
             .highlight_symbol("▸ ");
         f.render_stateful_widget(right, cols[1], &mut right_state);
 
+        // Module 8.2 — saved-Wi-Fi pane. Read-only list populated by
+        // the 30s refiller. The third column starts empty until the
+        // first refiller tick lands, so we render a "(loading…)"
+        // placeholder rather than an unsightly blank pane.
+        if app.net_show_saved {
+            render_saved_pane(f, cols[2], app, theme);
+        }
+
         // Footer: hints + position.
         let pos = if total == 0 {
             "  no items".to_string()
         } else {
             format!("  {}/{}  ", app.net_selected + 1, total)
         };
-        let hints = Paragraph::new(Line::from(vec![
+        let hint_spans: Vec<Span> = vec![
             Span::styled(pos, theme.dim()),
             Span::styled(" r ", theme.key()),
             Span::styled("scan  ", theme.dim()),
@@ -338,8 +370,18 @@ impl Screen for NetworkScreen {
             Span::styled(" ⏎ ", theme.key()),
             Span::styled("join  ", theme.dim()),
             Span::styled(" space ", theme.key()),
-            Span::styled("iface up/down", theme.dim()),
-        ]));
+            Span::styled("iface up/down ", theme.dim()),
+            Span::styled(" s ", theme.key()),
+            Span::styled(
+                if app.net_show_saved {
+                    "hide saved"
+                } else {
+                    "saved Wi-Fi"
+                },
+                theme.dim(),
+            ),
+        ];
+        let hints = Paragraph::new(Line::from(hint_spans));
         let hint_area = Rect::new(
             inner.x,
             inner.y + inner.height.saturating_sub(1),
@@ -384,6 +426,46 @@ fn current_iface(app: &App) -> Option<cyberdeck_core::net::Interface> {
     }
     let idx = app.net_selected.min(n - 1);
     ifaces.get(idx).cloned()
+}
+
+// Module 8.2 — render the saved-Wi-Fi right pane. Read-only; rows show
+// SSID, security, and auto-connect priority. Empty state shows
+// "(loading…)" until the 30s refiller has produced at least one snapshot,
+// then "(no saved networks)" once we know the system genuinely has none.
+fn render_saved_pane(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let block = Block::default()
+        .title(Span::styled(" saved Wi-Fi ", theme.title()))
+        .borders(Borders::ALL)
+        .border_style(theme.border(false));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let rows = if app.saved_connections.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "  (loading…)",
+            theme.dim(),
+        )))]
+    } else {
+        app.saved_connections
+            .iter()
+            .map(|c| {
+                ListItem::new(Line::from(vec![
+                    Span::styled("  ", theme.dim()),
+                    Span::styled(format!("{:<20}", truncate(&c.ssid, 20)), theme.fg),
+                    Span::styled(
+                        format!(" {:<8}", truncate(&c.security, 8)),
+                        theme.dim(),
+                    ),
+                    Span::styled(
+                        format!(" prio:{}", c.autoconnect_priority),
+                        theme.accent,
+                    ),
+                ]))
+            })
+            .collect()
+    };
+    let list = List::new(rows);
+    f.render_widget(list, inner);
 }
 
 #[cfg(test)]
@@ -525,6 +607,25 @@ mod tests {
         }
         // And nothing else leaked into the channel.
         assert!(app.rx.try_recv().is_err());
+    }
+
+    // ===== Module 8.2 — saved-Wi-Fi toggle =====
+    //
+    // Pressing `s` must flip `net_show_saved` both ways. The flag is
+    // independent of `region` and `net_selected` — toggling must not
+    // move either, only the saved-pane visibility.
+    #[tokio::test]
+    async fn s_key_toggles_saved_wifi_pane() {
+        let mut app = make_app();
+        let mut screen = NetworkScreen;
+        assert!(!app.net_show_saved, "saved pane must start hidden");
+        assert!(screen.on_key(kc(KeyCode::Char('s')), &mut app));
+        assert!(app.net_show_saved, "first `s` must enable the saved pane");
+        assert!(screen.on_key(kc(KeyCode::Char('s')), &mut app));
+        assert!(
+            !app.net_show_saved,
+            "second `s` must disable the saved pane"
+        );
     }
 
     // ===== Module 1 — Network screen refactor =====
