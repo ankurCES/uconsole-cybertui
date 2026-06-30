@@ -1708,6 +1708,20 @@ async fn handle_action(
             let mut guard = app.live.bluetooth.write().await;
             *guard = devices;
         }
+        Action::NetSample {
+            iface,
+            rx_delta,
+            tx_delta,
+        } => {
+            // Module 5.3 — apply a single second of byte deltas to
+            // the per-interface ring. The actual /sys/class/net
+            // read happens in `Live::spawn_refreshers`; this arm
+            // exists so test code can drive the dispatcher without
+            // spinning up the sampler. The helper handles
+            // lazy-ring creation and stays in sync with the field's
+            // 60-sample cap.
+            app.apply_net_sample(&iface, rx_delta, tx_delta);
+        }
     }
     false
 }

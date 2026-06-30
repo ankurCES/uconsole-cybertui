@@ -49,6 +49,18 @@ pub enum Action {
     /// `app.live.bluetooth` so the bluetooth screen can render the
     /// device list on the next frame.
     BluetoothScanResult(Vec<cyberdeck_core::bluetooth::BtDevice>),
+    /// Module 5.3 — one second of RX/TX byte deltas for a single
+    /// interface, as measured by the 1Hz network refiller. The
+    /// dispatcher appends the deltas to `App::net_history` so the
+    /// header sparkline (Module 5.4) can render them on the next
+    /// frame. We're lossy on receiver drop — if the main loop has
+    /// already exited the channels are torn down, so retrying here
+    /// would just block the refiller.
+    NetSample {
+        iface: String,
+        rx_delta: u64,
+        tx_delta: u64,
+    },
 }
 
 #[derive(Debug, Clone)]

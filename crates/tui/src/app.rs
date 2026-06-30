@@ -374,6 +374,81 @@ impl Live {
                 if let Ok(v) = bt   { *me.bluetooth.write().await   = v; }
             }
         });
+
+        // Module 5.3 — 1Hz network sampler. Reads every active network
+        // interface's cumulative RX/TX byte counts from
+        // `/sys/class/net/<iface>/statistics/{rx,tx}_bytes`, computes
+        // the per-second delta against the previous sample, and pushes
+        // each (iface, rx_d, tx_d) tuple into `App::net_history` via
+        // the `Action::NetSample` dispatcher arm. The header chip
+        // (Module 5.4) reads those rings on every frame.
+        //
+        // We use `tokio::task::spawn_blocking` because the sysfs read
+        // is synchronous I/O — even though `/sys/class/net` is
+        // pseudo-filesystem backed by the kernel, `std::fs::read_to_string`
+        // still has to wait for the VFS to format the page, and we
+        // don't want to pin one of the runtime's worker threads.
+        //
+        // First sample is intentionally a no-op delta: we have no
+        // `prev` to subtract against, so we just record the baseline
+        // and the next tick produces the first real `rx_d / tx_d`.
+        // Saturating subtraction handles the corner case where the
+        // counter has rolled (32-bit `/proc/net/dev` overflow — rare
+        // on modern 64-bit counters but possible for low-rate links).
+        let tx_net = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(1));
+            // Skip ticks that fall behind rather than burst-fire;
+            // mirrors the logs refiller above.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut prev: std::collections::HashMap<
+                String,
+                cyberdeck_core::net::ByteCounts,
+            > = std::collections::HashMap::new();
+            loop {
+                t.tick().await;
+                let curr = tokio::task::spawn_blocking(|| {
+                    cyberdeck_core::net::interface_byte_counts()
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                // Capture baseline on first tick — every delta is 0 in
+                // this round, but the next tick has a real prev to
+                // subtract against.
+                if prev.is_empty() {
+                    prev = curr;
+                    continue;
+                }
+                let mut any_sent = false;
+                for (name, bc) in &curr {
+                    let (rx_d, tx_d) = match prev.get(name) {
+                        Some(p) => (
+                            bc.rx.saturating_sub(p.rx),
+                            bc.tx.saturating_sub(p.tx),
+                        ),
+                        None => (0, 0),
+                    };
+                    if tx_net
+                        .send(Action::NetSample {
+                            iface: name.clone(),
+                            rx_delta: rx_d,
+                            tx_delta: tx_d,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        // Receiver dropped — main loop is shutting down.
+                        return;
+                    }
+                    any_sent = true;
+                }
+                prev = curr;
+                // Suppress the unused warning on `any_sent` while
+                // documenting why we still keep the result.
+                let _ = any_sent;
+            }
+        });
     }
 }
 
@@ -845,6 +920,34 @@ impl App {
         self.toasts.push(Toast::new(kind, msg.into()));
     }
 
+    /// Module 5.3 — apply a `Action::NetSample` to `net_history`.
+    /// Lazily creates the per-interface `(rx, tx)` ring pair on first
+    /// sighting, then pushes the deltas. Returns the new RX ring length
+    /// so tests can assert; production callers ignore the return.
+    ///
+    /// Pulled out of `handle_action` so unit tests don't have to
+    /// construct an `mpsc::Sender` + screens slice to verify the
+    /// dispatcher behaviour.
+    pub fn apply_net_sample(
+        &mut self,
+        iface: &str,
+        rx_delta: u64,
+        tx_delta: u64,
+    ) -> usize {
+        let entry = self
+            .net_history
+            .entry(iface.to_string())
+            .or_insert_with(|| {
+                (
+                    crate::util::ring::RingU64::new(60),
+                    crate::util::ring::RingU64::new(60),
+                )
+            });
+        entry.0.push(rx_delta);
+        entry.1.push(tx_delta);
+        entry.0.len()
+    }
+
     pub fn cleanup_toasts(&mut self) {
         self.toasts.retain(|t| !t.expired());
     }
@@ -1214,5 +1317,57 @@ mod tests {
             buf.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
             vec!["real"]
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 5.3 — `App::apply_net_sample` is the dispatcher arm for
+    // `Action::NetSample`. These tests pin the ring-init and per-interface
+    // behaviour so a refactor can't silently drop a delta on the floor.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn net_sample_appends_deltas_to_ring() {
+        // Pre-seed the ring as the 1Hz refiller would have after one
+        // prior tick: eth0 already saw 100 rx / 50 tx bytes in the
+        // previous second.
+        let mut app = fresh_app();
+        app.apply_net_sample("eth0", 100, 50);
+        // New sample arrives: 1000 rx, 500 tx for the same second window.
+        app.apply_net_sample("eth0", 1000, 500);
+        let entry = app.net_history.get("eth0").expect("eth0 entry present");
+        assert_eq!(entry.0.as_slice_chrono(), vec![100, 1000]);
+        assert_eq!(entry.1.as_slice_chrono(), vec![50, 500]);
+    }
+
+    #[test]
+    fn net_sample_creates_entry_for_new_interface() {
+        // First sighting of an interface: `or_insert_with` must build
+        // two empty 60-cap rings, then push the first sample so the
+        // ring's length is 1 after dispatch.
+        let mut app = fresh_app();
+        app.apply_net_sample("wlan0", 100, 50);
+        let entry = app.net_history.get("wlan0").expect("wlan0 entry present");
+        assert_eq!(entry.0.cap(), 60);
+        assert_eq!(entry.1.cap(), 60);
+        assert_eq!(entry.0.len(), 1);
+        assert_eq!(entry.1.len(), 1);
+    }
+
+    #[test]
+    fn net_sample_saturates_at_60_samples() {
+        // Push 200 samples: the ring must clamp at 60 (oldest dropped).
+        // Catches a regression where someone swaps `RingU64` for a
+        // `VecDeque` and forgets the bound.
+        let mut app = fresh_app();
+        for i in 0u64..200 {
+            app.apply_net_sample("eth0", i, i);
+        }
+        let entry = app.net_history.get("eth0").unwrap();
+        assert_eq!(entry.0.len(), 60);
+        // Newest sample must be the last one pushed (i=199); oldest
+        // must be 200-60=140.
+        let slice = entry.0.as_slice_chrono();
+        assert_eq!(slice.first().copied(), Some(140));
+        assert_eq!(slice.last().copied(), Some(199));
     }
 }
