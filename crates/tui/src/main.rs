@@ -1295,7 +1295,7 @@ async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind
     let _ = tx.send(Action::Run(act)).await;
 }
 
-async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, value: String) {
+pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, value: String) {
     let act = match kind {
         InputKind::WifiPassword => {
             if let Some(ssid) = app.pending_ssid.take() {
