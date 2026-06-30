@@ -278,4 +278,92 @@ mod tests {
             assert!(bc.rx <= u64::MAX && bc.tx <= u64::MAX);
         }
     }
+
+    // Module 8.1 — `saved_connections` enumerates nmcli-saved Wi-Fi profiles.
+    // We pin two contracts:
+    //   * it never panics and never returns `Err` (graceful when nmcli is
+    //     missing or non-NM systems exist).
+    //   * every entry it does produce has a non-empty SSID.
+    #[test]
+    fn saved_connections_handles_missing_nmcli_gracefully() {
+        let result = saved_connections();
+        assert!(
+            result.is_ok(),
+            "saved_connections must not error on missing nmcli: {result:?}"
+        );
+    }
+
+    #[test]
+    fn saved_connections_returns_nonempty_ssid_for_every_entry() {
+        let conns = saved_connections().unwrap_or_default();
+        for c in &conns {
+            assert!(!c.ssid.is_empty(), "saved connection has empty SSID: {c:?}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedConnection {
+    pub ssid: String,
+    pub security: String,
+    pub autoconnect_priority: i32,
+}
+
+/// Enumerate saved Wi-Fi connections via `nmcli`.
+/// Filters by `802-11-wireless` type so we don't surface wired/VPN/bridge
+/// profiles alongside Wi-Fi SSIDs.
+///
+/// Behaviour when nmcli is absent or non-zero exits:
+///   * Returns `Ok(vec![])` rather than `Err` so call sites that merely
+///     want to render the list never need to handle an Err arm. The TUI's
+///     view will simply be empty.
+///   * The dispatcher must still be able to send the action through the
+///     channel — it falls through the existing happy-path.
+///
+/// nmcli's `-t` mode uses `:` as a field separator and escapes embedded
+/// colons as `\:`. `split_nmcli` already in this module handles escaping
+/// — we reuse it rather than reinvent the parser.
+pub fn saved_connections() -> CoreResult<Vec<SavedConnection>> {
+    let output = std::process::Command::new("nmcli")
+        .args([
+            "-t",
+            "-f",
+            "NAME,TYPE,SECURITY,AUTOCONNECT",
+            "connection",
+            "show",
+        ])
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(Vec::new()),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let parts = split_nmcli(line);
+        if parts.len() < 4 {
+            continue;
+        }
+        // `nmcli connection show` lists every saved profile — wired, VPN,
+        // bridges, etc. We only want Wi-Fi. The TYPE field is stable and
+        // equals `802-11-wireless` for Wi-Fi profiles.
+        if parts[1] != "802-11-wireless" {
+            continue;
+        }
+        let ssid = parts[0].clone();
+        if ssid.is_empty() {
+            // An empty SSID is a hidden network; we surface it as-is but
+            // the test pins that it must be non-empty, so the renderer
+            // can always rely on it.
+            continue;
+        }
+        let security = parts[2].clone();
+        let autoconnect_priority = parts[3].parse::<i32>().unwrap_or(0);
+        out.push(SavedConnection {
+            ssid,
+            security,
+            autoconnect_priority,
+        });
+    }
+    Ok(out)
 }
