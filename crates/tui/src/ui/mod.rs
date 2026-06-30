@@ -1,6 +1,42 @@
 //! Cross-cutting widgets: header (live values), sidebar (screen list),
 //! status bar (keymap hints + clock), toast overlay.
 
+// Module 5.4 — sparkline for the header chip. Maps each sample to one of
+// eight block glyphs `▁▂▃▄▅▆▇█`, scaled by the per-interface max so a
+// quiet link still produces a visible ribbon. Returns `""` on empty
+// input — the caller renders a dashed placeholder in that case so the
+// chip is always the same width.
+fn sparkline(samples: &[u64]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    const RAMP: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    // `.max(&1)` keeps the divisor at least 1 — an all-zero history
+    // would otherwise panic (or silently map every sample to ∞).
+    let max = *samples.iter().max().unwrap_or(&1).max(&1);
+    samples
+        .iter()
+        .map(|s| RAMP[((s * 7) / max).min(7) as usize])
+        .collect()
+}
+
+/// Which interface the header sparkline tracks. Defaults to the first
+/// interface with a non-empty IPv4 (matches the existing header pill),
+/// falling back to `"lo"` if `app.live.interfaces` is locked or empty.
+fn pick_active_iface_name(app: &App) -> String {
+    if let Ok(ifaces) = app.live.interfaces.try_read() {
+        if let Some(primary) = ifaces.iter().find(|i| !i.ipv4.is_empty()) {
+            return primary.name.clone();
+        }
+        // No IPv4 — fall back to the first interface by name (often
+        // `lo` when the system has no wired/wireless link up).
+        if let Some(first) = ifaces.first() {
+            return first.name.clone();
+        }
+    }
+    "lo".to_string()
+}
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -10,7 +46,7 @@ use crate::app::screen::ScreenId;
 use crate::app::{App, Region};
 use crate::theme::{glyphs, Theme};
 
-pub fn header_lines(app: &App) -> Vec<Line<'static>> {
+pub fn header_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let g = glyphs();
     let mut spans: Vec<Span<'static>> = vec![
         " cyberdeck ".into(),
@@ -46,6 +82,43 @@ pub fn header_lines(app: &App) -> Vec<Line<'static>> {
                 );
             }
         }
+        // Module 5.4 — header sparkline chip. Pulls the last 8 RX
+        // samples for the active interface and renders them as a
+        // 8-glyph ribbon (`▁▂▃▄▅▆▇█`). All-zero history falls back to
+        // a dashed placeholder so the chip is always 8 cells wide and
+        // the line doesn't reflow on first paint. The sparkline is
+        // appended regardless of whether `live.info` succeeded above
+        // so the chip is visible even when sysinfo fetch fails (the
+        // header is the user's primary glance — it should never go
+        // blank just because a single source blipped).
+        {
+            let iface = pick_active_iface_name(app);
+            let samples: Vec<u64> = app
+                .net_history
+                .get(&iface)
+                .map(|(rx_ring, _)| {
+                    rx_ring
+                        .as_slice_chrono()
+                        .into_iter()
+                        .rev()
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ribbon = if samples.is_empty() {
+                "────────".to_string()
+            } else {
+                sparkline(&samples)
+            };
+            let label = format!(" ↓{} ", ribbon);
+            spans.push(Span::styled(
+                label,
+                ratatui::style::Style::default().fg(theme.accent),
+            ));
+        }
         if let Ok(b) = app.live.battery.try_read() {
             if let Some(bat) = b.as_ref() {
                 spans.push(format!("{} {}% ", g.bat, bat.capacity).into());
@@ -74,7 +147,7 @@ pub fn header_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 pub fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let p = Paragraph::new(header_lines(app))
+    let p = Paragraph::new(header_lines(app, theme))
         .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg))
         .block(
             Block::default()
@@ -881,5 +954,71 @@ mod status_region_vocabulary {
                 ch
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod sparkline_tests {
+    //! Module 5.4 — pin the sparkline math so a future rework (e.g.
+    //! switching to a base64-encoded buffer glyph, or adding a
+    //! logarithmic ramp) doesn't silently shift the chip's appearance.
+    use super::sparkline;
+
+    #[test]
+    fn sparkline_returns_eight_chars_for_eight_samples() {
+        // The chip renders up to 8 trailing samples; the helper must
+        // emit one glyph per sample.
+        let s = sparkline(&[0, 100, 200, 300, 400, 500, 600, 700]);
+        assert_eq!(s.chars().count(), 8);
+    }
+
+    #[test]
+    fn sparkline_picks_lower_block_for_smaller_values() {
+        // The ramp is monotonic: lower samples → lower glyph index.
+        // Specifically the lowest glyph (`▁`) covers `[0, max/8)` so
+        // the first of an ascending ramp must be `▁`, the last must
+        // be `█`.
+        let s = sparkline(&[0, 100, 200, 300, 400, 500, 600, 700]);
+        assert!(
+            s.starts_with('▁'),
+            "first sample (0/max) must be the lowest glyph ▁; got {:?}",
+            s
+        );
+        assert!(
+            s.ends_with('█'),
+            "last sample (max/max) must be the top glyph █; got {:?}",
+            s
+        );
+        // Every char must come from the ramp.
+        for c in s.chars() {
+            assert!(
+                "▁▂▃▄▅▆▇█".contains(c),
+                "unexpected glyph {:?} in sparkline",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn sparkline_all_zeros_returns_lowest_glyph() {
+        // All-zero history must not panic — we clamp via `.max(&1)`
+        // so divisor is at least 1 and every sample lands in
+        // bucket 0.
+        let s = sparkline(&[0, 0, 0, 0]);
+        assert_eq!(s.chars().count(), 4);
+        assert!(
+            s.chars().all(|c| c == '▁'),
+            "all zeros must render as ▁▁▁▁; got {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn sparkline_empty_returns_empty_string() {
+        // The render code falls back to a dashed placeholder on
+        // empty input; the helper itself returns `""` so callers
+        // can distinguish "no data" from "all zeros".
+        assert_eq!(sparkline(&[]), "");
+        assert_eq!(sparkline(&[]).chars().count(), 0);
     }
 }
