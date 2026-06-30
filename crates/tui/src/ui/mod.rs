@@ -145,9 +145,12 @@ pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     }
 }
 
-fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: bool) {
+fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focused: bool) {
     // One row per screen. Falls back to the pre-redesign list so users
-    // on narrow terminals still get a working menu.
+    // on narrow terminals still get a working menu. Windowed via
+    // `ListState::offset()` so a narrow-but-tall terminal (e.g. uconsole
+    // in portrait) doesn't silently scroll the bottom rows offscreen —
+    // before this fix those rows were still selectable but invisible.
     let items: Vec<ListItem> = ScreenId::ALL
         .iter()
         .enumerate()
@@ -166,6 +169,17 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
             .into()
         })
         .collect();
+
+    // Clamp sidebar_offset so the window is always valid. The narrow
+    // sidebar is a single List, so `visible` is the inner height after
+    // the top/bottom borders consume two rows.
+    let total = items.len();
+    let visible = area.height.saturating_sub(2) as usize;
+    let max_off = total.saturating_sub(visible);
+    if app.sidebar_offset > max_off {
+        app.sidebar_offset = max_off;
+    }
+
     let list = List::new(items)
         .block(
             Block::default()
@@ -177,7 +191,11 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
                 .border_style(theme.border(focused)),
         )
         .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
-    f.render_widget(list, area);
+
+    let mut state = ratatui::widgets::ListState::default();
+    *state.offset_mut() = app.sidebar_offset;
+    state.select(Some(app.sidebar_idx));
+    f.render_stateful_widget(list, area, &mut state);
 
     // Focus gutter on the inner right edge, mirroring the grid variant
     // above. Filled cyan when the sidebar owns the region, dim accent
@@ -606,5 +624,49 @@ mod status_region_vocabulary {
         let mut offset: usize = 99;
         if offset > max_off { offset = max_off; }
         assert_eq!(offset, 12);
+    }
+
+    #[test]
+    fn sidebar_narrow_list_state_uses_app_offset() {
+        // Build a ListState the same way draw_sidebar_narrow will.
+        // The narrow fallback must honor `app.sidebar_offset` so rows
+        // below the visible window are clipped rather than overflowing
+        // the frame (and silently selectable when offscreen).
+        let total: usize = 15;
+        let mut app_offset: usize = 7;
+        let visible: usize = 5;
+        let max_off = total.saturating_sub(visible);
+        if app_offset > max_off { app_offset = max_off; }
+        let mut state = ratatui::widgets::ListState::default();
+        state.select(Some(10));
+        *state.offset_mut() = app_offset;
+        assert_eq!(state.offset(), 7);
+        assert_eq!(state.selected(), Some(10));
+    }
+
+    #[test]
+    fn sidebar_narrow_renders_with_offset_and_clamps_overflow() {
+        // Render the narrow sidebar with sidebar_offset=10 against an
+        // 8-row area. The visible window is height-2 (top/bottom borders)
+        // = 6 rows. With 15 screens total, max_off = 15-6 = 9. The
+        // implementation must clamp sidebar_offset down to that ceiling
+        // BEFORE handing the value to ListState, so ratatui can't scroll
+        // the bottom rows past the bottom edge (where they'd be
+        // selectable-but-invisible on a narrow-but-tall terminal).
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = Region::Sidebar;
+        app.sidebar_idx = 12;
+        app.sidebar_offset = 10; // > max_off(9), must be clamped
+        let theme = Theme::by_name(ThemeName::Dark);
+        let area = ratatui::layout::Rect::new(0, 0, 24, 8);
+        terminal
+            .draw(|f| draw_sidebar_narrow(f, area, &mut app, &theme, true))
+            .unwrap();
+        assert_eq!(
+            app.sidebar_offset, 9,
+            "sidebar_offset must be clamped to total-visible (15-6=9)"
+        );
     }
 }
