@@ -142,6 +142,13 @@ pub enum InputKind {
     /// handler drops non-digit chars at the buffer-insert step so the
     /// user can't accidentally type letters into a passkey field.
     BluetoothPasskey,
+    /// Module 3 — search query for the Packages screen. The submit
+    /// handler stashes the trimmed value on `App::packages_search_query`
+    /// so the Packages screen's render loop can pick it up and fire
+    /// `cyberdeck_core::packages::search(&query)`. Tasks 3.2–3.4 wire
+    /// the modal UI + `/` hotkey on the Packages screen itself; this
+    /// variant is just the variant + dispatch plumbing.
+    PackageSearch,
 }
 
 #[derive(Debug)]
@@ -482,6 +489,11 @@ pub struct App {
     pub pkg_search_offset: usize,
     pub pkgs_filter: String,
     pub pkg_search_results: Vec<Package>,
+    /// Module 3 — when `Some`, the Packages screen filters by this query.
+    /// Set by the `InputKind::PackageSearch` submit handler in `main.rs`
+    /// (`run_input`). The Packages screen's render loop reads this each
+    /// frame; tasks 3.2–3.4 wire the render-time poll.
+    pub packages_search_query: Option<String>,
     pub theme_name: screen::ThemeNameReexport,
     pub mouse: bool,
     pub show_help: bool,
@@ -694,6 +706,7 @@ impl App {
             pkg_search_offset: 0,
             pkgs_filter: String::new(),
             pkg_search_results: Vec::new(),
+            packages_search_query: None,
             theme_name: screen::ThemeNameReexport::Dark,
             mouse: true,
             show_help: false,

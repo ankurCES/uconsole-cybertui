@@ -1353,6 +1353,24 @@ async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, va
             );
             return;
         }
+        InputKind::PackageSearch => {
+            // Module 3 — Packages screen search. Submit stores the
+            // trimmed query on `app.packages_search_query` so the screen
+            // can pick it up on its next render. An empty/whitespace
+            // submit is a no-op for the field (it just closes the
+            // modal) so the user doesn't accidentally wipe their
+            // in-flight search by hitting Enter on a blank field.
+            // The actual `cyberdeck_core::packages::search(&query)`
+            // dispatch is wired in the Packages screen render loop
+            // (tasks 3.2–3.4).
+            let query = value.trim().to_string();
+            if !query.is_empty() {
+                app.packages_search_query = Some(query);
+            }
+            // No RunAction to dispatch — the field mutation above is
+            // sufficient. Close the modal by returning.
+            return;
+        }
         InputKind::WifiEnterpriseIdentity => {
             // Stash on the wizard so advance_wizard can read it.
             if let Modal::Wizard(crate::app::Wizard::WifiEnterprise { identity, step, .. }) =
@@ -2577,6 +2595,55 @@ mod tests {
             .toasts
             .iter()
             .any(|t| t.kind == ToastKind::Error && t.text.contains("invalid pid")));
+    }
+
+    // ===== Module 3 — PackageSearch ======================================
+    //
+    // The Packages screen historically fired an empty-string search (the `/`
+    // hotkey just cleared the filter and `s` searched whatever was already in
+    // it). The fix introduces a `Modal::Input(InputKind::PackageSearch, ..)`
+    // that lets the user type a query and submit it. Submitting must:
+    //   1. Store the (trimmed) query on `app.packages_search_query`.
+    //   2. Close the modal.
+    // Tasks 3.2–3.4 will wire the modal UI + `/` hotkey on the Packages
+    // screen itself; this test only locks in the variant + dispatch
+    // plumbing.
+    #[tokio::test]
+    async fn input_kind_package_search_submit_stores_query_and_closes_modal() {
+        let (tx, _rx, mut app) = make_app();
+        app.modal = Modal::Input {
+            prompt: "search packages".into(),
+            buf: "ripgrep".into(),
+            kind: InputKind::PackageSearch,
+        };
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Enter)).await;
+
+        // Modal must close after submit.
+        assert!(matches!(app.modal, Modal::None));
+        // The trimmed query must be stashed for the Packages screen to pick up.
+        assert_eq!(app.packages_search_query.as_deref(), Some("ripgrep"));
+    }
+
+    // Empty / whitespace-only submits must NOT clear the existing query —
+    // they just dismiss the modal. This keeps the user from accidentally
+    // wiping their in-flight search by hitting Enter on an empty field.
+    #[tokio::test]
+    async fn input_kind_package_search_empty_submit_keeps_existing_query() {
+        let (tx, _rx, mut app) = make_app();
+        app.packages_search_query = Some("curl".into());
+        app.modal = Modal::Input {
+            prompt: "search packages".into(),
+            buf: "   ".into(),
+            kind: InputKind::PackageSearch,
+        };
+        let _ = handle_key(&mut [], &mut app, &tx, key(KeyCode::Enter)).await;
+
+        assert!(matches!(app.modal, Modal::None));
+        assert_eq!(
+            app.packages_search_query.as_deref(),
+            Some("curl"),
+            "empty submit must not overwrite an existing query"
+        );
     }
 
     // ===== Module 2 — Modal OK/Cancel polish + BluetoothPasskey =====
