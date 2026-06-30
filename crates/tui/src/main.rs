@@ -1617,11 +1617,12 @@ async fn handle_action(
             let _ = value;
         }
         Action::LogPushed(line) => {
-            app.logs.push(line);
-            if app.logs.len() > 1000 {
-                let drop = app.logs.len() - 1000;
-                app.logs.drain(0..drop);
-            }
+            // The 1Hz refiller (Module 2.2) feeds this arm with journalctl
+            // output from the last 2s; successive ticks overlap, so dedupe
+            // by line text before appending. Cap at 1000 — the UI renders
+            // only the last few hundred anyway, and a tighter cap here
+            // means new entries push old ones out faster.
+            app::dedupe_logs_into(&mut app.logs, vec![line], 1000);
         }
         Action::Refresh(id) => {
             // Trivial: re-render. The background task already produces data.

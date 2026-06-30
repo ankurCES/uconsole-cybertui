@@ -252,6 +252,9 @@ impl Live {
     /// Each field has its own cadence — system/thermal every second, services
     /// and processes every five, packages on demand.
     pub fn spawn_refreshers(self: &Arc<Self>, tx: mpsc::Sender<Action>) {
+        // Clone the sender up-front so multiple spawned tasks can each
+        // hold their own handle. Tokio's `mpsc::Sender` is `Clone`.
+        let tx_tick = tx.clone();
         let me = self.clone();
         tokio::spawn(async move {
             let mut t = interval(Duration::from_secs(1));
@@ -272,7 +275,55 @@ impl Live {
                 if let Ok(ssid) = cyberdeck_core::net::wifi_active_ssid().await {
                     *me.active_ssid.write().await = ssid;
                 }
-                let _ = tx.send(Action::Tick).await;
+                let _ = tx_tick.send(Action::Tick).await;
+            }
+        });
+
+        // Module 2.2 — recent-logs refiller. Runs at 1Hz, polling the last
+        // 2s of journal entries. Successive calls overlap heavily (the
+        // `recent_since(2)` window slides forward by 1s each tick), so
+        // dedupe by line text happens in the `LogPushed` dispatcher arm
+        // rather than here. We push each new line as its own `LogPushed`
+        // action so the dispatcher can dedupe in order and the UI gets
+        // a chance to redraw on each line.
+        //
+        // Failure modes (journalctl missing, no perms, quiet box): we
+        // log at debug and continue. The refiller never errors out —
+        // a transient failure shouldn't kill the live feed.
+        let tx_logs = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(1));
+            // Skip ticks that fall behind rather than burst-fire to
+            // catch up; on a heavily loaded box this prevents the
+            // refiller from monopolising the channel.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                t.tick().await;
+                let lines = match cyberdeck_core::logs::recent_since(2).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!("logs::recent_since failed: {e}");
+                        continue;
+                    }
+                };
+                // Stamp each line with the local timestamp at fetch
+                // time. We deliberately don't parse journalctl's own
+                // timestamp prefix (locale-fragile) — for the recent
+                // log buffer "now" is accurate enough.
+                let now = Local::now();
+                for raw in lines {
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    let line = LogLine {
+                        ts: now,
+                        line: raw,
+                    };
+                    if tx_logs.send(Action::LogPushed(line)).await.is_err() {
+                        // Receiver dropped — app is shutting down.
+                        break;
+                    }
+                }
             }
         });
 
@@ -548,6 +599,54 @@ impl Region {
             Region::ContentLeft => "content",
             Region::ContentRight => "details",
         }
+    }
+}
+
+/// Append `incoming` to `buf`, dropping any line whose `line` text is
+/// already present (or is empty). Preserves order: existing entries stay
+/// in place, then truly-new entries are appended. Once `buf.len()` exceeds
+/// `cap`, the oldest entries are dropped from the front.
+///
+/// Why this exists: the 1Hz logs refiller (Module 2.2) calls
+/// `recent_since(2)` every second. Each call returns up to 200 lines from
+/// the last 2s, so successive calls overlap heavily. Without dedupe the
+/// buffer would fill with duplicates and trip the cap within a few
+/// seconds, masking real new entries.
+///
+/// We use `LogLine::line` (the raw journalctl text) as the dedupe key
+/// rather than `ts + line`: parsing journalctl's timestamp prefix is
+/// fragile (the format depends on locale), and journalctl doesn't emit
+/// two identical lines within the 2s dedupe window in normal operation.
+/// If a journal wrap causes an accidental dup, the worst case is one
+/// stale entry, not unbounded growth — `cap` still bounds the buffer.
+pub(crate) fn dedupe_logs_into(
+    buf: &mut Vec<LogLine>,
+    incoming: Vec<LogLine>,
+    cap: usize,
+) {
+    if cap == 0 {
+        return;
+    }
+    // Build an owned HashSet of existing keys. The reference version
+    // (`&str` borrowed from `buf`) would clash with the subsequent
+    // `buf.push(line)` because Rust treats them as overlapping borrows
+    // of the same `Vec`. Cloning the strings is cheap relative to the
+    // cap-sized buffer this function is called with.
+    let mut existing: std::collections::HashSet<String> =
+        buf.iter().map(|l| l.line.clone()).collect();
+    for line in incoming {
+        if line.line.is_empty() {
+            continue;
+        }
+        if !existing.insert(line.line.clone()) {
+            // Already present — `insert` returned false, drop the dup.
+            continue;
+        }
+        buf.push(line);
+    }
+    if buf.len() > cap {
+        let drop = buf.len() - cap;
+        buf.drain(0..drop);
     }
 }
 
@@ -980,6 +1079,81 @@ mod tests {
         assert_eq!(
             app.sidebar_offset, 10,
             "offset saturates at total - visible"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 2.2 — `dedupe_logs_into` keeps the recent-logs buffer free of
+    // duplicates when a periodic refiller polls an overlapping window. The
+    // refiller calls `recent_since(2)` once per second; each call may return
+    // lines already in the buffer. The helper drops those before pushing,
+    // then enforces the cap by dropping the oldest entries.
+    //
+    // We use `LogLine::line` (the raw journalctl line) as the dedupe key —
+    // cheap string equality, no timestamp parsing required, and journalctl
+    // won't emit two identical lines within the dedupe window in normal
+    // operation. If it ever does (e.g. journal wraps), the worst case is
+    // one stale entry, not unbounded growth.
+    // -------------------------------------------------------------------------
+
+    fn ll(s: &str) -> LogLine {
+        LogLine {
+            ts: Local::now(),
+            line: s.into(),
+        }
+    }
+
+    #[test]
+    fn dedupe_logs_into_skips_lines_already_in_buffer() {
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll("a"), ll("b")], 100);
+        assert_eq!(
+            buf.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // "b" is a duplicate; only "c" should be appended.
+        dedupe_logs_into(&mut buf, vec![ll("b"), ll("c")], 100);
+        assert_eq!(
+            buf.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn dedupe_logs_into_caps_at_max_size_dropping_oldest() {
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll("a"), ll("b"), ll("c")], 3);
+        assert_eq!(buf.len(), 3);
+        dedupe_logs_into(&mut buf, vec![ll("d")], 3);
+        assert_eq!(
+            buf.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
+            vec!["b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn dedupe_logs_into_handles_empty_input() {
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, Vec::new(), 100);
+        assert!(buf.is_empty());
+        dedupe_logs_into(&mut buf, vec![ll("x")], 100);
+        dedupe_logs_into(&mut buf, Vec::new(), 100);
+        assert_eq!(
+            buf.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
+            vec!["x"]
+        );
+    }
+
+    #[test]
+    fn dedupe_logs_into_drops_empty_lines() {
+        // Empty journalctl lines would otherwise accumulate and bloat the
+        // buffer — they're never useful in the UI. Dedupe must skip them.
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll(""), ll(""), ll("real")], 100);
+        assert_eq!(
+            buf.iter().map(|l| l.line.as_str()).collect::<Vec<_>>(),
+            vec!["real"]
         );
     }
 }
