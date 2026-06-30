@@ -550,12 +550,32 @@ mod status_region_vocabulary {
         assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
     }
 
-    #[test]
+#[test]
     fn content_right_uses_triangle_vocabulary() {
         let (_, label) = render_status_with(Region::ContentRight);
         assert!(label.contains('▶'), "right region_label must contain ▶; got: {:?}", label);
         assert!(label.contains("right"), "right region_label must contain 'right'; got: {:?}", label);
         assert!(!label.contains("←"), "old ← form must not appear in label; got: {:?}", label);
         assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
+    }
+
+    #[test]
+    fn sidebar_clamps_offset_when_cursor_exits_top_window() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::app::Action>(8);
+        let mut app = crate::app::App::new(tx, rx);
+        app.sidebar_idx = 5;
+        app.sidebar_offset = 0;
+        let total = crate::app::screen::ScreenId::ALL.len();
+        let visible = 4;
+        let new_idx = (app.sidebar_idx + 1) % total;
+        let new_off = if new_idx >= visible {
+            new_idx - visible + 1
+        } else {
+            0
+        };
+        app.sidebar_idx = new_idx;
+        app.sidebar_offset = new_off;
+        assert_eq!(app.sidebar_idx, 6);
+        assert_eq!(app.sidebar_offset, 3);
     }
 }

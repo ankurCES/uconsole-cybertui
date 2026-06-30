@@ -346,6 +346,14 @@ pub struct App {
     /// with Enter. `current` is what's actually rendered in the content
     /// pane; `sidebar_idx` is what's highlighted in the menu.
     pub sidebar_idx: usize,
+    /// Scroll offset for the sidebar list — the index of the topmost
+    /// visible item. Kept in lockstep with `sidebar_idx` so that on
+    /// short terminals (where the sidebar can't fit all `ScreenId`s)
+    /// the highlighted entry is always inside the visible window.
+    /// A pure cursor move without adjusting this leaks items off the
+    /// top of the pane. See `crates/tui/src/ui/mod.rs::sidebar_clamps_offset_*`
+    /// for the clamp contract.
+    pub sidebar_offset: usize,
     /// Which region of the TUI currently holds key focus. The redesign
     /// replaces the previous single-`bool` model with three explicit
     /// regions so D-pad navigation is deterministic:
@@ -543,6 +551,7 @@ impl App {
             modal: Modal::None,
             sidebar_focused: true,
             sidebar_idx: 0,
+            sidebar_offset: 0,
             // Default region on launch is the sidebar — that's the natural
             // D-pad start (user sees the screen list and moves with ↑/↓).
             // `switch_screen` flips to `ContentLeft` when a screen commits.
