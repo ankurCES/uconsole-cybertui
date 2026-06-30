@@ -72,11 +72,20 @@ impl RingU64 {
     }
 
     /// True when no element has been pushed (or the ring has zero cap).
+    /// Currently unreferenced outside the in-module tests, but part of
+    /// the documented public API: the header sparkline renderer (see
+    /// the module docstring) will use this to decide whether to draw
+    /// an axis label vs. an empty placeholder. `#[allow(dead_code)]`
+    /// silences the install-script warning until that caller lands.
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }
 
-    /// Configured capacity. Constant after construction.
+    /// Configured capacity. Constant after construction. Same
+    /// rationale as `is_empty`: reserved for the sparkline renderer
+    /// (axis-tick spacing = `cap / N`).
+    #[allow(dead_code)]
     pub fn cap(&self) -> usize {
         self.cap
     }
