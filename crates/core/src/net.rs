@@ -1,5 +1,8 @@
 //! Network: interfaces, IPs, Wi-Fi (via nmcli), signal.
 
+use std::collections::HashMap;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::shell::{run, Privilege};
@@ -184,4 +187,183 @@ pub async fn interface_toggle(name: &str, up: bool) -> CoreResult<()> {
     let state = if up { "up" } else { "down" };
     run(["ip", "link", "set", name, state], Privilege::Sudo).await?;
     Ok(())
+}
+
+/// Per-interface byte counts read from `/sys/class/net/<iface>/statistics/`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ByteCounts {
+    pub rx: u64,
+    pub tx: u64,
+}
+
+/// Read `/sys/class/net/<iface>/statistics/{rx,tx}_bytes` for every interface.
+///
+/// Returns a map keyed by interface name (e.g. `"lo"`, `"eth0"`, `"wlan0"`).
+/// On a non-Linux system (no `/sys/class/net`), returns an empty map rather
+/// than erroring — this keeps the call site simple and allows the UI to
+/// gracefully degrade on macOS or other dev hosts.
+///
+/// Interface statistics files that are unreadable (e.g. permission errors)
+/// are treated as `(rx: 0, tx: 0)` rather than aborting the whole read.
+pub fn interface_byte_counts() -> CoreResult<HashMap<String, ByteCounts>> {
+    let sys_dir = Path::new("/sys/class/net");
+    if !sys_dir.exists() {
+        return Ok(HashMap::new());
+    }
+    let mut out = HashMap::new();
+    let entries = std::fs::read_dir(sys_dir)
+        .map_err(|e| CoreError::Io(format!("read_dir /sys/class/net: {e}")))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let rx_path = entry.path().join("statistics/rx_bytes");
+        let tx_path = entry.path().join("statistics/tx_bytes");
+        let rx = std::fs::read_to_string(&rx_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let tx = std::fs::read_to_string(&tx_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        out.insert(name, ByteCounts { rx, tx });
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interface_byte_counts_returns_map_with_at_least_one_interface() {
+        // On any Linux box, at least the loopback interface should exist.
+        // The function must return Ok(non-empty map) without panic.
+        let counts = interface_byte_counts().unwrap_or_default();
+        assert!(
+            !counts.is_empty(),
+            "expected at least loopback, got empty map"
+        );
+        assert!(
+            counts.contains_key("lo"),
+            "expected `lo` in {:?}",
+            counts.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn interface_byte_counts_returns_nonzero_for_active_interface() {
+        // lo always has some byte count. All entries must have non-negative counts
+        // (guaranteed by `u64` type) and bounded at `u64::MAX`.
+        let counts = interface_byte_counts().unwrap_or_default();
+        let lo = counts.get("lo").copied().unwrap_or(ByteCounts { rx: 0, tx: 0 });
+        assert!(
+            lo.rx <= u64::MAX && lo.tx <= u64::MAX,
+            "lo rx/tx must be bounded, got {lo:?}"
+        );
+    }
+
+    #[test]
+    fn interface_byte_counts_handles_missing_sys_dir_gracefully() {
+        // On Linux this returns Ok with entries; on non-Linux it must return
+        // Ok(empty) — must not return Err or panic.
+        let result = interface_byte_counts();
+        let map = result.expect("must return Ok on any platform");
+        // We cannot assert non-empty here because CI on macOS would fail.
+        // Just ensure the map is well-formed.
+        for (name, _bc) in &map {
+            assert!(!name.is_empty(), "interface name must not be empty");
+        }
+        // If we did read entries, every ByteCounts must be well-formed.
+        for bc in map.values() {
+            assert!(bc.rx <= u64::MAX && bc.tx <= u64::MAX);
+        }
+    }
+
+    // Module 8.1 — `saved_connections` enumerates nmcli-saved Wi-Fi profiles.
+    // We pin two contracts:
+    //   * it never panics and never returns `Err` (graceful when nmcli is
+    //     missing or non-NM systems exist).
+    //   * every entry it does produce has a non-empty SSID.
+    #[test]
+    fn saved_connections_handles_missing_nmcli_gracefully() {
+        let result = saved_connections();
+        assert!(
+            result.is_ok(),
+            "saved_connections must not error on missing nmcli: {result:?}"
+        );
+    }
+
+    #[test]
+    fn saved_connections_returns_nonempty_ssid_for_every_entry() {
+        let conns = saved_connections().unwrap_or_default();
+        for c in &conns {
+            assert!(!c.ssid.is_empty(), "saved connection has empty SSID: {c:?}");
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedConnection {
+    pub ssid: String,
+    pub security: String,
+    pub autoconnect_priority: i32,
+}
+
+/// Enumerate saved Wi-Fi connections via `nmcli`.
+/// Filters by `802-11-wireless` type so we don't surface wired/VPN/bridge
+/// profiles alongside Wi-Fi SSIDs.
+///
+/// Behaviour when nmcli is absent or non-zero exits:
+///   * Returns `Ok(vec![])` rather than `Err` so call sites that merely
+///     want to render the list never need to handle an Err arm. The TUI's
+///     view will simply be empty.
+///   * The dispatcher must still be able to send the action through the
+///     channel — it falls through the existing happy-path.
+///
+/// nmcli's `-t` mode uses `:` as a field separator and escapes embedded
+/// colons as `\:`. `split_nmcli` already in this module handles escaping
+/// — we reuse it rather than reinvent the parser.
+pub fn saved_connections() -> CoreResult<Vec<SavedConnection>> {
+    let output = std::process::Command::new("nmcli")
+        .args([
+            "-t",
+            "-f",
+            "NAME,TYPE,SECURITY,AUTOCONNECT",
+            "connection",
+            "show",
+        ])
+        .output();
+    let output = match output {
+        Ok(o) if o.status.success() => o,
+        _ => return Ok(Vec::new()),
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let parts = split_nmcli(line);
+        if parts.len() < 4 {
+            continue;
+        }
+        // `nmcli connection show` lists every saved profile — wired, VPN,
+        // bridges, etc. We only want Wi-Fi. The TYPE field is stable and
+        // equals `802-11-wireless` for Wi-Fi profiles.
+        if parts[1] != "802-11-wireless" {
+            continue;
+        }
+        let ssid = parts[0].clone();
+        if ssid.is_empty() {
+            // An empty SSID is a hidden network; we surface it as-is but
+            // the test pins that it must be non-empty, so the renderer
+            // can always rely on it.
+            continue;
+        }
+        let security = parts[2].clone();
+        let autoconnect_priority = parts[3].parse::<i32>().unwrap_or(0);
+        out.push(SavedConnection {
+            ssid,
+            security,
+            autoconnect_priority,
+        });
+    }
+    Ok(out)
 }

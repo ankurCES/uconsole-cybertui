@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod bluetooth;
 pub mod display;
+pub mod logs;
 pub mod net;
 pub mod packages;
 pub mod power;

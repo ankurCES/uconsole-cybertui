@@ -27,6 +27,7 @@ use cyberdeck_core::net::Interface;
 use cyberdeck_core::packages::Package;
 use cyberdeck_core::power::Battery;
 use cyberdeck_core::process::Process;
+use cyberdeck_core::process::ProcEntry;
 use cyberdeck_core::services::Service;
 use cyberdeck_core::storage::Filesystem;
 use cyberdeck_core::sys::SystemInfo;
@@ -36,7 +37,21 @@ use tokio::time::interval;
 
 pub use action::Action;
 pub use screen::ScreenId;
-pub use toast::Toast;
+pub use toast::{Toast, ToastKind};
+
+// Module 7 — toast history ring (capped at 200 entries). Each entry records
+// when the toast was emitted so the modal can render an HH:MM:SS prefix.
+#[derive(Debug, Clone)]
+pub struct ToastEntry {
+    pub ts: chrono::DateTime<chrono::Local>,
+    pub kind: ToastKind,
+    pub message: String,
+}
+
+/// Hard cap on `App::toast_history`. When the ring is full, `push_toast`
+/// drops the oldest entry. 200 is large enough to cover a busy session
+/// (~3 minutes of one toast/sec) without bloating memory.
+pub const TOAST_HISTORY_CAP: usize = 200;
 
 #[derive(Debug)]
 pub enum Modal {
@@ -91,6 +106,10 @@ pub enum Modal {
         stderr: String,
         retry: Box<Modal>,
     },
+    /// Module 7.2 — scrollable history of past toasts. Newest-first;
+    /// `App::toast_log_offset` is the scroll position (0 = tail). Opens
+    /// via the global `T` key, closes on Esc.
+    ToastLog,
 }
 
 #[derive(Debug)]
@@ -142,6 +161,13 @@ pub enum InputKind {
     /// handler drops non-digit chars at the buffer-insert step so the
     /// user can't accidentally type letters into a passkey field.
     BluetoothPasskey,
+    /// Module 3 — search query for the Packages screen. The submit
+    /// handler stashes the trimmed value on `App::packages_search_query`
+    /// so the Packages screen's render loop can pick it up and fire
+    /// `cyberdeck_core::packages::search(&query)`. Tasks 3.2–3.4 wire
+    /// the modal UI + `/` hotkey on the Packages screen itself; this
+    /// variant is just the variant + dispatch plumbing.
+    PackageSearch,
 }
 
 #[derive(Debug)]
@@ -252,6 +278,9 @@ impl Live {
     /// Each field has its own cadence — system/thermal every second, services
     /// and processes every five, packages on demand.
     pub fn spawn_refreshers(self: &Arc<Self>, tx: mpsc::Sender<Action>) {
+        // Clone the sender up-front so multiple spawned tasks can each
+        // hold their own handle. Tokio's `mpsc::Sender` is `Clone`.
+        let tx_tick = tx.clone();
         let me = self.clone();
         tokio::spawn(async move {
             let mut t = interval(Duration::from_secs(1));
@@ -272,7 +301,57 @@ impl Live {
                 if let Ok(ssid) = cyberdeck_core::net::wifi_active_ssid().await {
                     *me.active_ssid.write().await = ssid;
                 }
-                let _ = tx.send(Action::Tick).await;
+                let _ = tx_tick.send(Action::Tick).await;
+            }
+        });
+
+        // Module 2.2 — recent-logs refiller. Runs at 1Hz, polling the last
+        // 2s of journal entries. Successive calls overlap heavily (the
+        // `recent_since(2)` window slides forward by 1s each tick), so
+        // dedupe by (ts, message) happens in the `LogPushed` dispatcher
+        // arm rather than here. We push each new line as its own
+        // `LogPushed` action so the dispatcher can dedupe in order and
+        // the UI gets a chance to redraw on each line.
+        //
+        // Module 2.3 — `recent_since` now returns `(DateTime<Utc>, String)`
+        // tuples parsed from journalctl's `--output=json` (`__REALTIME_TIMESTAMP`
+        // in microseconds since the epoch). The timestamp is the event's
+        // real time, not fetch time, so the rendered line on the Logs /
+        // System screens reflects when the entry actually happened, even
+        // if the poller ran behind.
+        //
+        // Failure modes (journalctl missing, no perms, quiet box): we
+        // log at debug and continue. The refiller never errors out —
+        // a transient failure shouldn't kill the live feed.
+        let tx_logs = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(1));
+            // Skip ticks that fall behind rather than burst-fire to
+            // catch up; on a heavily loaded box this prevents the
+            // refiller from monopolising the channel.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                t.tick().await;
+                let entries = match cyberdeck_core::logs::recent_since(2).await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::debug!("logs::recent_since failed: {e}");
+                        continue;
+                    }
+                };
+                for (ts, message) in entries {
+                    if message.is_empty() {
+                        continue;
+                    }
+                    let line = LogLine {
+                        ts: ts.with_timezone(&Local),
+                        message,
+                    };
+                    if tx_logs.send(Action::LogPushed(line)).await.is_err() {
+                        // Receiver dropped — app is shutting down.
+                        break;
+                    }
+                }
             }
         });
 
@@ -314,13 +393,155 @@ impl Live {
                 if let Ok(v) = bt   { *me.bluetooth.write().await   = v; }
             }
         });
+
+        // Module 6.2 — 15s refiller that snapshots /proc with ppid for
+        // the System screen's process-tree view. Sits on its own loop so
+        // a hiccup in the I/O here can't hitch the existing 15s block
+        // (which already serializes fs/proc/dsp/aud/bt via `tokio::join!`).
+        //
+        // We off-load the synchronous /proc walk to `spawn_blocking` —
+        // the read of every `/proc/<pid>/{stat,cmdline}` is regular
+        // blocking I/O. Running it on the runtime worker would tie up a
+        // worker for the whole walk (~100s of small reads on a busy
+        // box); `spawn_blocking` hands it to the blocking-thread pool.
+        //
+        // On any error (non-Linux box, /proc missing, unreadable) we
+        // fall back to an empty snapshot so the next render shows
+        // "(no processes)" rather than crashing the dispatcher.
+        let tx_proc = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(15));
+            // Skip ticks that fall behind rather than burst-fire; mirrors
+            // the logs + network samplers above.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                t.tick().await;
+                let procs = tokio::task::spawn_blocking(|| {
+                    cyberdeck_core::process::list_with_ppid().unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                if tx_proc
+                    .send(Action::ProcTreeRefreshed(procs))
+                    .await
+                    .is_err()
+                {
+                    // Receiver dropped — main loop is shutting down.
+                    return;
+                }
+            }
+        });
+
+        // Module 5.3 — 1Hz network sampler. Reads every active network
+        // interface's cumulative RX/TX byte counts from
+        // `/sys/class/net/<iface>/statistics/{rx,tx}_bytes`, computes
+        // the per-second delta against the previous sample, and pushes
+        // each (iface, rx_d, tx_d) tuple into `App::net_history` via
+        // the `Action::NetSample` dispatcher arm. The header chip
+        // (Module 5.4) reads those rings on every frame.
+        //
+        // We use `tokio::task::spawn_blocking` because the sysfs read
+        // is synchronous I/O — even though `/sys/class/net` is
+        // pseudo-filesystem backed by the kernel, `std::fs::read_to_string`
+        // still has to wait for the VFS to format the page, and we
+        // don't want to pin one of the runtime's worker threads.
+        //
+        // First sample is intentionally a no-op delta: we have no
+        // `prev` to subtract against, so we just record the baseline
+        // and the next tick produces the first real `rx_d / tx_d`.
+        // Saturating subtraction handles the corner case where the
+        // counter has rolled (32-bit `/proc/net/dev` overflow — rare
+        // on modern 64-bit counters but possible for low-rate links).
+        let tx_net = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(1));
+            // Skip ticks that fall behind rather than burst-fire;
+            // mirrors the logs refiller above.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut prev: std::collections::HashMap<
+                String,
+                cyberdeck_core::net::ByteCounts,
+            > = std::collections::HashMap::new();
+            loop {
+                t.tick().await;
+                let curr = tokio::task::spawn_blocking(|| {
+                    cyberdeck_core::net::interface_byte_counts()
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                // Capture baseline on first tick — every delta is 0 in
+                // this round, but the next tick has a real prev to
+                // subtract against.
+                if prev.is_empty() {
+                    prev = curr;
+                    continue;
+                }
+                let mut any_sent = false;
+                for (name, bc) in &curr {
+                    let (rx_d, tx_d) = match prev.get(name) {
+                        Some(p) => (
+                            bc.rx.saturating_sub(p.rx),
+                            bc.tx.saturating_sub(p.tx),
+                        ),
+                        None => (0, 0),
+                    };
+                    if tx_net
+                        .send(Action::NetSample {
+                            iface: name.clone(),
+                            rx_delta: rx_d,
+                            tx_delta: tx_d,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        // Receiver dropped — main loop is shutting down.
+                        return;
+                    }
+                    any_sent = true;
+                }
+                prev = curr;
+                // Suppress the unused warning on `any_sent` while
+                // documenting why we still keep the result.
+                let _ = any_sent;
+            }
+        });
+
+        // Module 8.2 — 30s refiller that lists every saved Wi-Fi profile
+        // via `cyberdeck_core::net::saved_connections`. We off-load to
+        // `spawn_blocking` because the call shells out to `nmcli` (sync
+        // child process) and we don't want to pin a runtime worker for
+        // the duration. 30s is well above the perceived "real-time"
+        // threshold — saved profiles rarely change during a session,
+        // and the user can always press `s`/rescan for an instant read.
+        let tx_saved = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(30));
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                t.tick().await;
+                let conns = tokio::task::spawn_blocking(|| {
+                    cyberdeck_core::net::saved_connections().unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                if tx_saved
+                    .send(Action::SavedConnectionsRefreshed(conns))
+                    .await
+                    .is_err()
+                {
+                    // Receiver dropped — main loop is shutting down.
+                    return;
+                }
+            }
+        });
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LogLine {
     pub ts: chrono::DateTime<Local>,
-    pub line: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +567,23 @@ pub struct App {
     /// with Enter. `current` is what's actually rendered in the content
     /// pane; `sidebar_idx` is what's highlighted in the menu.
     pub sidebar_idx: usize,
+    /// Scroll offset for the sidebar list — the index of the topmost
+    /// visible item. Kept in lockstep with `sidebar_idx` so that on
+    /// short terminals (where the sidebar can't fit all `ScreenId`s)
+    /// the highlighted entry is always inside the visible window.
+    /// A pure cursor move without adjusting this leaks items off the
+    /// top of the pane. See `crates/tui/src/ui/mod.rs::sidebar_clamps_offset_*`
+    /// for the clamp contract.
+    pub sidebar_offset: usize,
+    /// Visible row count for the sidebar — set by the renderer after
+    /// computing it from the layout area and read by the Up/Down handlers
+    /// so cursor (`sidebar_idx`) and offset (`sidebar_offset`) stay in
+    /// sync. Defaults to 0, which `clamp_sidebar_offset` treats as "no
+    /// window" and collapses `sidebar_offset` to 0 — this guarantees that
+    /// before the first frame renders, no spurious offset survives into
+    /// the handler. Single source of truth for the visible-row count;
+    /// never recomputed in handlers.
+    pub sidebar_visible: usize,
     /// Which region of the TUI currently holds key focus. The redesign
     /// replaces the previous single-`bool` model with three explicit
     /// regions so D-pad navigation is deterministic:
@@ -378,6 +616,17 @@ pub struct App {
     pub palette_buf: String,
     pub palette_idx: usize,
     pub toasts: Vec<Toast>,
+    /// Module 7 — persistent history of every toast ever shown, capped at
+    /// `TOAST_HISTORY_CAP`. Unlike `toasts` (which `cleanup_toasts` ages out
+    /// after the TTL expires), this ring survives for the life of the
+    /// process and is the data source for the `Modal::ToastLog` overlay
+    /// (opened by capital-T). Newest entry at the back; the modal renders
+    /// in reverse for newest-first ordering.
+    pub toast_history: std::collections::VecDeque<ToastEntry>,
+    /// Module 7.2 — scroll offset for `Modal::ToastLog`. `0` = newest at
+    /// the top (tail). Growing values scroll up toward older entries;
+    /// clamped to `total - visible` so we never show a blank window.
+    pub toast_log_offset: usize,
     /// One-shot guard for the first-launch welcome toast. Set to true the
     /// first time `Action::Tick` runs, so the welcome fires exactly once
     /// per process even though `Action::Tick` ticks forever. Mirrors
@@ -392,6 +641,14 @@ pub struct App {
     pub net_selected: usize,
     pub net_show_wifi: bool,
     pub wifi_scan_results: Vec<cyberdeck_core::net::WifiNetwork>,
+    /// Module 8.2 — when true and on the Network screen, render the
+    /// saved-Wi-Fi pane on the right. Toggled by `s`. Off by default so
+    /// the existing 60/40 iface/wifi layout is unaffected.
+    pub net_show_saved: bool,
+    /// Module 8.2 — known saved Wi-Fi profiles, refreshed every 30s by
+    /// a dedicated tokio task. Read by the render path on every frame;
+    /// the dispatcher overwrites the `Vec` wholesale on each tick.
+    pub saved_connections: Vec<cyberdeck_core::net::SavedConnection>,
     pub bt_selected: usize,
     /// Sink currently highlighted on the Audio screen.
     pub audio_selected: usize,
@@ -412,6 +669,11 @@ pub struct App {
     pub pkg_search_offset: usize,
     pub pkgs_filter: String,
     pub pkg_search_results: Vec<Package>,
+    /// Module 3 — when `Some`, the Packages screen filters by this query.
+    /// Set by the `InputKind::PackageSearch` submit handler in `main.rs`
+    /// (`run_input`). The Packages screen's render loop reads this each
+    /// frame; tasks 3.2–3.4 wire the render-time poll.
+    pub packages_search_query: Option<String>,
     pub theme_name: screen::ThemeNameReexport,
     pub mouse: bool,
     pub show_help: bool,
@@ -474,6 +736,25 @@ pub struct App {
     /// `true` when the underlying transport has an active serial handle.
     /// Drives the connect/disconnect dot in the input strip.
     pub mesh_connected: bool,
+    /// Last 60 seconds of RX/TX byte counts per interface. Updated at
+    /// 1Hz by the network sampler in `Live::spawn_refreshers`. Key =
+    /// interface name (e.g. `"eth0"`, `"wlan0"`); value = `(rx ring,
+    /// tx ring)` of byte deltas, oldest-to-newest. The header sparkline
+    /// (Module 5.4) reads the RX ring of the active interface. Empty
+    /// until the sampler has run at least once.
+    pub net_history: std::collections::HashMap<String, (crate::util::ring::RingU64, crate::util::ring::RingU64)>,
+    /// Module 6 — System screen's process tree. Populated by the 15s
+    /// refiller in `Live::spawn_refreshers` (Module 6.2) via
+    /// `Action::ProcTreeRefreshed`. The render reads this each frame
+    /// when `proc_tree_view` is true and turns the flat list into an
+    /// indented tree (Module 6.3). Empty by default — first refresh
+    /// lands ~15s after startup.
+    pub proc_tree: Vec<ProcEntry>,
+    /// Module 6 — when true and on the System screen, render the
+    /// indented process tree instead of the default facts pane. Toggled
+    /// with `t`. Default false so the existing System facts view is
+    /// the boot-time state.
+    pub proc_tree_view: bool,
 }
 
 /// Tiny shim so the TUI can depend on a single `cyberdeck_core::files` module
@@ -534,6 +815,55 @@ impl Region {
     }
 }
 
+/// Append `incoming` to `buf`, dropping any entry whose `(ts, message)`
+/// is already present (or whose `message` is empty). Preserves order:
+/// existing entries stay in place, then truly-new entries are appended.
+/// Once `buf.len()` exceeds `cap`, the oldest entries are dropped from
+/// the front.
+///
+/// Why this exists: the 1Hz logs refiller (Module 2.2) calls
+/// `recent_since(2)` every second. Each call returns up to 200 lines from
+/// the last 2s, so successive calls overlap heavily. Without dedupe the
+/// buffer would fill with duplicates and trip the cap within a few
+/// seconds, masking real new entries.
+///
+/// We key on the full `LogLine` (timestamp + message) rather than on the
+/// message alone: since Module 2.3, `ts` carries the journalctl-native
+/// `__REALTIME_TIMESTAMP` (UTC microseconds), so a genuine re-emission of
+/// the same message at a later moment — e.g. a watchdog retry — is treated
+/// as a new line, while exact replays within the 2s dedupe window are
+/// dropped. `LogLine` derives `Hash + Eq` so we can use a `HashSet<LogLine>`
+/// directly.
+pub(crate) fn dedupe_logs_into(
+    buf: &mut Vec<LogLine>,
+    incoming: Vec<LogLine>,
+    cap: usize,
+) {
+    if cap == 0 {
+        return;
+    }
+    // Build an owned HashSet of existing entries. A reference version
+    // would clash with the subsequent `buf.push(line)` because Rust
+    // treats them as overlapping borrows of the same `Vec`. Cloning the
+    // small `LogLine`s is cheap relative to the cap-sized buffer this
+    // function is called with.
+    let mut existing: std::collections::HashSet<LogLine> = buf.iter().cloned().collect();
+    for line in incoming {
+        if line.message.is_empty() {
+            continue;
+        }
+        if !existing.insert(line.clone()) {
+            // Already present — `insert` returned false, drop the dup.
+            continue;
+        }
+        buf.push(line);
+    }
+    if buf.len() > cap {
+        let drop = buf.len() - cap;
+        buf.drain(0..drop);
+    }
+}
+
 impl App {
     pub fn new(tx: mpsc::Sender<Action>, rx: mpsc::Receiver<Action>) -> Self {
         Self {
@@ -543,6 +873,11 @@ impl App {
             modal: Modal::None,
             sidebar_focused: true,
             sidebar_idx: 0,
+            sidebar_offset: 0,
+            // Renderer overwrites this on every frame; 0 means "no
+            // window yet" and is the safe default (clamp collapses the
+            // offset to 0 instead of leaking it).
+            sidebar_visible: 0,
             // Default region on launch is the sidebar — that's the natural
             // D-pad start (user sees the screen list and moves with ↑/↓).
             // `switch_screen` flips to `ContentLeft` when a screen commits.
@@ -550,6 +885,13 @@ impl App {
             palette_buf: String::new(),
             palette_idx: 0,
             toasts: Vec::new(),
+            // Module 7.1 — toast history ring. Empty until the first
+            // `push_toast` call; cap enforced by `push_toast` itself so
+            // construction stays cheap.
+            toast_history: std::collections::VecDeque::new(),
+            // Module 7.2 — scroll offset for the ToastLog modal. 0 means
+            // "showing newest first"; `T` re-zeroes this on every open.
+            toast_log_offset: 0,
             boot_toast_sent: false,
             logs: Vec::new(),
             logs_filter: String::new(),
@@ -559,6 +901,13 @@ impl App {
             net_selected: 0,
             net_show_wifi: false,
             wifi_scan_results: Vec::new(),
+            // Module 8.2 — saved-Wi-Fi pane: off by default so the
+            // existing 60/40 iface/wifi layout is unchanged unless the
+            // user opts in with `s`. Empty Vec until the 30s refiller
+            // first fires; the render path degrades to "(loading…)" in
+            // that case.
+            net_show_saved: false,
+            saved_connections: Vec::new(),
             bt_selected: 0,
             audio_selected: 0,
             display_selected: 0,
@@ -570,6 +919,7 @@ impl App {
             pkg_search_offset: 0,
             pkgs_filter: String::new(),
             pkg_search_results: Vec::new(),
+            packages_search_query: None,
             theme_name: screen::ThemeNameReexport::Dark,
             mouse: true,
             show_help: false,
@@ -602,6 +952,15 @@ impl App {
             mesh_chat_offset: 0,
             mesh_input: String::new(),
             mesh_connected: false,
+            // Module 5.2 — initialise empty. The 1Hz refiller populates
+            // this on its first tick; the header sparkline falls back to
+            // a dashed placeholder until something lands.
+            net_history: std::collections::HashMap::new(),
+            // Module 6 — process tree snapshot. Empty until the 15s
+            // refiller (Module 6.2) fires; `t` on the System screen
+            // toggles the tree view.
+            proc_tree: Vec::new(),
+            proc_tree_view: false,
         }
     }
 
@@ -616,6 +975,24 @@ impl App {
     pub fn set_region(&mut self, r: Region) {
         self.region = r;
         self.sidebar_focused = r == Region::Sidebar;
+    }
+
+    /// Advance/retreat `sidebar_offset` so the cursor at `sidebar_idx`
+    /// is always visible inside a window of `visible` rows. Top-aligned:
+    /// shifts only when the cursor scrolls past the bottom edge of the
+    /// visible window. Called by the sidebar Up/Down handlers in main.rs.
+    pub fn clamp_sidebar_offset(&mut self, total: usize, visible: usize) {
+        if visible == 0 || total <= visible {
+            self.sidebar_offset = 0;
+            return;
+        }
+        let max_off = total - visible;
+        let desired = if self.sidebar_idx >= visible {
+            (self.sidebar_idx - visible + 1).min(max_off)
+        } else {
+            0
+        };
+        self.sidebar_offset = desired;
     }
 
     /// Shortcut to open a `Modal::Input` with the given prompt and kind.
@@ -676,7 +1053,68 @@ impl App {
     }
 
     pub fn push_toast(&mut self, kind: toast::ToastKind, msg: impl Into<String>) {
-        self.toasts.push(Toast::new(kind, msg.into()));
+        let text = msg.into();
+        // Module 7.1 — append to the persistent history ring FIRST so the
+        // entry is preserved even if the visible toast ages out via TTL.
+        let entry = ToastEntry {
+            ts: chrono::Local::now(),
+            kind,
+            message: text.clone(),
+        };
+        self.toast_history.push_back(entry);
+        while self.toast_history.len() > TOAST_HISTORY_CAP {
+            self.toast_history.pop_front();
+        }
+        self.toasts.push(Toast::new(kind, text));
+    }
+
+    /// Module 5.3 — apply a `Action::NetSample` to `net_history`.
+    /// Lazily creates the per-interface `(rx, tx)` ring pair on first
+    /// sighting, then pushes the deltas. Returns the new RX ring length
+    /// so tests can assert; production callers ignore the return.
+    ///
+    /// Pulled out of `handle_action` so unit tests don't have to
+    /// construct an `mpsc::Sender` + screens slice to verify the
+    /// dispatcher behaviour.
+    pub fn apply_net_sample(
+        &mut self,
+        iface: &str,
+        rx_delta: u64,
+        tx_delta: u64,
+    ) -> usize {
+        let entry = self
+            .net_history
+            .entry(iface.to_string())
+            .or_insert_with(|| {
+                (
+                    crate::util::ring::RingU64::new(60),
+                    crate::util::ring::RingU64::new(60),
+                )
+            });
+        entry.0.push(rx_delta);
+        entry.1.push(tx_delta);
+        entry.0.len()
+    }
+
+    /// Module 6.2 — apply a `Action::ProcTreeRefreshed` to `App::proc_tree`.
+    /// Wholesale replacement: the snapshot is the canonical picture of
+    /// /proc at one moment, so a merge would just have to undo the
+    /// previous tick's removals. Extracted from `handle_action` so the
+    /// 15s refiller's contract is unit-testable without a full mpsc
+    /// pair + screens slice.
+    pub fn apply_proc_tree(&mut self, procs: Vec<ProcEntry>) {
+        self.proc_tree = procs;
+    }
+
+    /// Test-only dispatcher arm for `Action::ProcTreeRefreshed`. Mirrors
+    /// the body of the real dispatcher arm in `main.rs`; production
+    /// callers should use the dispatcher, but unit tests use this to
+    /// avoid the full mpsc + screens slice setup.
+    #[doc(hidden)]
+    pub fn handle_action_for_test(&mut self, action: Action) {
+        if let Action::ProcTreeRefreshed(procs) = action {
+            self.apply_proc_tree(procs);
+        }
     }
 
     pub fn cleanup_toasts(&mut self) {
@@ -806,5 +1244,398 @@ mod tests {
         assert_eq!(panes.len(), 1);
         let w = app.manager.window(app.manager.focused()).unwrap();
         assert_eq!(w.kind, crate::wm::window::WindowKind::Builtin(ScreenId::System));
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 1.5 — `sidebar_visible` is the single source of truth for the
+    // sidebar's visible-row count, set by the renderer and read by the Up/Down
+    // handlers. These tests pin the contract of `clamp_sidebar_offset` against
+    // realistic `(total, visible, offset, idx)` tuples so the handler can
+    // trust `app.sidebar_visible` and the renderer can write to it without
+    // re-checking arithmetic on its own.
+    //
+    // Why pin these here: the previous handler called
+    // `clamp_sidebar_offset(total, total)` which is a no-op (offset already
+    // clamped at 0 when all rows fit). The bug was that on short terminals
+    // the offset never advanced, so overflow rows were invisible but
+    // selectable. The fix is for the renderer to record `visible` and the
+    // handler to pass it through; these tests lock the arithmetic so neither
+    // side can silently regress.
+    // -------------------------------------------------------------------------
+
+    fn fresh_app() -> App {
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        App::new(tx, rx)
+    }
+
+    #[test]
+    fn sidebar_down_advances_offset_when_cursor_exits_visible_window() {
+        // total=15, visible=5, offset starts at 0, idx at 4 (last row of
+        // window [0..5)). After Down: idx=5, which exits the bottom of
+        // the window. `clamp_sidebar_offset` must advance offset to 1
+        // so the cursor stays visible.
+        let mut app = fresh_app();
+        app.sidebar_idx = 4;
+        app.sidebar_offset = 0;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        // Initial clamp at idx=4 (inside the window) — offset stays 0.
+        assert_eq!(app.sidebar_offset, 0);
+        // Simulate Down: idx += 1, then clamp with the renderer's
+        // recorded visible count.
+        app.sidebar_idx = (app.sidebar_idx + 1).min(14);
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_idx, 5);
+        assert_eq!(
+            app.sidebar_offset, 1,
+            "offset must advance when cursor exits bottom"
+        );
+    }
+
+    #[test]
+    fn sidebar_up_advances_offset_when_cursor_still_below_window_top() {
+        // total=15, visible=5, offset=3, idx=10 is an INVALID pre-state
+        // (cursor 10 is outside window [3..8)). `clamp_sidebar_offset`
+        // must immediately correct offset to 6 so the cursor lives
+        // inside [6..11). After Up: idx=9; clamp must retreat offset
+        // to 5 (window [5..10) contains idx=9).
+        let mut app = fresh_app();
+        app.sidebar_idx = 10;
+        app.sidebar_offset = 3;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 6,
+            "clamp actively advances offset to keep idx visible"
+        );
+        app.sidebar_idx -= 1; // 9
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 5,
+            "offset retreats as cursor re-enters from above"
+        );
+    }
+
+    #[test]
+    fn sidebar_up_retreats_offset_when_cursor_re_enters_window_top() {
+        // total=15, visible=5.
+        // Start: idx=10 — outside any sensible window so clamp picks the
+        // minimum offset that keeps idx visible: desired=(10-5+1).min(10)=6.
+        // Window is [6..11), contains idx=10. ✓
+        // After Up: idx=9 → desired=5. Offset retreats 6→5.
+        // After Up: idx=8 → desired=4. Offset retreats 5→4.
+        // After Up: idx=4 → idx<visible so desired=0. Full collapse.
+        // This pins the retreat contract: each Up moves the offset closer
+        // to 0 as long as the cursor stays visible.
+        let mut app = fresh_app();
+        app.sidebar_idx = 10;
+        app.sidebar_offset = 0;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 6, "minimum offset for idx=10");
+
+        app.sidebar_idx = 9;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 5, "retreats as cursor moves up");
+
+        app.sidebar_idx = 8;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(app.sidebar_offset, 4, "continues retreating");
+
+        app.sidebar_idx = 4;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 0,
+            "collapses to 0 once idx drops below visible"
+        );
+    }
+
+    #[test]
+    fn sidebar_visible_defaults_to_zero_and_clamp_clamps_offset_to_zero() {
+        // Before the first frame renders, `sidebar_visible` is still 0.
+        // `clamp_sidebar_offset` treats 0 visible as "no window" and
+        // collapses `sidebar_offset` to 0 — guaranteeing the handler
+        // can't leak an old offset into the first render.
+        let mut app = fresh_app();
+        assert_eq!(app.sidebar_visible, 0, "default visible is 0");
+        app.sidebar_offset = 99;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 0,
+            "visible=0 collapses any prior offset to 0"
+        );
+    }
+
+    #[test]
+    fn sidebar_offset_clamps_to_total_minus_visible_when_cursor_at_end() {
+        // Boundary: cursor at the very last index, offset must saturate
+        // at total - visible (10 in this case), never overshoot.
+        let mut app = fresh_app();
+        app.sidebar_idx = 14; // last
+        app.sidebar_offset = 0;
+        app.sidebar_visible = 5;
+        app.clamp_sidebar_offset(15, app.sidebar_visible);
+        assert_eq!(
+            app.sidebar_offset, 10,
+            "offset saturates at total - visible"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 2.2 — `dedupe_logs_into` keeps the recent-logs buffer free of
+    // duplicates when a periodic refiller polls an overlapping window. The
+    // refiller calls `recent_since(2)` once per second; each call may return
+    // lines already in the buffer. The helper drops those before pushing,
+    // then enforces the cap by dropping the oldest entries.
+    //
+    // Module 2.3 updated the dedupe key to be the full `LogLine` (ts +
+    // message) instead of the message alone. The ts now carries the
+    // journalctl-native timestamp, so two entries with the same message
+    // at different times (e.g. a watchdog retry) count as distinct lines,
+    // while exact replays within the dedupe window are dropped. Tests use
+    // a fixed `Local::now()` reference so the helper sees stable
+    // `LogLine`s and we can assert content rather than pointer equality.
+    // -------------------------------------------------------------------------
+
+    /// Build a `LogLine` with a fixed timestamp so two `ll(..)` calls with
+    /// the same message compare equal — mirroring what the live refiller
+    /// sees when journalctl hands us the same entry twice.
+    fn ll(s: &str) -> LogLine {
+        let ts: chrono::DateTime<Local> = "2024-01-01T00:00:00+00:00".parse().unwrap();
+        LogLine {
+            ts,
+            message: s.into(),
+        }
+    }
+
+    /// Build a `LogLine` with a fresh local timestamp, simulating a
+    /// journalctl re-emission of the same message at a later moment
+    /// (e.g. a retry). Different `ts` ⇒ distinct `LogLine` ⇒ kept.
+    fn ll_at(s: &str, secs_offset: i64) -> LogLine {
+        let ts = Local::now() + chrono::Duration::seconds(secs_offset);
+        LogLine {
+            ts,
+            message: s.into(),
+        }
+    }
+
+    #[test]
+    fn dedupe_logs_into_skips_lines_already_in_buffer() {
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll("a"), ll("b")], 100);
+        assert_eq!(
+            buf.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // "b" is a duplicate (same ts, same message); only "c" should be
+        // appended.
+        dedupe_logs_into(&mut buf, vec![ll("b"), ll("c")], 100);
+        assert_eq!(
+            buf.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn dedupe_logs_into_treats_re_emissions_at_later_times_as_new() {
+        // Regression guard for Module 2.3: when the dedupe key is
+        // (ts, message) — not just message — the same message at a
+        // different journal timestamp must be kept.
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll("retry")], 100);
+        dedupe_logs_into(&mut buf, vec![ll_at("retry", 5)], 100);
+        assert_eq!(buf.len(), 2, "later ts with same message must be kept");
+        assert_eq!(buf[0].message, "retry");
+        assert_eq!(buf[1].message, "retry");
+        assert_ne!(buf[0].ts, buf[1].ts);
+    }
+
+    #[test]
+    fn dedupe_logs_into_caps_at_max_size_dropping_oldest() {
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll("a"), ll("b"), ll("c")], 3);
+        assert_eq!(buf.len(), 3);
+        dedupe_logs_into(&mut buf, vec![ll("d")], 3);
+        assert_eq!(
+            buf.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["b", "c", "d"]
+        );
+    }
+
+    #[test]
+    fn dedupe_logs_into_handles_empty_input() {
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, Vec::new(), 100);
+        assert!(buf.is_empty());
+        dedupe_logs_into(&mut buf, vec![ll("x")], 100);
+        dedupe_logs_into(&mut buf, Vec::new(), 100);
+        assert_eq!(
+            buf.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["x"]
+        );
+    }
+
+    #[test]
+    fn dedupe_logs_into_drops_empty_lines() {
+        // Empty journalctl lines would otherwise accumulate and bloat the
+        // buffer — they're never useful in the UI. Dedupe must skip them.
+        let mut buf: Vec<LogLine> = Vec::new();
+        dedupe_logs_into(&mut buf, vec![ll(""), ll(""), ll("real")], 100);
+        assert_eq!(
+            buf.iter().map(|l| l.message.as_str()).collect::<Vec<_>>(),
+            vec!["real"]
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 5.3 — `App::apply_net_sample` is the dispatcher arm for
+    // `Action::NetSample`. These tests pin the ring-init and per-interface
+    // behaviour so a refactor can't silently drop a delta on the floor.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn net_sample_appends_deltas_to_ring() {
+        // Pre-seed the ring as the 1Hz refiller would have after one
+        // prior tick: eth0 already saw 100 rx / 50 tx bytes in the
+        // previous second.
+        let mut app = fresh_app();
+        app.apply_net_sample("eth0", 100, 50);
+        // New sample arrives: 1000 rx, 500 tx for the same second window.
+        app.apply_net_sample("eth0", 1000, 500);
+        let entry = app.net_history.get("eth0").expect("eth0 entry present");
+        assert_eq!(entry.0.as_slice_chrono(), vec![100, 1000]);
+        assert_eq!(entry.1.as_slice_chrono(), vec![50, 500]);
+    }
+
+    #[test]
+    fn net_sample_creates_entry_for_new_interface() {
+        // First sighting of an interface: `or_insert_with` must build
+        // two empty 60-cap rings, then push the first sample so the
+        // ring's length is 1 after dispatch.
+        let mut app = fresh_app();
+        app.apply_net_sample("wlan0", 100, 50);
+        let entry = app.net_history.get("wlan0").expect("wlan0 entry present");
+        assert_eq!(entry.0.cap(), 60);
+        assert_eq!(entry.1.cap(), 60);
+        assert_eq!(entry.0.len(), 1);
+        assert_eq!(entry.1.len(), 1);
+    }
+
+    #[test]
+    fn net_sample_saturates_at_60_samples() {
+        // Push 200 samples: the ring must clamp at 60 (oldest dropped).
+        // Catches a regression where someone swaps `RingU64` for a
+        // `VecDeque` and forgets the bound.
+        let mut app = fresh_app();
+        for i in 0u64..200 {
+            app.apply_net_sample("eth0", i, i);
+        }
+        let entry = app.net_history.get("eth0").unwrap();
+        assert_eq!(entry.0.len(), 60);
+        // Newest sample must be the last one pushed (i=199); oldest
+        // must be 200-60=140.
+        let slice = entry.0.as_slice_chrono();
+        assert_eq!(slice.first().copied(), Some(140));
+        assert_eq!(slice.last().copied(), Some(199));
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 6.2 — `Action::ProcTreeRefreshed` replaces `App::proc_tree`
+    // wholesale. The 15s refiller rebuilds the snapshot from
+    // `cyberdeck_core::process::list_with_ppid()` on every tick; the
+    // dispatcher is the only writer.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn proc_tree_refreshed_replaces_app_proc_tree() {
+        let mut app = fresh_app();
+        app.proc_tree.push(ProcEntry {
+            pid: 1,
+            ppid: 0,
+            comm: "old".into(),
+            cmdline: String::new(),
+        });
+        app.handle_action_for_test(Action::ProcTreeRefreshed(vec![ProcEntry {
+            pid: 100,
+            ppid: 1,
+            comm: "new".into(),
+            cmdline: String::new(),
+        }]));
+        assert_eq!(app.proc_tree.len(), 1);
+        assert_eq!(app.proc_tree[0].pid, 100);
+        assert_eq!(app.proc_tree[0].comm, "new");
+    }
+
+    #[test]
+    fn proc_tree_refreshed_with_empty_vec_clears_tree() {
+        let mut app = fresh_app();
+        app.proc_tree.push(ProcEntry {
+            pid: 1,
+            ppid: 0,
+            comm: "x".into(),
+            cmdline: String::new(),
+        });
+        app.handle_action_for_test(Action::ProcTreeRefreshed(vec![]));
+        assert!(app.proc_tree.is_empty());
+    }
+
+    #[test]
+    fn proc_tree_view_defaults_to_false() {
+        let app = fresh_app();
+        assert!(
+            !app.proc_tree_view,
+            "proc_tree_view must default to false (facts view)"
+        );
+        assert!(app.proc_tree.is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 7.1 — `toast_history` is a `VecDeque<ToastEntry>` capped at 200.
+    // `push_toast` is the only writer and enforces the cap by dropping the
+    // oldest entry each time the ring fills. Tests pin:
+    //   - empty by default
+    //   - append at under-cap grows unbounded
+    //   - cap-200 trim drops oldest on overflow
+    //   - kind is preserved on insert
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn toast_history_starts_empty() {
+        let app = fresh_app();
+        assert!(app.toast_history.is_empty());
+    }
+
+    #[test]
+    fn toast_history_push_helper_returns_unit_and_preserves_kind() {
+        let mut app = fresh_app();
+        app.push_toast(crate::app::toast::ToastKind::Warn, "warning".to_string());
+        assert_eq!(app.toast_history.len(), 1);
+        assert_eq!(app.toast_history[0].kind, crate::app::toast::ToastKind::Warn);
+        assert_eq!(app.toast_history[0].message, "warning");
+    }
+
+    #[test]
+    fn toast_history_appends_and_trims_at_cap() {
+        let mut app = fresh_app();
+        for i in 0..250 {
+            app.push_toast(
+                crate::app::toast::ToastKind::Info,
+                format!("toast {i}"),
+            );
+        }
+        assert_eq!(app.toast_history.len(), 200);
+        // The 50 oldest (toasts 0..50) should have been dropped; toast 50
+        // is the oldest survivor and toast 249 is the newest.
+        assert!(
+            app.toast_history.front().unwrap().message.contains("toast 50"),
+            "oldest surviving entry should be toast 50, got {:?}",
+            app.toast_history.front().unwrap().message
+        );
+        assert!(
+            app.toast_history.back().unwrap().message.contains("toast 249"),
+            "newest entry should be toast 249, got {:?}",
+            app.toast_history.back().unwrap().message
+        );
     }
 }

@@ -32,6 +32,14 @@ pub enum Action {
     SubmitInput(String),
     /// Push a line into the log buffer (sent by the logs screen fetch task).
     LogPushed(crate::app::LogLine),
+    /// Module 2.4 — user pressed `r` on the Logs screen. Dispatcher
+    /// reacts by spawning an immediate `recent_since(60)` fetch (vs.
+    /// the 1Hz refiller's 2s sliding window) and routes results back
+    /// through the normal `LogPushed` pipeline so dedupe + ordering
+    /// keep working. The screen only enqueues this Action; the actual
+    /// journalctl invocation lives in the dispatcher so the UI thread
+    /// never blocks on a process spawn.
+    RefreshLogs,
     /// Live refresh of a specific resource (manual `r` press).
     Refresh(crate::app::screen::ScreenId),
     /// Result of a Wi-Fi scan. Written into `app.wifi_scan_results` so the
@@ -41,6 +49,29 @@ pub enum Action {
     /// `app.live.bluetooth` so the bluetooth screen can render the
     /// device list on the next frame.
     BluetoothScanResult(Vec<cyberdeck_core::bluetooth::BtDevice>),
+    /// Module 5.3 — one second of RX/TX byte deltas for a single
+    /// interface, as measured by the 1Hz network refiller. The
+    /// dispatcher appends the deltas to `App::net_history` so the
+    /// header sparkline (Module 5.4) can render them on the next
+    /// frame. We're lossy on receiver drop — if the main loop has
+    /// already exited the channels are torn down, so retrying here
+    /// would just block the refiller.
+    NetSample {
+        iface: String,
+        rx_delta: u64,
+        tx_delta: u64,
+    },
+    /// Module 6.2 — 15s refiller from `cyberdeck_core::process::list_with_ppid`.
+    /// The dispatcher replaces `App::proc_tree` wholesale (no merge needed:
+    /// the snapshot is a complete per-tick picture of /proc, so a merge
+    /// would just have to undo it). PIDs that disappear between refills
+    /// fall out of the next snapshot naturally.
+    ProcTreeRefreshed(Vec<cyberdeck_core::process::ProcEntry>),
+    /// Module 8.2 — 30s refiller of `cyberdeck_core::net::saved_connections`.
+    /// Replaces `App::saved_connections` wholesale so the right pane can
+    /// re-render on the next frame. Empty Vec on missing nmcli / non-NM
+    /// box (the call site never returns `Err`).
+    SavedConnectionsRefreshed(Vec<cyberdeck_core::net::SavedConnection>),
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,42 @@
 //! Cross-cutting widgets: header (live values), sidebar (screen list),
 //! status bar (keymap hints + clock), toast overlay.
 
+// Module 5.4 — sparkline for the header chip. Maps each sample to one of
+// eight block glyphs `▁▂▃▄▅▆▇█`, scaled by the per-interface max so a
+// quiet link still produces a visible ribbon. Returns `""` on empty
+// input — the caller renders a dashed placeholder in that case so the
+// chip is always the same width.
+fn sparkline(samples: &[u64]) -> String {
+    if samples.is_empty() {
+        return String::new();
+    }
+    const RAMP: &[char] = &['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    // `.max(&1)` keeps the divisor at least 1 — an all-zero history
+    // would otherwise panic (or silently map every sample to ∞).
+    let max = *samples.iter().max().unwrap_or(&1).max(&1);
+    samples
+        .iter()
+        .map(|s| RAMP[((s * 7) / max).min(7) as usize])
+        .collect()
+}
+
+/// Which interface the header sparkline tracks. Defaults to the first
+/// interface with a non-empty IPv4 (matches the existing header pill),
+/// falling back to `"lo"` if `app.live.interfaces` is locked or empty.
+fn pick_active_iface_name(app: &App) -> String {
+    if let Ok(ifaces) = app.live.interfaces.try_read() {
+        if let Some(primary) = ifaces.iter().find(|i| !i.ipv4.is_empty()) {
+            return primary.name.clone();
+        }
+        // No IPv4 — fall back to the first interface by name (often
+        // `lo` when the system has no wired/wireless link up).
+        if let Some(first) = ifaces.first() {
+            return first.name.clone();
+        }
+    }
+    "lo".to_string()
+}
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
@@ -10,7 +46,7 @@ use crate::app::screen::ScreenId;
 use crate::app::{App, Region};
 use crate::theme::{glyphs, Theme};
 
-pub fn header_lines(app: &App) -> Vec<Line<'static>> {
+pub fn header_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     let g = glyphs();
     let mut spans: Vec<Span<'static>> = vec![
         " cyberdeck ".into(),
@@ -46,6 +82,43 @@ pub fn header_lines(app: &App) -> Vec<Line<'static>> {
                 );
             }
         }
+        // Module 5.4 — header sparkline chip. Pulls the last 8 RX
+        // samples for the active interface and renders them as a
+        // 8-glyph ribbon (`▁▂▃▄▅▆▇█`). All-zero history falls back to
+        // a dashed placeholder so the chip is always 8 cells wide and
+        // the line doesn't reflow on first paint. The sparkline is
+        // appended regardless of whether `live.info` succeeded above
+        // so the chip is visible even when sysinfo fetch fails (the
+        // header is the user's primary glance — it should never go
+        // blank just because a single source blipped).
+        {
+            let iface = pick_active_iface_name(app);
+            let samples: Vec<u64> = app
+                .net_history
+                .get(&iface)
+                .map(|(rx_ring, _)| {
+                    rx_ring
+                        .as_slice_chrono()
+                        .into_iter()
+                        .rev()
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect()
+                })
+                .unwrap_or_default();
+            let ribbon = if samples.is_empty() {
+                "────────".to_string()
+            } else {
+                sparkline(&samples)
+            };
+            let label = format!(" ↓{} ", ribbon);
+            spans.push(Span::styled(
+                label,
+                ratatui::style::Style::default().fg(theme.accent),
+            ));
+        }
         if let Ok(b) = app.live.battery.try_read() {
             if let Some(bat) = b.as_ref() {
                 spans.push(format!("{} {}% ", g.bat, bat.capacity).into());
@@ -74,7 +147,7 @@ pub fn header_lines(app: &App) -> Vec<Line<'static>> {
 }
 
 pub fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let p = Paragraph::new(header_lines(app))
+    let p = Paragraph::new(header_lines(app, theme))
         .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg))
         .block(
             Block::default()
@@ -135,7 +208,7 @@ pub fn draw_region_chip(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 /// ringed in the accent colour so the user always sees what's open.
 /// Falls back gracefully on narrow terminals (≤ 28 cols) by collapsing
 /// to a one-column list so a uconsole in landscape still works.
-pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme) {
     let focused = matches!(app.region, Region::Sidebar);
     let narrow = area.width < 28;
     if narrow {
@@ -145,9 +218,12 @@ pub fn draw_sidebar(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     }
 }
 
-fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: bool) {
+fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focused: bool) {
     // One row per screen. Falls back to the pre-redesign list so users
-    // on narrow terminals still get a working menu.
+    // on narrow terminals still get a working menu. Windowed via
+    // `ListState::offset()` so a narrow-but-tall terminal (e.g. uconsole
+    // in portrait) doesn't silently scroll the bottom rows offscreen —
+    // before this fix those rows were still selectable but invisible.
     let items: Vec<ListItem> = ScreenId::ALL
         .iter()
         .enumerate()
@@ -166,6 +242,24 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
             .into()
         })
         .collect();
+
+    // Clamp sidebar_offset so the window is always valid. The narrow
+    // sidebar is a single List, so `visible` is the inner height after
+    // the top/bottom borders consume two rows.
+    let total = items.len();
+    let visible = area.height.saturating_sub(2) as usize;
+    // Module 1.5 — publish the visible-row count back to App so the
+    // Up/Down handlers in `main.rs` can call
+    // `clamp_sidebar_offset(total, app.sidebar_visible)` with the same
+    // value the renderer is windowing against. Without this, the
+    // handler's clamp is a no-op and the offset never advances on
+    // short terminals — the symptom that drove the bug.
+    app.sidebar_visible = visible;
+    let max_off = total.saturating_sub(visible);
+    if app.sidebar_offset > max_off {
+        app.sidebar_offset = max_off;
+    }
+
     let list = List::new(items)
         .block(
             Block::default()
@@ -177,7 +271,11 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
                 .border_style(theme.border(focused)),
         )
         .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
-    f.render_widget(list, area);
+
+    let mut state = ratatui::widgets::ListState::default();
+    *state.offset_mut() = app.sidebar_offset;
+    state.select(Some(app.sidebar_idx));
+    f.render_stateful_widget(list, area, &mut state);
 
     // Focus gutter on the inner right edge, mirroring the grid variant
     // above. Filled cyan when the sidebar owns the region, dim accent
@@ -202,7 +300,7 @@ fn draw_sidebar_narrow(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focu
 /// gets the cyan selection block; the active screen tile gets a bold
 /// accent border so what's open is unmistakable. Anything else is dim
 /// so the eye lands on the cursor first, then the active marker.
-fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focused: bool) {
+fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focused: bool) {
     let block = Block::default()
         .title(Span::styled(
             if focused { " ▶ screens " } else { " screens " },
@@ -212,6 +310,20 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         .border_style(theme.border(focused));
     let inner = block.inner(area);
     f.render_widget(block, area);
+
+    let total = ScreenId::ALL.len();
+    let visible = inner.height as usize;
+
+    // Clamp sidebar_offset so the window is always valid.
+    // Module 1.5 — publish the visible-row count back to App so the
+    // Up/Down handlers in `main.rs` can pass `app.sidebar_visible`
+    // to `clamp_sidebar_offset`, keeping cursor and offset in lockstep
+    // with the renderer's windowing.
+    app.sidebar_visible = visible;
+    let max_off = total.saturating_sub(visible);
+    if app.sidebar_offset > max_off {
+        app.sidebar_offset = max_off;
+    }
 
     // 13 screens → 7 rows on the left, 6 rows on the right. Two-column
     // grid keeps the cursor within thumb-reach for D-pad use: at most 7
@@ -224,7 +336,9 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         .constraints(row_constraints)
         .split(inner);
 
-    for (i, id) in ScreenId::ALL.iter().enumerate() {
+    // Windowed iteration: only render rows in [sidebar_offset, sidebar_offset + visible).
+    for i in app.sidebar_offset..(app.sidebar_offset + visible).min(total) {
+        let id = ScreenId::ALL[i];
         let col = i / rows;
         let row = i % rows;
         let row_area = row_areas.get(row).copied();
@@ -237,20 +351,30 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
         } else {
             Rect::new(inner.x + mid, row_area.y, inner.width - mid, 1)
         };
-        let active = *id == app.current;
+        let active = id == app.current;
         let cursor = i == app.sidebar_idx;
-        render_sidebar_cell(f, cell_area, i + 1, id, active, cursor, theme);
+        render_sidebar_cell(f, cell_area, i + 1, &id, active, cursor, theme);
     }
 
-    // Focus gutter: a 1-cell-wide vertical bar along the sidebar's right
-    // border. Lit cyan when the sidebar owns the region focus (so the
-    // cursor is *here*), dim accent when content is focused (so the user
-    // can see at a glance "focus is on the right"). This is the single
-    // most important D-pad affordance on a 5" display where the cursor
-    // itself is small: the gutter is always visible regardless of which
-    // row the cursor sits on.
+    // Right-edge gutter: focus marker AND scrollbar thumb, painted on
+    // top of each other so the user gets BOTH signals at once.
+    //
+    //   1. Focus gutter — same affordance as before: cyan-filled cell
+    //      when sidebar owns focus, dim accent when content owns it.
+    //      Always rendered when the gutter column exists.
+    //   2. Scrollbar thumb — only rendered when the list overflows
+    //      (`total > visible`). The thumb position = `(offset /
+    //      scrollable_range) * track_height`. When the thumb is absent
+    //      (full-window case) the focus gutter still paints so the
+    //      right column doesn't blink or shift between windowed and
+    //      non-windowed states.
+    //
+    // The thumb uses a block character drawn cell-by-cell against the
+    // gutter background so it visually integrates with the focus
+    // marker instead of fighting it.
     if inner.width >= 2 && rows >= 1 {
         let gutter_x = area.x + area.width.saturating_sub(2);
+        // 1a. Focus gutter background + marker.
         let gutter_style = if focused {
             ratatui::style::Style::default()
                 .fg(theme.selection_fg)
@@ -262,6 +386,39 @@ fn draw_sidebar_grid(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focuse
             let gutter = Rect::new(gutter_x, row_area.y, 1, 1);
             let marker = Paragraph::new(Line::from(Span::styled("│", gutter_style)));
             f.render_widget(marker, gutter);
+        }
+        // 1b. Scrollbar thumb (only when windowed).
+        let (thumb_size, thumb_pos) =
+            sidebar_scrollbar_thumb(total, visible, app.sidebar_offset);
+        if thumb_size > 0 {
+            // Theme glyphs don't include a dedicated block; use the
+            // full-block character directly so the thumb reads as a
+            // solid bar at every font.
+            let glyph: &'static str = "█";
+            let mut dy: usize = 0;
+            while dy < thumb_size {
+                let y = inner.y + (thumb_pos + dy) as u16;
+                if y >= inner.y + inner.height {
+                    break;
+                }
+                let cell = Rect::new(gutter_x, y, 1, 1);
+                // Foreground the thumb against the gutter background;
+                // when focused that paints the thumb in selection_fg
+                // over selection_bg (cyan block in the dark theme).
+                let style = if focused {
+                    ratatui::style::Style::default()
+                        .fg(theme.fg)
+                        .bg(theme.selection_bg)
+                } else {
+                    ratatui::style::Style::default()
+                        .fg(theme.accent)
+                        .bg(theme.bg)
+                        .add_modifier(ratatui::style::Modifier::BOLD)
+                };
+                let thumb = Paragraph::new(Line::from(Span::styled(glyph, style)));
+                f.render_widget(thumb, cell);
+                dy += 1;
+            }
         }
     }
 }
@@ -346,6 +503,33 @@ fn sidebar_item_styles(active: bool, cursor: bool, theme: &Theme) -> (ratatui::s
 
 fn g() -> &'static crate::theme::Glyphs {
     glyphs()
+}
+
+/// Compute the (thumb_size, thumb_pos) for the sidebar scrollbar gutter.
+///
+/// When `total <= visible` the whole list fits in the viewport, so the
+/// helper returns `(0, 0)` and the caller should skip rendering the
+/// thumb entirely. The track background is still drawn by the gutter
+/// code so the right edge stays visually consistent with the unfocused
+/// state.
+///
+/// `thumb_size` ≈ `visible² / total`, clamped to be at least 1 row.
+/// This mirrors the classic "scrollbar thumb is a function of visible
+/// ratio" math so the thumb is large when the window is large and
+/// shrinks as the user scrolls down a long list.
+///
+/// `thumb_pos` is the row inside the track (range `[0, visible -
+/// thumb_size]`) where the thumb's top sits. It's a linear function of
+/// `offset` so the thumb moves smoothly with `sidebar_offset`.
+fn sidebar_scrollbar_thumb(total: usize, visible: usize, offset: usize) -> (usize, usize) {
+    if total <= visible || visible == 0 {
+        return (0, 0);
+    }
+    let thumb_size = ((visible * visible) / total).max(1);
+    let max_off = total.saturating_sub(visible);
+    let thumb_pos = ((offset * (visible.saturating_sub(thumb_size))) / max_off)
+        .min(visible.saturating_sub(thumb_size));
+    (thumb_size, thumb_pos)
 }
 
 pub fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
@@ -557,5 +741,284 @@ mod status_region_vocabulary {
         assert!(label.contains("right"), "right region_label must contain 'right'; got: {:?}", label);
         assert!(!label.contains("←"), "old ← form must not appear in label; got: {:?}", label);
         assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
+    }
+
+    #[test]
+    fn sidebar_clamps_offset_when_cursor_exits_top_window() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<crate::app::Action>(8);
+        let mut app = crate::app::App::new(tx, rx);
+        let total = crate::app::screen::ScreenId::ALL.len();
+        app.sidebar_idx = 5;
+        app.sidebar_offset = 0;
+        let new_idx = (app.sidebar_idx + 1) % total;
+        app.sidebar_idx = new_idx;
+        app.clamp_sidebar_offset(total, 4);
+        let expected_off = (new_idx + 1).saturating_sub(4); // derive from formula
+        assert_eq!(app.sidebar_idx, (5 + 1) % total);
+        assert_eq!(app.sidebar_offset, expected_off);
+    }
+
+    #[test]
+    fn sidebar_grid_windowed_iteration_only_emits_visible_rows() {
+        // 15 screens total. With sidebar_offset=4 and visible=3, only
+        // rows 4, 5, 6 should be iterated. Pin that the loop bound
+        // honors the window.
+        let total: usize = 15;
+        let offset: usize = 4;
+        let visible: usize = 3;
+        let emitted: Vec<usize> = (offset..(offset + visible).min(total)).collect();
+        assert_eq!(emitted, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn sidebar_grid_windowed_clamps_offset_to_total() {
+        // If total=15, visible=3, offset can't exceed 12.
+        let total: usize = 15;
+        let visible: usize = 3;
+        let max_off = total.saturating_sub(visible);
+        let mut offset: usize = 99;
+        if offset > max_off { offset = max_off; }
+        assert_eq!(offset, 12);
+    }
+
+    #[test]
+    fn sidebar_narrow_list_state_uses_app_offset() {
+        // Build a ListState the same way draw_sidebar_narrow will.
+        // The narrow fallback must honor `app.sidebar_offset` so rows
+        // below the visible window are clipped rather than overflowing
+        // the frame (and silently selectable when offscreen).
+        let total: usize = 15;
+        let mut app_offset: usize = 7;
+        let visible: usize = 5;
+        let max_off = total.saturating_sub(visible);
+        if app_offset > max_off { app_offset = max_off; }
+        let mut state = ratatui::widgets::ListState::default();
+        state.select(Some(10));
+        *state.offset_mut() = app_offset;
+        assert_eq!(state.offset(), 7);
+        assert_eq!(state.selected(), Some(10));
+    }
+
+    #[test]
+    fn sidebar_narrow_renders_with_offset_and_clamps_overflow() {
+        // Render the narrow sidebar with sidebar_offset=10 against an
+        // 8-row area. The visible window is height-2 (top/bottom borders)
+        // = 6 rows. With 15 screens total, max_off = 15-6 = 9. The
+        // implementation must clamp sidebar_offset down to that ceiling
+        // BEFORE handing the value to ListState, so ratatui can't scroll
+        // the bottom rows past the bottom edge (where they'd be
+        // selectable-but-invisible on a narrow-but-tall terminal).
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = Region::Sidebar;
+        app.sidebar_idx = 12;
+        app.sidebar_offset = 10; // > max_off(9), must be clamped
+        let theme = Theme::by_name(ThemeName::Dark);
+        let area = ratatui::layout::Rect::new(0, 0, 24, 8);
+        terminal
+            .draw(|f| draw_sidebar_narrow(f, area, &mut app, &theme, true))
+            .unwrap();
+        assert_eq!(
+            app.sidebar_offset, 9,
+            "sidebar_offset must be clamped to total-visible (15-6=9)"
+        );
+    }
+
+    // ---- Scrollbar thumb math (Module 1.4) ------------------------------
+    //
+    // The thumb math must: hide the thumb when all rows fit, return a
+    // track height of `visible` when windowed, and keep thumb_pos ∈
+    // [0, visible - thumb_size]. These are pure-math pin tests so they
+    // can't regress silently.
+    //
+    // They call `sidebar_scrollbar_thumb` (defined in the parent
+    // module and brought into scope by `use super::*;` above) directly
+    // so they pin the real algorithm — not a copy of it.
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_full_window_hides_gutter() {
+        // When all rows fit, total <= visible → no thumb should render.
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 15, 0);
+        assert_eq!(thumb_size, 0, "thumb_size must be 0 when window fits");
+        assert_eq!(thumb_pos, 0, "thumb_pos must be 0 when window fits");
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_short_window_top_of_list() {
+        // 15 screens, 5 visible, offset=0 → thumb should sit at the top.
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 5, 0);
+        // floor(5*5/15) = 1 → thumb_size = 1
+        assert_eq!(thumb_size, 1, "thumb_size for 5/15 ≈ 1 row");
+        // (0 * (5 - 1)) / (15 - 5) = 0
+        assert_eq!(thumb_pos, 0, "offset=0 must pin thumb to top");
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_short_window_bottom_of_list() {
+        // 15 screens, 5 visible, offset=10 (max) → thumb at the bottom.
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 5, 10);
+        assert_eq!(thumb_size, 1);
+        // (10 * 4) / 10 = 4, clamped to (5 - 1) = 4
+        assert_eq!(thumb_pos, 4, "offset=max must pin thumb to bottom");
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_long_list_two_thirds() {
+        // 15 screens, 5 visible, offset=7 → thumb is ~70% down the track.
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 5, 7);
+        assert_eq!(thumb_size, 1);
+        // (7 * 4) / 10 = 2 (integer division)
+        assert_eq!(thumb_pos, 2);
+    }
+
+    #[test]
+    fn sidebar_scrollbar_thumb_math_thumb_size_grows_with_visible() {
+        // 15 screens, 10 visible → thumb_size = floor(10*10/15) = 6.
+        let (thumb_size, thumb_pos) = sidebar_scrollbar_thumb(15, 10, 0);
+        assert_eq!(thumb_size, 6);
+        assert_eq!(thumb_pos, 0);
+    }
+
+    // ---- Sidebar gutter integration tests (Module 1.4) ------------------
+    //
+    // These pin that `draw_sidebar_grid` paints the scrollbar thumb
+    // when windowed (total > visible) and skips it when the whole list
+    // fits. Without this, the thumb math test above could be a lie.
+
+    #[test]
+    fn sidebar_grid_windowed_render_paints_thumb_in_gutter() {
+        // 24-col-wide, 8-row-tall sidebar. With Block borders the inner
+        // height is 6, but we have 15 screens, so total(15) > visible(6)
+        // and a thumb must render. We check the rightmost inner column
+        // for any full-block glyph.
+        let backend = TestBackend::new(24, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = Region::Sidebar;
+        app.sidebar_idx = 8;
+        // Force a non-zero offset so the thumb lands off the top.
+        app.sidebar_offset = 4;
+        let theme = Theme::by_name(ThemeName::Dark);
+        terminal
+            .draw(|f| draw_sidebar_grid(f, Rect::new(0, 0, 24, 8), &mut app, &theme, true))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Gutter x = 24 - 2 = 22, rows 1..=6 (inner).
+        let mut thumb_chars: Vec<char> = Vec::new();
+        for y in 1..7 {
+            thumb_chars.push(buf[(22, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        let rendered: String = thumb_chars.iter().collect();
+        // At least one cell in the gutter must be a full block █ —
+        // proving the thumb code actually drew *something*.
+        assert!(
+            rendered.contains('█'),
+            "gutter column should contain at least one █ thumb cell; got: {:?}",
+            rendered
+        );
+    }
+
+    #[test]
+    fn sidebar_grid_full_window_no_thumb_in_gutter() {
+        // Make inner.height = 17 >= total(15), so the window covers all
+        // rows and the thumb must short-circuit. Need area.height = 17
+        // + 2 borders = 19 to land inner.height = 17.
+        let backend = TestBackend::new(24, 19);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = fresh_app();
+        app.region = Region::Sidebar;
+        app.sidebar_idx = 0;
+        app.sidebar_offset = 0;
+        let theme = Theme::by_name(ThemeName::Dark);
+        terminal
+            .draw(|f| draw_sidebar_grid(f, Rect::new(0, 0, 24, 19), &mut app, &theme, true))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Gutter x = 24 - 2 = 22, inner rows = 1..=17 (inclusive).
+        let mut thumb_chars: Vec<char> = Vec::new();
+        for y in 1..=17 {
+            thumb_chars.push(buf[(22, y)].symbol().chars().next().unwrap_or(' '));
+        }
+        let rendered: String = thumb_chars.iter().collect();
+        assert!(
+            !rendered.contains('█'),
+            "gutter must not contain █ when total<=visible (15<=17); got: {:?}",
+            rendered
+        );
+        // All gutter cells should be the focus marker in full-window mode.
+        for ch in thumb_chars {
+            assert!(
+                ch == '│' || ch == ' ',
+                "expected only │ in focus gutter when full; got {:?}",
+                ch
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sparkline_tests {
+    //! Module 5.4 — pin the sparkline math so a future rework (e.g.
+    //! switching to a base64-encoded buffer glyph, or adding a
+    //! logarithmic ramp) doesn't silently shift the chip's appearance.
+    use super::sparkline;
+
+    #[test]
+    fn sparkline_returns_eight_chars_for_eight_samples() {
+        // The chip renders up to 8 trailing samples; the helper must
+        // emit one glyph per sample.
+        let s = sparkline(&[0, 100, 200, 300, 400, 500, 600, 700]);
+        assert_eq!(s.chars().count(), 8);
+    }
+
+    #[test]
+    fn sparkline_picks_lower_block_for_smaller_values() {
+        // The ramp is monotonic: lower samples → lower glyph index.
+        // Specifically the lowest glyph (`▁`) covers `[0, max/8)` so
+        // the first of an ascending ramp must be `▁`, the last must
+        // be `█`.
+        let s = sparkline(&[0, 100, 200, 300, 400, 500, 600, 700]);
+        assert!(
+            s.starts_with('▁'),
+            "first sample (0/max) must be the lowest glyph ▁; got {:?}",
+            s
+        );
+        assert!(
+            s.ends_with('█'),
+            "last sample (max/max) must be the top glyph █; got {:?}",
+            s
+        );
+        // Every char must come from the ramp.
+        for c in s.chars() {
+            assert!(
+                "▁▂▃▄▅▆▇█".contains(c),
+                "unexpected glyph {:?} in sparkline",
+                c
+            );
+        }
+    }
+
+    #[test]
+    fn sparkline_all_zeros_returns_lowest_glyph() {
+        // All-zero history must not panic — we clamp via `.max(&1)`
+        // so divisor is at least 1 and every sample lands in
+        // bucket 0.
+        let s = sparkline(&[0, 0, 0, 0]);
+        assert_eq!(s.chars().count(), 4);
+        assert!(
+            s.chars().all(|c| c == '▁'),
+            "all zeros must render as ▁▁▁▁; got {:?}",
+            s
+        );
+    }
+
+    #[test]
+    fn sparkline_empty_returns_empty_string() {
+        // The render code falls back to a dashed placeholder on
+        // empty input; the helper itself returns `""` so callers
+        // can distinguish "no data" from "all zeros".
+        assert_eq!(sparkline(&[]), "");
+        assert_eq!(sparkline(&[]).chars().count(), 0);
     }
 }
