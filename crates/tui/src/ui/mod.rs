@@ -550,7 +550,7 @@ mod status_region_vocabulary {
         assert!(!label.contains("→"), "old → form must not appear in label; got: {:?}", label);
     }
 
-#[test]
+    #[test]
     fn content_right_uses_triangle_vocabulary() {
         let (_, label) = render_status_with(Region::ContentRight);
         assert!(label.contains('▶'), "right region_label must contain ▶; got: {:?}", label);
