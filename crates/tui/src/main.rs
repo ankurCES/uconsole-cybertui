@@ -3484,19 +3484,13 @@ mod tests {
         let orig_path = std::env::var_os("PATH");
         let empty = std::env::temp_dir().join("cyberdeck-test-empty-path-9f4c");
         let _ = std::fs::create_dir_all(&empty);
-        // SAFETY: tests are single-threaded; env mutation is fine.
-        unsafe {
-            std::env::set_var("PATH", &empty);
-        }
+        // Tests are single-threaded; env mutation is fine.
+        std::env::set_var("PATH", &empty);
         let result = read_clipboard_for_paste();
         if let Some(p) = orig_path {
-            unsafe {
-                std::env::set_var("PATH", p);
-            }
+            std::env::set_var("PATH", p);
         } else {
-            unsafe {
-                std::env::remove_var("PATH");
-            }
+            std::env::remove_var("PATH");
         }
         let _ = std::fs::remove_dir(&empty);
         assert_eq!(result, "");
