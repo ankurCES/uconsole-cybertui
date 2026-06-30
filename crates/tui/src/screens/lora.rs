@@ -29,10 +29,19 @@ use crate::theme::Theme;
 /// HTTP transport for talking to a Meshtastic node over LAN. Pulled in
 /// behind the `http` feature flag so a default `cargo build` doesn't
 /// grow the dep graph for users who don't own a node. See
-/// `screens/lora/http.rs` for the wire-debug contract and the
-/// protobuf-decode follow-up plan.
+/// `screens/lora/http.rs` for the wire shape and `screens/lora/proto.rs`
+/// for the hand-rolled `FromRadio` decoder.
 #[cfg(feature = "http")]
 pub mod http;
+
+/// Hand-rolled `FromRadio` / `ToRadio` protobuf helpers. See `proto.rs`
+/// for the field numbers (read straight from
+/// `packages/protobufs/meshtastic/mesh.proto` in the meshtastic/web repo)
+/// and the rationale for not pulling in `prost`. Always available — the
+/// types are pure data and the encoder/parser are pure functions, so
+/// keeping them behind the `http` feature would just split the unit tests
+/// for no benefit.
+pub mod proto;
 
 /// A node as seen by the local LoRa network — identifies the device, the
 /// operator-chosen long/short names, and how many hops away from us
