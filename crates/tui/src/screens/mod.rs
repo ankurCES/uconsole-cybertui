@@ -16,6 +16,7 @@ pub mod services;
 pub mod settings;
 pub mod storage;
 pub mod system;
+pub mod mesh;
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;

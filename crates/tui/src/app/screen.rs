@@ -22,6 +22,9 @@ pub enum ScreenId {
     /// for the EditorScreen so Tab/Shift-Tab cycling (which uses
     /// `ScreenId::cycle` in this module) skips it.
     Editor,
+    /// Meshtastic over USB: longfast channel chat (left pane) + nodes with
+    /// hops_away (right pane). Reachable from the sidebar.
+    Mesh,
 }
 
 impl ScreenId {
@@ -40,6 +43,7 @@ impl ScreenId {
         ScreenId::Logs,
         ScreenId::Settings,
         ScreenId::Editor,
+        ScreenId::Mesh,
     ];
 
     pub fn label(self) -> &'static str {
@@ -58,6 +62,7 @@ impl ScreenId {
             ScreenId::Logs => "Logs",
             ScreenId::Settings => "Settings",
             ScreenId::Editor => "Editor",
+            ScreenId::Mesh => "Mesh",
         }
     }
 
@@ -73,6 +78,7 @@ impl ScreenId {
                 | ScreenId::Power
                 | ScreenId::Display
                 | ScreenId::Packages
+                | ScreenId::Mesh
         )
     }
 
@@ -92,6 +98,8 @@ impl ScreenId {
             ScreenId::Logs => "▥",
             ScreenId::Settings => "✱",
             ScreenId::Editor => "✎",
+            // Mesh = stacked nodes glyph (works as Nerd Font + ASCII fallback).
+            ScreenId::Mesh => "≣",
         }
     }
 
@@ -165,6 +173,14 @@ pub trait Screen {
     /// event was consumed. Modal handling lives in the main loop, not here.
     fn on_key(&mut self, _key: crossterm::event::KeyEvent, _app: &mut crate::app::App) -> bool {
         false
+    }
+    /// Downcast hook for screens that need to be reached through a trait
+    /// object. `main.rs` uses this on `MeshScreen` only to call `poll` on
+    /// each `Action::Tick`. Default returns `None` for screens that don't
+    /// need it; `MeshScreen` overrides it. `None` keeps the trait
+    /// default-implementable and avoids forcing `Any` on every screen.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
     }
     /// Whether this screen should be skipped by `Tab` / `Shift-Tab` screen
     /// cycling. Defaults to `false` so every screen is reachable unless it
@@ -304,6 +320,20 @@ mod tests {
         assert_eq!(
             ScreenId::cycle(&screens, &app, ScreenId::Network, false),
             ScreenId::Network
+        );
+    }
+
+    /// `ScreenId::Mesh` resolves to the `Mesh` label/glyph and is listed in
+    /// `ScreenId::ALL` so the sidebar can find it.
+    #[test]
+    fn mesh_screen_is_registered() {
+        let id = ScreenId::Mesh;
+        assert_eq!(id.label(), "Mesh");
+        assert_eq!(id.glyph(), "≣");
+        assert!(ScreenId::ALL.contains(&ScreenId::Mesh));
+        assert!(
+            id.has_right_pane(),
+            "Mesh is a multi-pane screen (chat | nodes) and must report has_right_pane() == true"
         );
     }
 
