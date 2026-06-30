@@ -27,6 +27,7 @@ use cyberdeck_core::net::Interface;
 use cyberdeck_core::packages::Package;
 use cyberdeck_core::power::Battery;
 use cyberdeck_core::process::Process;
+use cyberdeck_core::process::ProcEntry;
 use cyberdeck_core::services::Service;
 use cyberdeck_core::storage::Filesystem;
 use cyberdeck_core::sys::SystemInfo;
@@ -375,6 +376,44 @@ impl Live {
             }
         });
 
+        // Module 6.2 — 15s refiller that snapshots /proc with ppid for
+        // the System screen's process-tree view. Sits on its own loop so
+        // a hiccup in the I/O here can't hitch the existing 15s block
+        // (which already serializes fs/proc/dsp/aud/bt via `tokio::join!`).
+        //
+        // We off-load the synchronous /proc walk to `spawn_blocking` —
+        // the read of every `/proc/<pid>/{stat,cmdline}` is regular
+        // blocking I/O. Running it on the runtime worker would tie up a
+        // worker for the whole walk (~100s of small reads on a busy
+        // box); `spawn_blocking` hands it to the blocking-thread pool.
+        //
+        // On any error (non-Linux box, /proc missing, unreadable) we
+        // fall back to an empty snapshot so the next render shows
+        // "(no processes)" rather than crashing the dispatcher.
+        let tx_proc = tx.clone();
+        tokio::spawn(async move {
+            let mut t = interval(Duration::from_secs(15));
+            // Skip ticks that fall behind rather than burst-fire; mirrors
+            // the logs + network samplers above.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                t.tick().await;
+                let procs = tokio::task::spawn_blocking(|| {
+                    cyberdeck_core::process::list_with_ppid().unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                if tx_proc
+                    .send(Action::ProcTreeRefreshed(procs))
+                    .await
+                    .is_err()
+                {
+                    // Receiver dropped — main loop is shutting down.
+                    return;
+                }
+            }
+        });
+
         // Module 5.3 — 1Hz network sampler. Reads every active network
         // interface's cumulative RX/TX byte counts from
         // `/sys/class/net/<iface>/statistics/{rx,tx}_bytes`, computes
@@ -638,6 +677,18 @@ pub struct App {
     /// (Module 5.4) reads the RX ring of the active interface. Empty
     /// until the sampler has run at least once.
     pub net_history: std::collections::HashMap<String, (crate::util::ring::RingU64, crate::util::ring::RingU64)>,
+    /// Module 6 — System screen's process tree. Populated by the 15s
+    /// refiller in `Live::spawn_refreshers` (Module 6.2) via
+    /// `Action::ProcTreeRefreshed`. The render reads this each frame
+    /// when `proc_tree_view` is true and turns the flat list into an
+    /// indented tree (Module 6.3). Empty by default — first refresh
+    /// lands ~15s after startup.
+    pub proc_tree: Vec<ProcEntry>,
+    /// Module 6 — when true and on the System screen, render the
+    /// indented process tree instead of the default facts pane. Toggled
+    /// with `t`. Default false so the existing System facts view is
+    /// the boot-time state.
+    pub proc_tree_view: bool,
 }
 
 /// Tiny shim so the TUI can depend on a single `cyberdeck_core::files` module
@@ -825,6 +876,11 @@ impl App {
             // this on its first tick; the header sparkline falls back to
             // a dashed placeholder until something lands.
             net_history: std::collections::HashMap::new(),
+            // Module 6 — process tree snapshot. Empty until the 15s
+            // refiller (Module 6.2) fires; `t` on the System screen
+            // toggles the tree view.
+            proc_tree: Vec::new(),
+            proc_tree_view: false,
         }
     }
 
@@ -946,6 +1002,27 @@ impl App {
         entry.0.push(rx_delta);
         entry.1.push(tx_delta);
         entry.0.len()
+    }
+
+    /// Module 6.2 — apply a `Action::ProcTreeRefreshed` to `App::proc_tree`.
+    /// Wholesale replacement: the snapshot is the canonical picture of
+    /// /proc at one moment, so a merge would just have to undo the
+    /// previous tick's removals. Extracted from `handle_action` so the
+    /// 15s refiller's contract is unit-testable without a full mpsc
+    /// pair + screens slice.
+    pub fn apply_proc_tree(&mut self, procs: Vec<ProcEntry>) {
+        self.proc_tree = procs;
+    }
+
+    /// Test-only dispatcher arm for `Action::ProcTreeRefreshed`. Mirrors
+    /// the body of the real dispatcher arm in `main.rs`; production
+    /// callers should use the dispatcher, but unit tests use this to
+    /// avoid the full mpsc + screens slice setup.
+    #[doc(hidden)]
+    pub fn handle_action_for_test(&mut self, action: Action) {
+        if let Action::ProcTreeRefreshed(procs) = action {
+            self.apply_proc_tree(procs);
+        }
     }
 
     pub fn cleanup_toasts(&mut self) {
@@ -1369,5 +1446,55 @@ mod tests {
         let slice = entry.0.as_slice_chrono();
         assert_eq!(slice.first().copied(), Some(140));
         assert_eq!(slice.last().copied(), Some(199));
+    }
+
+    // -------------------------------------------------------------------------
+    // Module 6.2 — `Action::ProcTreeRefreshed` replaces `App::proc_tree`
+    // wholesale. The 15s refiller rebuilds the snapshot from
+    // `cyberdeck_core::process::list_with_ppid()` on every tick; the
+    // dispatcher is the only writer.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn proc_tree_refreshed_replaces_app_proc_tree() {
+        let mut app = fresh_app();
+        app.proc_tree.push(ProcEntry {
+            pid: 1,
+            ppid: 0,
+            comm: "old".into(),
+            cmdline: String::new(),
+        });
+        app.handle_action_for_test(Action::ProcTreeRefreshed(vec![ProcEntry {
+            pid: 100,
+            ppid: 1,
+            comm: "new".into(),
+            cmdline: String::new(),
+        }]));
+        assert_eq!(app.proc_tree.len(), 1);
+        assert_eq!(app.proc_tree[0].pid, 100);
+        assert_eq!(app.proc_tree[0].comm, "new");
+    }
+
+    #[test]
+    fn proc_tree_refreshed_with_empty_vec_clears_tree() {
+        let mut app = fresh_app();
+        app.proc_tree.push(ProcEntry {
+            pid: 1,
+            ppid: 0,
+            comm: "x".into(),
+            cmdline: String::new(),
+        });
+        app.handle_action_for_test(Action::ProcTreeRefreshed(vec![]));
+        assert!(app.proc_tree.is_empty());
+    }
+
+    #[test]
+    fn proc_tree_view_defaults_to_false() {
+        let app = fresh_app();
+        assert!(
+            !app.proc_tree_view,
+            "proc_tree_view must default to false (facts view)"
+        );
+        assert!(app.proc_tree.is_empty());
     }
 }

@@ -61,6 +61,12 @@ pub enum Action {
         rx_delta: u64,
         tx_delta: u64,
     },
+    /// Module 6.2 — 15s refiller from `cyberdeck_core::process::list_with_ppid`.
+    /// The dispatcher replaces `App::proc_tree` wholesale (no merge needed:
+    /// the snapshot is a complete per-tick picture of /proc, so a merge
+    /// would just have to undo it). PIDs that disappear between refills
+    /// fall out of the next snapshot naturally.
+    ProcTreeRefreshed(Vec<cyberdeck_core::process::ProcEntry>),
 }
 
 #[derive(Debug, Clone)]

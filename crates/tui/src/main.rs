@@ -1722,6 +1722,13 @@ async fn handle_action(
             // 60-sample cap.
             app.apply_net_sample(&iface, rx_delta, tx_delta);
         }
+        Action::ProcTreeRefreshed(procs) => {
+            // Module 6.2 — replace the snapshot wholesale. Each refiller
+            // tick is the authoritative picture of /proc, so merging
+            // would just have to undo the previous tick's removals.
+            // The render path reads `app.proc_tree` on the next frame.
+            app.apply_proc_tree(procs);
+        }
     }
     false
 }
