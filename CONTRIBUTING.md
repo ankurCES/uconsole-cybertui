@@ -67,3 +67,24 @@ The full per-suite recipes (WM tests, web tests, manual smoke tests
 for the Phase-3 + Phase-4 window manager) live in
 [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md). The repo-root file
 you're reading now is the short version that links there.
+
+## `cargo test` reminder hook
+
+This repo includes a Bash hook that prints a reminder when you run bare
+`cargo test`, suggesting `scripts/safe-test` instead. The hook is
+**non-blocking** — `cargo test` still runs; you just see a yellow
+`reminder:` line first.
+
+To install for your current shell:
+
+```bash
+eval "$(cat scripts/sh/cargo-test-with-safe-test.bash)"
+```
+
+To make it permanent, add the same line to your `~/.bashrc`.
+
+The hook is idempotent (it sets an env var to avoid double-installing
+the trap). It only fires on bare `cargo test`; it skips `safe-test` and
+any wrapper whose command line contains `safe-test`. It's safe to leave
+installed across other repos — it doesn't modify the `cargo test`
+behavior, only prints a one-line reminder.
