@@ -506,6 +506,12 @@ impl Screen for LoraScreen {
         // The chat is a text log; we render `lora_chat` lines and clamp
         // `lora_chat_offset` (lines back from the tail) so an empty buffer
         // doesn't strand the cursor.
+        //
+        // Empty-state copy: when no node IP is configured yet the chat
+        // pane is the most prominent surface the user sees, so we
+        // surface the IP-modal binding here as the call-to-action.
+        // Once an IP is set the chat goes back to the generic "no
+        // messages yet" hint.
         let total = app.lora_chat.len();
         let visible_h = cols[0].height as usize;
         let max_off = total.saturating_sub(1);
@@ -515,8 +521,13 @@ impl Screen for LoraScreen {
         let end = total.saturating_sub(app.lora_chat_offset);
         let start = end.saturating_sub(visible_h);
         let items: Vec<ListItem> = if total == 0 {
+            let placeholder: String = if app.lora_node_ip.is_none() {
+                "  press i to set the node IP".to_string()
+            } else {
+                "  (no messages yet — j/k scroll, type + Enter to send)".to_string()
+            };
             vec![ListItem::new(Line::from(Span::styled(
-                "  (no messages yet — j/k scroll, type + Enter to send)",
+                placeholder,
                 theme.dim(),
             )))]
         } else {
@@ -632,6 +643,21 @@ impl Screen for LoraScreen {
         } else {
             "to: (broadcast)".to_string()
         };
+        // IP-modal binding chip — always visible so the user can
+        // re-enter the modal (and switch to a different node) at any
+        // time. The chip shows the *current* IP if one is set, so the
+        // user can confirm what's configured. The chip's text is kept
+        // out of the chat input buffer (rendered as a separate span
+        // cluster, right-side of the strip) so typing still hits the
+        // compose line.
+        let ip_chip = if let Some(ip) = app.lora_node_ip.as_deref() {
+            Span::styled(
+                format!(" i:{} ", truncate(ip, 16)),
+                theme.accent,
+            )
+        } else {
+            Span::styled(" i: ip ", theme.warn())
+        };
         let input = Paragraph::new(Line::from(vec![
             status,
             Span::raw(" "),
@@ -639,6 +665,8 @@ impl Screen for LoraScreen {
             Span::styled("> ", theme.key()),
             Span::styled(app.lora_input.clone(), theme.fg),
             Span::styled("▏", theme.accent),
+            Span::raw("  "),
+            ip_chip,
         ]))
         .wrap(Wrap { trim: false })
         .block(
