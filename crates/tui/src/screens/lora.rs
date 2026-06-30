@@ -338,6 +338,22 @@ impl LoraScreen {
             // only — we can't build an HttpLoraTransport. Still drop
             // back to a fresh FakeTransport so the chat pane resets if
             // the user previously had a stale config.
+            //
+            // IMPORTANT: push a toast the first time we hit this
+            // branch. The failure mode the user hit on `10.0.0.193`
+            // — typed a valid IP, saw "not connected" forever, no
+            // other feedback — happens because `FakeTransport`
+            // reports `connected = false` and the install-script
+            // default build doesn't link `reqwest`. Without this
+            // toast the user has no way to know the feature flag is
+            // the problem.
+            if new_ip.is_some() {
+                app.push_toast(
+                    crate::app::toast::ToastKind::Error,
+                    "lora: http feature not enabled — rebuild with \
+                     `cargo build -p cyberdeck-tui --features http`",
+                );
+            }
             let _ = new_ip;
             self.transport = Box::new(FakeTransport::new());
         }

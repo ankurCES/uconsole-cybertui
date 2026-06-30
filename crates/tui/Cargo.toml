@@ -8,6 +8,7 @@ rust-version.workspace = true
 description = "Cyberdeck OS-level TUI: a rich ratatui front-end for cyberdeck-core."
 
 [features]
+default = ["http"]
 web = ["dep:cyberdeck-web"]
 # uconsole-keymap: makes uconsole the default profile when CYBERDECK_KEYMAP
 # isn't set. Empty because the runtime check is in `wm/keymap.rs`; the
@@ -15,9 +16,14 @@ web = ["dep:cyberdeck-web"]
 # device boots straight into uconsole behaviour.
 uconsole-keymap = []
 # http: pulls in `reqwest` and builds the `HttpLoraTransport` so the LoRa
-# screen can talk to a Meshtastic node over LAN HTTP. Off by default so
-# a default `cargo build` doesn't grow the dep graph for users who don't
-# own a node. Enable with `--features http`.
+# screen can talk to a Meshtastic node over LAN HTTP. Enabled by
+# default — the install script and any `cargo build -p cyberdeck-tui`
+# invocation ships the transport. Without it, `maybe_swap_transport`
+# falls back to `FakeTransport` (always disconnected) and the user
+# sees "not connected" even when their IP is correct, which is the
+# failure mode that bit the first user (10.0.0.193 worked in the
+# browser, showed not-connected in the TUI because their installed
+# binary didn't have `reqwest` linked).
 http = ["dep:reqwest"]
 
 [dependencies]

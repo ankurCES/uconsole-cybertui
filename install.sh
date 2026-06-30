@@ -395,7 +395,16 @@ if [[ $INSTALL_ONLY -eq 0 ]] && [[ $NEED_BUILD -eq 1 || $NEED_WEB_BUILD -eq 1 ]]
     fi
     if [[ $NEED_BUILD -eq 1 ]]; then
         log "Building ${TUI_BIN} (release)…"
-        ( cd "$REPO_DIR" && cargo build --release -p cyberdeck-tui )
+        # The `http` feature compiles in `reqwest` + the
+        # `HttpLoraTransport` so the LoRa screen can talk to a
+        # Meshtastic node over LAN HTTP. Without it the screen falls
+        # back to the in-process `FakeTransport` (always disconnected)
+        # and shows "not connected" even when the user has typed a
+        # valid node IP. The feature is enabled by default in
+        # `crates/tui/Cargo.toml`; we pass `--features http`
+        # explicitly so an opt-out via `default-features = false`
+        # still gets the transport.
+        ( cd "$REPO_DIR" && cargo build --release -p cyberdeck-tui --features http )
     fi
 fi
 
