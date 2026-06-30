@@ -30,12 +30,20 @@ impl Screen for LogsScreen {
             }
             KeyCode::Char('f') => {
                 // Spawn a one-shot journalctl -n 50 fetch (no -f so we don't block).
+                // Module 2.3: `recent_since` returns (ts, message) tuples
+                // parsed from `--output=json` so the rendered line carries
+                // the event's actual journal time, not fetch time.
                 let tx = app.tx.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncBufReadExt, BufReader};
                     use tokio::process::Command;
                     let mut child = match Command::new("journalctl")
-                        .args(["-n", "50", "--no-pager", "-q"])
+                        .args([
+                            "-n", "50",
+                            "--no-pager",
+                            "-q",
+                            "-o", "json",
+                        ])
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::null())
                         .spawn()
@@ -53,11 +61,40 @@ impl Screen for LogsScreen {
                     };
                     let stdout = child.stdout.take().unwrap();
                     let mut lines = BufReader::new(stdout).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
+                    use chrono::{DateTime, Utc};
+                    while let Ok(Some(raw)) = lines.next_line().await {
+                        if raw.is_empty() {
+                            continue;
+                        }
+                        let v: serde_json::Value = match serde_json::from_slice(raw.as_bytes()) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        let ts_us = v
+                            .get("__REALTIME_TIMESTAMP")
+                            .and_then(|x| x.as_str())
+                            .and_then(|s| s.parse::<i64>().ok());
+                        let ts = match ts_us {
+                            Some(us) => DateTime::<Utc>::from_timestamp(
+                                us / 1_000_000,
+                                (us % 1_000_000).unsigned_abs() as u32 * 1_000,
+                            )
+                            .map(|dt| dt.with_timezone(&Local))
+                            .unwrap_or_else(Local::now),
+                            None => continue,
+                        };
+                        let msg = v
+                            .get("MESSAGE")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if msg.is_empty() {
+                            continue;
+                        }
                         let _ = tx
                             .send(crate::app::action::Action::LogPushed(LogLine {
-                                ts: Local::now(),
-                                line,
+                                ts,
+                                message: msg,
                             }))
                             .await;
                     }
@@ -127,7 +164,7 @@ impl Screen for LogsScreen {
             .map(|l| {
                 ListItem::new(Line::from(vec![
                     Span::styled(format!(" {} ", l.ts.format("%H:%M:%S")), theme.dim()),
-                    Span::styled(l.line.clone(), theme.fg),
+                    Span::styled(l.message.clone(), theme.fg),
                 ]))
             })
             .collect();

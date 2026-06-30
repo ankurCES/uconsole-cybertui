@@ -210,7 +210,7 @@ impl Screen for SystemScreen {
                 .map(|l| {
                     ListItem::new(Line::from(vec![
                         Span::styled(format!(" {} ", l.ts.format("%H:%M:%S")), theme.dim()),
-                        Span::styled(l.line.clone(), theme.fg),
+                        Span::styled(l.message.clone(), theme.fg),
                     ]))
                 })
                 .collect()
