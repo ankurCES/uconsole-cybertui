@@ -697,6 +697,25 @@ impl LoraTransport for HttpLoraTransport {
         if trimmed.len() > 200 {
             return Err(LoraError::TooLong);
         }
+        // Local echo: mirror `FakeTransport::send_to`'s behaviour
+        // (lora.rs:404-419) by pushing a `LoraChatLine { is_local: true, ... }`
+        // onto the matching thread synchronously, BEFORE the wire PUT.
+        // Without this the chat pane renders empty after the user hits
+        // Enter even though the wire write succeeded — because
+        // `LoraScreen::poll` only mirrors whatever is on
+        // `transport.threads()` onto `app.lora_threads`.
+        // Wiremock test `http_lora_send_to_echoes_local_message_for_longfast`
+        // regresses this.
+        let mut s = self.state.lock().expect("http state poisoned");
+        let my = s.my_node_num.unwrap_or(0);
+        let echo = LoraChatLine {
+            from: proto::node_id_from_num(my),
+            text: trimmed.to_string(),
+            hops_away: 0,
+            is_local: true,
+        };
+        s.push_thread_line(kind.clone(), "me".to_string(), echo);
+        drop(s);
         let bytes = proto::encode_to_radio_packet(kind.to_num(), trimmed.as_bytes());
         let me = Arc::new(self.clone_handle());
         tokio::spawn(async move {
