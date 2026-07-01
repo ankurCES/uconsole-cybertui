@@ -674,3 +674,118 @@ fn http_lora_render_title_strip_tracks_active_thread_no_flash() {
         );
     }
 }
+
+/// Live regression for #2's outbound half — the user types into the
+/// compose line and presses Enter, but the message never appears in
+/// the chat pane. Drives the real `HttpLoraTransport::send_to` against
+/// a wiremock that accepts the outbound PUT, then asserts the local
+/// echo lands on `transport.messages_for(&ChannelKind::LongFast)`
+/// as `is_local=true`. The current `send_to` PUTs to `/api/v1/toradio`
+/// via a spawned tokio task and returns `Ok(())` — but never appends
+/// a `LoraChatLine { is_local: true, ... }` onto `self.threads[LongFast]`.
+/// `LoraScreen::poll` mirrors `transport.threads()` onto `app.lora_threads`
+/// every frame, so without the echo the chat pane renders empty even
+/// though the wire write succeeded.
+///
+/// Mirrors the structure of test #1 (`http_lora_lands_broadcast_chat_on_longfast`)
+/// — OPTIONS+PUT 200, bootstrap drains `MyInfo(7)`, Arc-wrapped transport
+/// with `run_poll_loop` spawned so `send_to` (which spawns its own PUT
+/// task) sees a live client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn http_lora_send_to_echoes_local_message_for_longfast() {
+    let server = MockServer::start().await;
+
+    // 1) Handshake: OPTIONS then PUT — same as test #1.
+    Mock::given(method("OPTIONS"))
+        .and(path("/api/v1/toradio"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/api/v1/toradio"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    // 2) Bootstrap: drain backlog so the transport knows `my_node_num=7`.
+    let mut bootstrap_body = Vec::new();
+    bootstrap_body.extend_from_slice(&my_info_frame(7));
+    Mock::given(method("GET"))
+        .and(path("/api/v1/fromradio"))
+        .and(query_param("all", "true"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(bootstrap_body))
+        .expect(1..)
+        .mount(&server)
+        .await;
+
+    // 3) Long-poll empty.
+    Mock::given(method("GET"))
+        .and(path("/api/v1/fromradio"))
+        .and(query_param("all", "false"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(Vec::<u8>::new()))
+        .mount(&server)
+        .await;
+
+    let base = server.uri();
+    let host = base.trim_start_matches("http://");
+    let transport = HttpLoraTransport::new(host)
+        .expect("HttpLoraTransport::new against wiremock host");
+    let transport_for_task = Arc::new(transport.clone());
+    let handle = tokio::spawn(async move {
+        transport_for_task.run_poll_loop().await
+    });
+
+    // Wait for `connected()` so the bootstrap handshake completed.
+    // Without this, `send_to` would early-return `Err(NotConnected)`.
+    let mut mirrored = false;
+    for _ in 0..40 {
+        sleep(Duration::from_millis(250)).await;
+        if transport.connected() {
+            mirrored = true;
+            break;
+        }
+    }
+    assert!(
+        mirrored,
+        "transport did not reach connected=true within ~10s; \
+         bootstrap likely never delivered MyInfo"
+    );
+
+    // Abort the poller — `send_to` takes `&mut self` and we want
+    // exclusive ownership to call it. The local-echo bug we're
+    // regressing is independent of the poll loop (it lives in
+    // `send_to` itself), so aborting the poller is safe.
+    handle.abort();
+
+    // The act: send "outbound-hello" on LongFast.
+    let mut transport = transport;
+    transport
+        .send_to(&ChannelKind::LongFast, "outbound-hello")
+        .expect("send_to should succeed (transport connected, text non-empty)");
+
+    // The assertion: messages_for(&LongFast) must contain the local echo.
+    let msgs = transport.messages_for(&ChannelKind::LongFast);
+    let echoed = msgs
+        .iter()
+        .find(|l| l.text == "outbound-hello" && l.is_local);
+
+    assert!(
+        echoed.is_some(),
+        "HttpLoraTransport::send_to must echo the outbound message onto \
+         self.threads[LongFast] so the chat pane can render it; \
+         is_local=true, text=\"outbound-hello\"; got msgs={:?}",
+        msgs
+    );
+    let line = echoed.unwrap();
+    assert_eq!(
+        line.from, "!00000007",
+        "echoed line's `from` must be our own my_node_num=7 → \
+         node_id_from_num(7) = \"!00000007\"; got {:?}",
+        line.from
+    );
+    assert_eq!(
+        line.hops_away, 0,
+        "locally-echoed line hops_away must be 0; got {}",
+        line.hops_away
+    );
+}
