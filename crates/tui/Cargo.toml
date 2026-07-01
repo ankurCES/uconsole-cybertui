@@ -55,3 +55,24 @@ humantime.workspace = true
 rand.workspace = true
 once_cell.workspace = true
 async-trait = "0.1"
+
+# Both a library (src/lib.rs) and a binary (src/main.rs) share this
+# crate. The library exists so integration tests can drive the LoRa
+# ingest pipeline end-to-end against `wiremock` without spinning up
+# the full ratatui event loop.
+[lib]
+name = "cyberdeck_tui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cyberdeck-tui"
+path = "src/main.rs"
+
+[dev-dependencies]
+# Integration-test harness for `HttpLoraTransport`. Lets us replay
+# firmware `FromRadio` byte sequences against a real HTTP server in
+# `tests/lora_http_live.rs` to surface live-only bugs that fake-
+# transport unit tests can't reach (e.g., race between the
+# handshake response and the first inbound packet).
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

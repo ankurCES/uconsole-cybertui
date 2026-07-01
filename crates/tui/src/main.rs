@@ -11,16 +11,15 @@
 //!   - tick events from the refreshers,
 //!   - long-running action results (sent as `Action::Toast`).
 
-mod app;
-mod screens;
-mod theme;
-mod ui;
-mod util;
-mod wm;
-
+// The crate's modules now live in `lib.rs` so integration tests
+// can drive the LoRa ingest pipeline end-to-end without spinning
+// up the full ratatui event loop. We re-export them here for the
+// binary so the rest of `main.rs` doesn't have to change.
+#[allow(unused_imports)]
+use cyberdeck_tui::{app, screens, theme, ui, util, wm};
 #[cfg(feature = "web")]
-mod web_bridge;
-
+#[allow(unused_imports)]
+use cyberdeck_tui::web_bridge;
 use std::io::{stdout, Stdout};
 use std::path::PathBuf;
 use std::time::Duration;

@@ -1714,10 +1714,94 @@ mod tests {
         assert!(n.is_online_at(now));
     }
 
-    #[test]
+#[test]
     fn online_threshold_constant_matches_spec() {
         // Pin the constant so a future "tweak it to 30 min" change
         // shows up as a deliberate test update.
         assert_eq!(ONLINE_THRESHOLD_SECS, 15 * 60);
+    }
+
+    /// Live regression for #2 ("live messages don't show"). The wiremock
+    /// tests at `crates/tui/tests/lora_http_live.rs` prove the transport
+    /// path works end-to-end. This test proves the UI path: a chat line
+    /// pushed onto the transport's LongFast thread must surface in the
+    /// renderer's data source (`app.lora_threads[*].lines`) after a
+    /// `poll()` tick, and the active thread must stay LongFast so the
+    /// chat pane is the one drawn.
+    #[test]
+    fn poll_surfaces_inbound_longfast_line_in_chat_pane() {
+        let mut t = FakeTransport::new().with_connected(true);
+        // Seed an inbound chat line on the LongFast thread, mimicking
+        // what `ingest_frame` does on the real HTTP transport when a
+        // broadcast arrives.
+        t.longfast_thread_mut().lines.push(LoraChatLine {
+            from: "!aabbccdd".into(),
+            text: "hello-from-peer".into(),
+            hops_away: 1,
+            is_local: false,
+        });
+
+        let mut app = make_app();
+        let mut screen = LoraScreen::new(Box::new(t));
+        screen.poll(&mut app);
+
+        // The mirrored threads must contain the inbound line.
+        let lf = app
+            .lora_threads
+            .iter()
+            .find(|th| th.kind == ChannelKind::LongFast)
+            .expect("LongFast thread must exist after poll()");
+        assert!(
+            lf.lines.iter().any(|l| l.text == "hello-from-peer"),
+            "inbound LongFast line must surface in app.lora_threads[LongFast].lines; \
+             got {:?}",
+            lf.lines
+        );
+        // Active thread stays LongFast so the chat pane is drawn.
+        assert_eq!(app.lora_active_thread, ChannelKind::LongFast);
+    }
+
+    /// Live regression for #1 ("title flashes real quick and goes back to
+    /// longfast"). The existing `poll_does_not_snap_active_thread_back_when_direct_is_activated`
+    /// test covers ONE poll after Enter. This test covers FIVE consecutive
+    /// polls — closer to the live cadence where the user sees the title
+    /// flash over multiple frames before it settles.
+    #[test]
+    fn clicking_node_row_keeps_active_thread_direct_across_five_polls() {
+        let mut t = FakeTransport::new().with_connected(true);
+        t.nodes.push(LoraNode {
+            node_id: "!0000000a".into(),
+            long_name: "trucker".into(),
+            short_name: "T".into(),
+            hops_away: 1,
+            last_heard_secs: 0,
+            snr: None,
+        });
+
+        let mut app = make_app();
+        let mut screen = LoraScreen::new(Box::new(t));
+        screen.poll(&mut app);
+        app.region = Region::ContentRight;
+        // Move cursor down to the node row (cursor=1), then Enter.
+        screen.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+        screen.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+        assert_eq!(
+            app.lora_active_thread,
+            ChannelKind::Direct(0xa),
+            "Enter on node row must activate Direct(0xa) before any further poll"
+        );
+
+        // Now poll 5 times — if anything snaps the active thread back
+        // to LongFast across these polls, the user sees the title flash.
+        for i in 0..5 {
+            screen.poll(&mut app);
+            assert_eq!(
+                app.lora_active_thread,
+                ChannelKind::Direct(0xa),
+                "poll #{} must NOT snap lora_active_thread back to LongFast; \
+                 that was the user-visible title-flash bug",
+                i
+            );
+        }
     }
 }

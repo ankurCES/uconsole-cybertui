@@ -871,8 +871,10 @@ impl Region {
 /// as a new line, while exact replays within the 2s dedupe window are
 /// dropped. `LogLine` derives `Hash + Eq` so we can use a `HashSet<LogLine>`
 /// directly.
-pub(crate) fn dedupe_logs_into(
-    buf: &mut Vec<LogLine>,
+/// `pub` (not `pub(crate)`) so the binary in `src/main.rs` — which is
+/// now an external user of the `cyberdeck-tui` library — can call it
+/// after the lib/bin refactor.
+pub fn dedupe_logs_into(    buf: &mut Vec<LogLine>,
     incoming: Vec<LogLine>,
     cap: usize,
 ) {
