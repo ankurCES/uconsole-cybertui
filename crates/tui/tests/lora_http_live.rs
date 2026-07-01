@@ -533,11 +533,144 @@ async fn http_lora_screen_does_not_snap_active_thread_after_node_select() {
     for i in 0..5 {
         screen.poll(&mut app);
         assert_eq!(
-app.lora_active_thread,
+            app.lora_active_thread,
             ChannelKind::Direct(0xa),
             "poll #{} must NOT snap lora_active_thread back to LongFast; \
              that was the user-visible title-flash bug",
             i
+        );
+    }
+}
+
+/// Render-capture regression for #1 (rendering-side proof).
+///
+/// The state-level test above proves `app.lora_active_thread` stays
+/// `Direct(0xa)` across 5 polls. This test proves what the user
+/// actually sees — the chat-pane title strip cells rendered by
+/// `LoraScreen::render` via `Terminal::new(TestBackend::new(W, H))` —
+/// matches the active thread on every frame, including after the user
+/// has navigated to a node row and pressed Enter, and across 5 polls.
+///
+/// Two things must hold, in priority order:
+///   * the chat-pane title must track `app.lora_active_thread`
+///     (no render-side stale read),
+///   * it must NOT contain `" longfast "` while a DM is active
+///     (no render-side snap-back).
+///
+/// Reading the buffer is straightforward: the renderer at lora.rs:797+
+/// nests `Block::default().title("LoRa")` around `area`, then splits the
+/// inner body 60/40 horizontal; the chat-pane title is the top border
+/// row of the left chunk. Extracting the symbols along that strip gives
+/// us the rendered title text.
+#[test]
+fn http_lora_render_title_strip_tracks_active_thread_no_flash() {
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use cyberdeck_tui::screens::lora::ChannelKind;
+    use cyberdeck_tui::theme::{Theme, ThemeName};
+
+    fn render_title_strip(
+        term: &mut Terminal<TestBackend>,
+        screen: &mut LoraScreen,
+        app: &mut App,
+        theme: &Theme,
+    ) -> String {
+        term.draw(|f| {
+            let area = f.size();
+            screen.render(f, area, app, theme, true);
+        })
+        .expect("terminal draw should succeed");
+        let buf = term.backend().buffer().clone();
+        // Top border row of the chat-pane Block sits at y=1 (outer
+        // Block at y=0, inner at y=1, cols[0].Block at y=1). The chat
+        // pane is the left 60%, so x ∈ [2, 71) on a 120-wide buffer.
+        (2..71)
+            .map(|x| {
+                buf.cell((x, 1))
+                    .map(|c| c.symbol().chars().next().unwrap_or(' '))
+                    .unwrap_or(' ')
+            })
+            .collect()
+    }
+
+    let mut t = FakeTransport::new().with_connected(true);
+    t.nodes.push(LoraNode {
+        node_id: "!0000000a".into(),
+        long_name: "trucker".into(),
+        short_name: "T".into(),
+        hops_away: 1,
+        last_heard_secs: 0,
+        snr: None,
+    });
+
+    let (tx, _rx) = mpsc::channel(8);
+    let mut app = App::new(tx, _rx);
+    app.current = ScreenId::LoRa;
+
+    let mut screen = LoraScreen::new(Box::new(t));
+    screen.poll(&mut app); // initial mirror
+
+    let backend = TestBackend::new(120, 40);
+    let mut term = Terminal::new(backend).expect("TestBackend terminal");
+    let theme = Theme::by_name(ThemeName::Dark);
+
+    // Frame 1: LongFast is the active thread. Title must read
+    // " longfast ", must NOT read " dm: ".
+    let strip1 = render_title_strip(&mut term, &mut screen, &mut app, &theme);
+    assert!(
+        strip1.contains("longfast"),
+        "frame 1 (LongFast active): chat-pane title strip must contain \
+         'longfast'; got {:?}",
+        strip1
+    );
+    assert!(
+        !strip1.contains("dm:"),
+        "frame 1 (LongFast active): chat-pane title strip must NOT \
+         contain 'dm:'; got {:?}",
+        strip1
+    );
+
+    // User navigates right + activates DM.
+    app.region = Region::ContentRight;
+    screen.on_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE), &mut app);
+    screen.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app);
+    assert_eq!(
+        app.lora_active_thread,
+        ChannelKind::Direct(0xa),
+        "Enter on node row must activate Direct(0xa)"
+    );
+
+    // Frame 2: Direct(0xa) is the active thread. Title must read
+    // " dm: ", must NOT read " longfast ".
+    let strip2 = render_title_strip(&mut term, &mut screen, &mut app, &theme);
+    assert!(
+        strip2.contains("dm:"),
+        "frame 2 (Direct active): chat-pane title strip must contain \
+         'dm:'; got {:?}",
+        strip2
+    );
+    assert!(
+        !strip2.contains("longfast"),
+        "frame 2 (Direct active): chat-pane title strip must NOT \
+         contain 'longfast'; got {:?}",
+        strip2
+    );
+
+    // 5 polls + re-render. The title must STAY " dm: ". No snap-back.
+    for i in 0..5 {
+        screen.poll(&mut app);
+        let strip = render_title_strip(&mut term, &mut screen, &mut app, &theme);
+        assert!(
+            strip.contains("dm:"),
+            "poll #{} (Direct active): title strip must still contain \
+             'dm:' (no flash back); got {:?}",
+            i, strip
+        );
+        assert!(
+            !strip.contains("longfast"),
+            "poll #{} (Direct active): title strip must NOT contain \
+             'longfast' (no flash back); got {:?}",
+            i, strip
         );
     }
 }
