@@ -500,14 +500,22 @@ impl HttpLoraTransport {
                     //     surfacing our own broadcasts as DMs
                     //   * DM to a peer from us — impossible inbound,
                     //     we generated it; ignore if it ever appears
-                    let target: Option<(ChannelKind, String)> = if pkt.to == BROADCAST_NUM {
+                    // 0xFFFFFFFF is the firmware broadcast sentinel;
+                    // `to == 0` is a malformed sender-set field we
+                    // also treat as broadcast to be safe — real
+                    // Meshtastic firmware occasionally omits `to` on
+                    // broadcast packets, and we'd otherwise route
+                    // them to `Direct(0)` which is invisible in the
+                    // UI (no row in the right pane for Direct(0)).
+                    let target: Option<(ChannelKind, String)> = if pkt.to == BROADCAST_NUM
+                        || pkt.to == 0
+                    {
                         Some((
                             ChannelKind::LongFast,
                             "LongFast".to_string(),
                         ))
                     } else if let Some(us) = my_node_num {
-                        if pkt.to == us && pkt.from == us {
-                            // Self-loop reflection — drop.
+                        if pkt.to == us && pkt.from == us {                            // Self-loop reflection — drop.
                             None
                         } else if pkt.to == us {
                             // DM addressed to us from a peer — the
@@ -968,10 +976,69 @@ mod tests {
         assert!(msgs[0].is_local, "from=my_node_num must be marked is_local");
         assert_eq!(msgs[0].text, "hi");
     }
+    /// LIVE regression test for symptom #1 and #2 the user keeps
+    /// reporting: LongFast is empty, and on navigating/selecting the
+    /// title flashes back to "longfast" because real Meshtastic
+    /// firmware occasionally omits the `to` field on broadcast packets
+    /// (so the `MeshPacket.to` protobuf field defaults to `0u32`).
+    ///
+    /// The pre-`MyInfo` branch in `ingest_frame` already accepts
+    /// `to == 0` as LongFast — but the post-`MyInfo` branch routes
+    /// any non-broadcast non-self packet to `Direct(pkt.to)`, which
+    /// means `to == 0` lands on `Direct(0)`. The user never navigates
+    /// to `Direct(0)` because there's no row for it in the right
+    /// pane (the right pane only shows `LongFast` + real node rows),
+    /// so the messages disappear from view entirely.
+    ///
+    /// This test feeds the exact live boot ordering into the actual
+    /// `HttpLoraTransport` (`MyInfo` first → broadcast with
+    /// `from=peer, to=0`) and asserts the line lands on LongFast,
+    /// where the user can actually see it.
+    #[test]
+    fn ingest_broadcast_with_zero_to_after_myinfo_lands_on_longfast() {
+        // Frame 1: FromRadio{my_info{my_node_num=7}}.
+        let my_info_body: Vec<u8> = vec![0x1a, 0x02, 0x08, 0x07];
+
+        // Frame 2: FromRadio{packet{from=0xaabbccdd, NO `to` field at
+        // all on the wire (so MeshPacket.to == 0u32 after decode),
+        // hop_limit=3, hop_start=3, decoded{portnum=1, payload="hi"}}}.
+        let data: Vec<u8> = vec![0x08, 0x01, 0x12, 0x02, b'h', b'i'];
+        let mut mp: Vec<u8> = vec![0x0d];
+        mp.extend_from_slice(&0xaabbccddu32.to_le_bytes());
+        // No `0x15` (to) tag at all — simulates firmware omitting
+        // the field, which makes `pkt.to == 0` after decode.
+        mp.extend_from_slice(&[0x30, 0x03, 0x38, 0x03]); // hop_limit=3, hop_start=3
+        mp.extend_from_slice(&[0x42, data.len() as u8]);
+        mp.extend_from_slice(&data);
+        let chat_body: Vec<u8> = {
+            let mut f = vec![0x12, mp.len() as u8];
+            f.extend_from_slice(&mp);
+            f
+        };
+
+        let t = HttpLoraTransport::new("127.0.0.1").unwrap();
+        t.ingest_frame(&my_info_body);
+        t.ingest_frame(&chat_body);
+
+        // The bug: pre-fix this asserts empty (because the packet
+        // landed on `Direct(0)`, hidden behind a row the renderer
+        // never builds). After the fix the chat line must be on
+        // LongFast where the user can see it.
+        let msgs = t.messages();
+        assert_eq!(
+            msgs.len(),
+            1,
+            "broadcast with to==0 must land on LongFast, not Direct(0)"
+        );
+        assert_eq!(msgs[0].text, "hi");
+        assert_eq!(msgs[0].from, "!aabbccdd");
+        // Must NOT be marked is_local because the sender is a peer,
+        // not our own node_num=7.
+        assert!(!msgs[0].is_local);
+    }
 
     #[test]
-    fn ingest_unknown_portnum_bumps_wire_debug() {
-        // Data{portnum=99 (TELEMETRY_APP-ish), payload="x"} wrapped in
+    fn ingest_unknown_portnum_bumps_wire_debug() {        // Data{portnum=99 (TELEMETRY_APP-ish), payload="x"} wrapped in
         // MeshPacket{from=1, hop_limit=0, hop_start=0, decoded=<Data>}.
         let data: Vec<u8> = vec![0x08, 99, 0x12, 0x01, b'x'];
         let mut mp: Vec<u8> = vec![0x0d];
