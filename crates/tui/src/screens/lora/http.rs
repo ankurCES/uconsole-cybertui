@@ -252,7 +252,10 @@ impl HttpLoraTransport {
         // Accept either a bare IP (`192.168.1.42`) or an explicit
         // `http://192.168.1.42` — the modal lets users paste either.
         let base = if ip.starts_with("http://") || ip.starts_with("https://") {
-            ip.trim_end_matches('/').to_string()
+            // Trim whitespace (a paste from a terminal often has a trailing
+            // newline) and then strip trailing slashes. The bare-IP branch
+            // also calls .trim() — keep them symmetric.
+            ip.trim().trim_end_matches('/').to_string()
         } else {
             format!("http://{}", ip.trim())
         };
@@ -411,9 +414,23 @@ impl HttpLoraTransport {
                             if !bytes.is_empty() {
                                 self.ingest_frame(&bytes);
                             }
+                            // Clear any prior transport/HTTP error — a
+                            // successful poll means the wire is healthy
+                            // again and the footer should reflect that,
+                            // not a stale error from an earlier failure.
+                            let mut s =
+                                self.state.lock().expect("http state poisoned");
+                            s.last_error = None;
                         }
                         Err(e) => {
                             tracing::warn!(error = %e, "lora http: read body failed");
+                            // The TCP read failed mid-body — surface
+                            // it on `last_error` so the footer shows
+                            // the wire is unhealthy, not just a log
+                            // line the user never reads.
+                            let mut s =
+                                self.state.lock().expect("http state poisoned");
+                            s.last_error = Some(format!("fromradio body: {e}"));
                         }
                     }
                     bootstrapped = true;

@@ -565,6 +565,19 @@ impl LoraScreen {
                     Ok(http) => {
                         let for_poll = std::sync::Arc::new(http);
                         let handle = std::sync::Arc::clone(&for_poll);
+                        // Startup self-check: emit an info-level event
+                        // announcing the spawn so the user can see in
+                        // `RUST_LOG=info` output that the live poll loop
+                        // actually fired. Without this log, a
+                        // silently-dropped spawn (feature off, future
+                        // refactor removes the spawn, runtime
+                        // unavailable) looks identical to "node is
+                        // quiet" from the UI. The test
+                        // `http_lora_screen_poll_actually_starts_the_http_poll_loop`
+                        // in `tests/lora_http_live.rs` asserts on
+                        // this line so a future regression can't
+                        // re-silence it.
+                        tracing::info!(host = %ip, "lora: poll loop spawned against {ip}");
                         // `tokio::spawn` requires the runtime; the
                         // TUI is launched inside a tokio runtime
                         // (`#[tokio::main]` in `main.rs`), so a
@@ -611,6 +624,12 @@ impl LoraScreen {
             // toast the user has no way to know the feature flag is
             // the problem.
             if new_ip.is_some() {
+                tracing::warn!(
+                    "lora: http feature NOT enabled — poll loop will NOT spawn; \
+                     rebuild with `cargo build -p cyberdeck-tui --features http` \
+                     to see live messages. This is the silent no-poll \
+                     failure mode."
+                );
                 app.push_toast(
                     crate::app::toast::ToastKind::Error,
                     "lora: http feature not enabled — rebuild with \
