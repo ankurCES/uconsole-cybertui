@@ -25,6 +25,7 @@ use ratatui::Frame;
 use crate::app::screen::{Screen, ScreenId};
 use crate::app::App;
 use crate::theme::Theme;
+use crate::screens::lora::proto::node_id_to_num;
 
 /// HTTP transport for talking to a Meshtastic node over LAN. Pulled in
 /// behind the `http` feature flag so a default `cargo build` doesn't
@@ -142,23 +143,131 @@ pub struct LoraChatLine {
     pub is_local: bool,
 }
 
+/// Which "channel" a chat line belongs to. Mirrors
+/// `meshtastic/web`'s distinction between the shared `LongFast`
+/// primary channel (broadcast in firmware-speak) and 1:1 direct
+/// messages. Both surface via the same `TEXT_MESSAGE_APP = 1`
+/// portnum; they're separated by `MeshPacket.to`:
+///
+///   * `MeshPacket.to == 0xFFFFFFFF` → `LongFast`
+///   * `MeshPacket.to == <other node_num>` → `Direct(<node_num>)`
+///
+/// `LongFast` is the default for outbound when no thread is
+/// explicitly active; `Direct(n)` is keyed by the *other end* of
+/// the conversation (whichever end isn't us). See
+/// `MeshClient.sendPacket` in `meshtastic/web`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ChannelKind {
+    /// The shared primary / `LongFast` channel — broadcast on the wire.
+    LongFast,
+    /// 1:1 with the node whose num is the contained value.
+    Direct(u32),
+}
+
+impl Default for ChannelKind {
+    fn default() -> Self {
+        ChannelKind::LongFast
+    }
+}
+
+impl ChannelKind {
+    /// `true` for the shared channel; `false` for DMs. Lets
+    /// callers branch without exposing the enum's internals.
+    pub fn is_longfast(&self) -> bool {
+        matches!(self, ChannelKind::LongFast)
+    }
+
+    /// The other party's node num on the wire — `0xFFFFFFFF` for
+    /// broadcast, the peer's num for DMs. Used directly as the
+    /// `MeshPacket.to` field when encoding an outbound packet.
+    pub fn to_num(&self) -> u32 {
+        match self {
+            ChannelKind::LongFast => proto::BROADCAST_NUM,
+            ChannelKind::Direct(n) => *n,
+        }
+    }
+
+    /// `LongFast` → `"LongFast"`, `Direct(n)` → the peer's operator
+    /// label when known, else `!<hex>`. Cheap; the renderer can
+    /// pad/truncate.
+    pub fn display_label(&self, node_lookup: &dyn Fn(u32) -> Option<String>) -> String {
+        match self {
+            ChannelKind::LongFast => "LongFast".to_string(),
+            ChannelKind::Direct(n) => node_lookup(*n)
+                .unwrap_or_else(|| format!("!{:08x}", n)),
+        }
+    }
+}
+
+/// A single thread of chat lines — LongFast or a 1:1 DM. The renderer
+/// builds the right pane as `vec![LongFast row] + nodes`, the user
+/// navigates with the arrows, and `Enter` flips
+/// `app.lora_active_thread` to either `LongFast` or `Direct(n)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Thread {
+    pub kind: ChannelKind,
+    pub label: String,
+    pub lines: Vec<LoraChatLine>,
+}
+
+impl Thread {
+    pub fn new(kind: ChannelKind, label: impl Into<String>) -> Self {
+        Self { kind, label: label.into(), lines: Vec::new() }
+    }
+}
+
 /// What the LoRa screen can ask of the underlying transport. All methods
 /// have an in-process `FakeTransport` for tests; the real transport lives
 /// in `LoraScreen::new_http` and is selected at runtime by the IP modal.
+///
+/// Backwards-compat: `messages()` and `send_longfast()` are kept as
+/// **shim default-methods** that delegate to `messages_for(&LongFast)`
+/// and `send_to(&LongFast, _)` respectively, so any implementor of
+/// just the new methods automatically keeps working with callers that
+/// pre-date the thread model.
 pub trait LoraTransport {
     /// Snapshot of known nodes. Returns what the transport currently knows;
     /// the screen does NOT keep a separate authoritative copy until
     /// `apply_nodes` is called.
     fn nodes(&self) -> Vec<LoraNode>;
-    /// Snapshot of chat lines already received on the longfast channel.
-    fn messages(&self) -> Vec<LoraChatLine>;
+
+    /// Snapshot of the chat lines for a given thread (LongFast or a
+    /// `Direct(n)`). New in the thread-aware cut — transports that
+    /// only model broadcast can rely on the default implementation
+    /// which returns an empty `Vec` for `Direct(n)`.
+    fn messages_for(&self, _kind: &ChannelKind) -> Vec<LoraChatLine> {
+        let _ = _kind;
+        Vec::new()
+    }
+
+    /// Snapshot of every thread the transport currently knows about.
+    /// The renderer reads this to build the right pane and to drive the
+    /// input strip's `to:` chip. LongFast is always present (even
+    /// when empty) so the right-pane list has a stable header row.
+    fn threads(&self) -> Vec<Thread>;
+
+    /// Backwards-compat shim — defaults to `messages_for(&ChannelKind::LongFast)`.
+    /// Kept so existing callers (and `FakeTransport::messages`)
+    /// compile unchanged.
+    fn messages(&self) -> Vec<LoraChatLine> {
+        self.messages_for(&ChannelKind::LongFast)
+    }
+
     /// True when the transport has an active HTTP session. False means
     /// "no node" — the screen renders a connect-prompt instead.
     fn connected(&self) -> bool;
-    /// Send `text` from the local node on the longfast channel. The
-    /// transport echoes the line back through `messages()` so the chat
-    /// pane can append it.
-    fn send_longfast(&mut self, text: &str) -> Result<(), LoraError>;
+
+    /// Send `text` from the local node to the given thread (LongFast
+    /// or `Direct(n)`). The transport should echo the line back through
+    /// `messages_for(kind)` so the chat pane can append it.
+    fn send_to(&mut self, _kind: &ChannelKind, _text: &str) -> Result<(), LoraError>;
+
+    /// Backwards-compat shim — defaults to `send_to(&ChannelKind::LongFast, _)`.
+    /// Kept so existing callers (and the long-standing
+    /// `FakeTransport::send_longfast`) compile unchanged.
+    fn send_longfast(&mut self, text: &str) -> Result<(), LoraError> {
+        self.send_to(&ChannelKind::LongFast, text)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,13 +280,23 @@ pub enum LoraError {
 
 /// A no-op transport used by tests and by a TUI running on a box without
 /// a Meshtastic device. Public so the `App` can default to it.
+///
+/// Thread model: holds a `Vec<Thread>` (`LongFast` plus zero-or-more
+/// `Direct(n)` entries). The trait shims route
+/// `messages()` → `messages_for(&LongFast)` and
+/// `send_longfast(...)` → `send_to(&LongFast, ...)` so the
+/// pre-threads test surface keeps working.
 #[derive(Debug, Default, Clone)]
 pub struct FakeTransport {
     pub nodes: Vec<LoraNode>,
-    pub messages: Vec<LoraChatLine>,
+    pub threads: Vec<Thread>,
     pub connected: bool,
-    /// Recorded outbound messages for test assertions.
+    /// Recorded outbound LongFast messages for test assertions.
     pub sent: Vec<String>,
+    /// Recorded outbound DM messages: `(to_node_num, text)`. Separate
+    /// from `sent` so a test that mixes broadcast and DM assertions
+    /// doesn't have to disambiguate.
+    pub sent_dm: Vec<(u32, String)>,
 }
 
 impl FakeTransport {
@@ -196,19 +315,82 @@ impl FakeTransport {
         self.connected = connected;
         self
     }
+
+    /// Find-or-create a LongFast thread. Used by the trait impls
+    /// and by tests that want to seed a thread without going through
+    /// the trait surface.
+    pub fn longfast_thread_mut(&mut self) -> &mut Thread {
+        if self.threads.is_empty() {
+            self.threads.push(Thread::new(ChannelKind::LongFast, "LongFast"));
+        }
+        &mut self.threads[0]
+    }
+
+    /// Find-or-create a `Direct(n)` thread. Inserts in num-sorted
+    /// order so the right-pane list is deterministic across calls.
+    pub fn direct_thread_mut(&mut self, n: u32) -> &mut Thread {
+        let kind = ChannelKind::Direct(n);
+        let pos = self
+            .threads
+            .iter()
+            .position(|t| t.kind == kind)
+            .unwrap_or_else(|| {
+                // Insert sorted by `to_num` after the LongFast
+                // header so the right pane stays stable.
+                let mut idx = self.threads.len();
+                for (i, t) in self.threads.iter().enumerate().skip(1) {
+                    if t.kind.to_num() > n {
+                        idx = i;
+                        break;
+                    }
+                }
+                self.threads
+                    .insert(idx, Thread::new(kind, format!("!{:08x}", n)));
+                idx
+            });
+        &mut self.threads[pos]
+    }
+
+    /// Convenience for tests: number of lines currently held for `kind`.
+    pub fn line_count_for(&self, kind: &ChannelKind) -> usize {
+        self.threads
+            .iter()
+            .find(|t| &t.kind == kind)
+            .map(|t| t.lines.len())
+            .unwrap_or(0)
+    }
 }
 
 impl LoraTransport for FakeTransport {
     fn nodes(&self) -> Vec<LoraNode> {
         self.nodes.clone()
     }
-    fn messages(&self) -> Vec<LoraChatLine> {
-        self.messages.clone()
+    fn threads(&self) -> Vec<Thread> {
+        // Always include the LongFast header row even if the transport
+        // has never received anything — keeps the right-pane layout
+        // stable (one anchor + a list of nodes).
+        if self.threads.is_empty() {
+            return vec![Thread::new(ChannelKind::LongFast, "LongFast")];
+        }
+        if !self.threads.iter().any(|t| t.kind == ChannelKind::LongFast) {
+            let mut t = self.threads.clone();
+            t.insert(0, Thread::new(ChannelKind::LongFast, "LongFast"));
+            return t;
+        }
+        self.threads.clone()
+    }
+    fn messages_for(&self, kind: &ChannelKind) -> Vec<LoraChatLine> {
+        self.threads
+            .iter()
+            .find(|t| &t.kind == kind)
+            .map(|t| t.lines.clone())
+            .unwrap_or_default()
     }
     fn connected(&self) -> bool {
         self.connected
     }
-    fn send_longfast(&mut self, text: &str) -> Result<(), LoraError> {
+
+    fn send_to(&mut self, kind: &ChannelKind, text: &str) -> Result<(), LoraError> {
         if !self.connected {
             return Err(LoraError::NotConnected);
         }
@@ -219,13 +401,22 @@ impl LoraTransport for FakeTransport {
         if trimmed.len() > 200 {
             return Err(LoraError::TooLong);
         }
-        self.sent.push(trimmed.to_string());
-        self.messages.push(LoraChatLine {
+        let line = LoraChatLine {
             from: "me".into(),
             text: trimmed.to_string(),
             hops_away: 0,
             is_local: true,
-        });
+        };
+        match kind {
+            ChannelKind::LongFast => {
+                self.sent.push(trimmed.to_string());
+                self.longfast_thread_mut().lines.push(line);
+            }
+            ChannelKind::Direct(n) => {
+                self.sent_dm.push((*n, trimmed.to_string()));
+                self.direct_thread_mut(*n).lines.push(line);
+            }
+        }
         Ok(())
     }
 }
@@ -235,8 +426,6 @@ impl LoraTransport for FakeTransport {
 /// `FakeTransport` without touching any HTTP code paths.
 pub struct LoraScreen {
     pub transport: Box<dyn LoraTransport + Send>,
-    /// Selected node in the right pane; drives the "to: <name>" hint only.
-    pub nodes_selected: usize,
     /// IP this screen is currently configured against. Diffed against
     /// `app.lora_node_ip` on every `poll` so a fresh IP from the modal
     /// triggers a transport rebuild (FakeTransport → HttpLoraTransport,
@@ -245,13 +434,18 @@ pub struct LoraScreen {
     /// `FakeTransport`). Persisted here so we don't rebuild on every
     /// tick — only when the value actually flips.
     pub current_node_ip: Option<String>,
+    /// Cursor over the virtual right-pane list:
+    /// `vec![LongFast header row, ...nodes]`. `0` = header row,
+    /// `>=1` = node at `(cursor - 1)`. Clamped on `render` (not
+    /// wrapped) so an empty list never panics.
+    pub cursor: usize,
 }
 
 impl LoraScreen {
     pub fn new(transport: Box<dyn LoraTransport + Send>) -> Self {
         Self {
             transport,
-            nodes_selected: 0,
+            cursor: 0,
             current_node_ip: None,
         }
     }
@@ -271,7 +465,16 @@ impl LoraScreen {
         self.maybe_swap_transport(app);
         app.lora_connected = self.transport.connected();
         app.lora_nodes = self.transport.nodes();
-        app.lora_chat = self.transport.messages();
+        app.lora_threads = self.transport.threads();
+        // Make sure the active thread keeps pointing at a real one.
+        // If a DM thread is currently active and the transport has
+        // since dropped it (e.g. cleared `HttpState` on a transport
+        // swap), snap back to LongFast so the chat pane always
+        // renders. If the active thread is LongFast it's always
+        // valid — `threads()` guarantees a LongFast anchor exists.
+        if !app.lora_threads.iter().any(|t| t.kind == app.lora_active_thread) {
+            app.lora_active_thread = ChannelKind::LongFast;
+        }
     }
 
     /// Diff `self.current_node_ip` against `app.lora_node_ip` and rebuild
@@ -383,6 +586,51 @@ impl Screen for LoraScreen {
     }
 
     fn on_key(&mut self, key: KeyEvent, app: &mut App) -> bool {
+        // Right-pane navigation: when the user is focused on the
+        // channels+nodes list, `j`/`k`/arrow keys move the cursor
+        // through it (LongFast header row, then one row per node).
+        // `Enter` opens the focused row as the active thread; `Esc`
+        // snaps back to LongFast. `j`/`k` is the discoverable form;
+        // arrow keys (Up/Down) get the same behaviour for keyboard
+        // navigation habit.
+        if app.region == crate::app::Region::ContentRight {
+            let total_rows = 1usize.saturating_add(app.lora_nodes.len()); // header + nodes
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if self.cursor + 1 < total_rows {
+                        self.cursor += 1;
+                    }
+                    return true;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.cursor > 0 {
+                        self.cursor -= 1;
+                    }
+                    return true;
+                }
+                KeyCode::Enter => {
+                    // 0 = LongFast header → activate LongFast.
+                    // >=1 → the (cursor-1)-th node → activate Direct(n).
+                    // Click sound may want to go here; we keep it pure.
+                    if self.cursor == 0 {
+                        app.lora_active_thread = ChannelKind::LongFast;
+                    } else if let Some(n) = app.lora_nodes.get(self.cursor - 1) {
+                        let num = node_id_to_num(&n.node_id);
+                        app.lora_active_thread = ChannelKind::Direct(num);
+                    }
+                    return true;
+                }
+                KeyCode::Esc => {
+                    // Snap back to LongFast regardless of cursor.
+                    app.lora_active_thread = ChannelKind::LongFast;
+                    return true;
+                }
+                _ => {} // fall through
+            }
+        }
+        // Chat-pane scroll keys (j/k/G/g/PgUp/PgDn) — only meaningful
+        // when the right pane is not the focus, since `j`/`k` would
+        // otherwise collide with cursor navigation above.
         match key.code {
             // Up/Down on the chat scroll offset (tail is 0). Like the
             // System screen's right pane: j/k (Up/Down) step one line.
@@ -412,25 +660,6 @@ impl Screen for LoraScreen {
                 app.lora_chat_offset = app.lora_chat_offset.saturating_sub(10);
                 return true;
             }
-            // Cursor moves on the nodes list. Tab/Shift-Tab cycles the
-            // whole TUI; this stays on the screen's own input handling.
-            KeyCode::Tab => {
-                if !app.lora_nodes.is_empty() {
-                    self.nodes_selected =
-                        (self.nodes_selected + 1) % app.lora_nodes.len();
-                }
-                return true;
-            }
-            KeyCode::BackTab => {
-                if !app.lora_nodes.is_empty() {
-                    self.nodes_selected = if self.nodes_selected == 0 {
-                        app.lora_nodes.len() - 1
-                    } else {
-                        self.nodes_selected - 1
-                    };
-                }
-                return true;
-            }
             // `i` opens the "Node IP" modal so the user can switch to a
             // different Meshtastic node without restarting the TUI. The
             // modal is pre-filled with the current IP (if any) so the
@@ -456,14 +685,21 @@ impl Screen for LoraScreen {
                 };
                 return true;
             }
-            // Send the buffer on Enter.
+            // Send the buffer on Enter. Routes through `send_to` so the
+            // active thread (LongFast by default, `Direct(n)` once the
+            // user has opened a node row with `Enter`) is what the
+            // transport encodes — broadcast on the wire for
+            // LongFast, DM for `Direct(n)`. The transport echoes the
+            // line back through `threads()` so the chat pane can
+            // pick it up on the next `poll`.
             KeyCode::Enter => {
                 let draft = app.lora_input.clone();
                 app.lora_input.clear();
-                match self.transport.send_longfast(&draft) {
+                let kind = app.lora_active_thread.clone();
+                match self.transport.send_to(&kind, &draft) {
                     Ok(()) => {
-                        // Refresh the chat pane so the new line appears.
-                        app.lora_chat = self.transport.messages();
+                        // Refresh the thread list so the new line shows.
+                        app.lora_threads = self.transport.threads();
                         app.push_toast(crate::app::toast::ToastKind::Ok, "sent");
                     }
                     Err(LoraError::NotConnected) => {
@@ -527,17 +763,23 @@ impl Screen for LoraScreen {
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(body);
 
-        // Left: longfast channel chat.
-        // The chat is a text log; we render `lora_chat` lines and clamp
-        // `lora_chat_offset` (lines back from the tail) so an empty buffer
-        // doesn't strand the cursor.
+        // Left: chat pane for the currently-active thread. Pulls lines
+        // out of `app.lora_threads[k]` so a LongFast chat and a DM
+        // chat can sit side-by-side and the user swaps between them
+        // with the right-pane arrow keys + Enter/Esc.
         //
         // Empty-state copy: when no node IP is configured yet the chat
         // pane is the most prominent surface the user sees, so we
         // surface the IP-modal binding here as the call-to-action.
         // Once an IP is set the chat goes back to the generic "no
         // messages yet" hint.
-        let total = app.lora_chat.len();
+        let active_lines = app
+            .lora_threads
+            .iter()
+            .find(|t| t.kind == app.lora_active_thread)
+            .map(|t| t.lines.clone())
+            .unwrap_or_default();
+        let total = active_lines.len();
         let visible_h = cols[0].height as usize;
         let max_off = total.saturating_sub(1);
         if app.lora_chat_offset > max_off {
@@ -545,6 +787,13 @@ impl Screen for LoraScreen {
         }
         let end = total.saturating_sub(app.lora_chat_offset);
         let start = end.saturating_sub(visible_h);
+        // Title reflects which thread the user is composing into. For
+        // LongFast the title is the channel name; for a DM we show
+        // the peer label so the user can confirm before sending.
+        let left_title = match &app.lora_active_thread {
+            ChannelKind::LongFast => " longfast ".to_string(),
+            ChannelKind::Direct(n) => format!(" dm:{:<8} ", truncate(&format!("!{:08x}", n), 8)),
+        };
         let items: Vec<ListItem> = if total == 0 {
             let placeholder: String = if app.lora_node_ip.is_none() {
                 "  press i to set the node IP".to_string()
@@ -556,7 +805,7 @@ impl Screen for LoraScreen {
                 theme.dim(),
             )))]
         } else {
-            app.lora_chat[start..end]
+            active_lines[start..end]
                 .iter()
                 .map(|l| {
                     let arrow = if l.is_local { ">" } else { "·" };
@@ -583,7 +832,7 @@ impl Screen for LoraScreen {
         let left = List::new(items)
             .block(
                 Block::default()
-                    .title(Span::styled(" longfast ", theme.title()))
+                    .title(Span::styled(left_title, theme.title()))
                     .borders(Borders::ALL)
                     .border_style(theme.border(left_focused)),
             )
@@ -595,57 +844,78 @@ impl Screen for LoraScreen {
             .highlight_symbol("▸ ");
         f.render_stateful_widget(left, cols[0], &mut left_state);
 
-        // Right: nodes list with hops.
-        // Clamp the cursor so a stale index never panics on an empty list.
-        if !app.lora_nodes.is_empty() {
-            if self.nodes_selected >= app.lora_nodes.len() {
-                self.nodes_selected = app.lora_nodes.len() - 1;
-            }
-        } else {
-            self.nodes_selected = 0;
+        // Right: navigable channels+nodes list. The shape is one
+        // `[LongFast]` header row followed by one row per known
+        // node, total `1 + lora_nodes.len()` rows. The cursor in
+        // `self.cursor` (per the on_key binding) points at the
+        // currently-focused row and is clamped to stay in range so
+        // an empty list never panics. `Enter` activates the row as
+        // a thread (LongFast for the header, `Direct(n)` for a node).
+        let total_rows = 1usize.saturating_add(app.lora_nodes.len());
+        if self.cursor >= total_rows {
+            self.cursor = total_rows.saturating_sub(1);
         }
-        let right_items: Vec<ListItem> = if app.lora_nodes.is_empty() {
-            vec![ListItem::new(Line::from(Span::styled(
-                "  (no nodes yet)",
+        let mut right_items: Vec<ListItem> = Vec::with_capacity(total_rows);
+        // Header row — the LongFast channel entrypoint.
+        let lf_label = match app.lora_active_thread {
+            ChannelKind::LongFast => "[● LongFast]".to_string(),
+            _ => "[○ LongFast]".to_string(),
+        };
+        right_items.push(ListItem::new(Line::from(Span::styled(
+            lf_label,
+            theme.title(),
+        ))));
+        if app.lora_nodes.is_empty() {
+            right_items.push(ListItem::new(Line::from(Span::styled(
+                "  (no nodes yet — talk to your radio first)",
                 theme.dim(),
-            )))]
+            ))));
         } else {
             let now = LoraNode::now_secs();
-            app.lora_nodes
-                .iter()
-                .map(|n| {
-                    let online = n.is_online_at(now);
-                    let dot = if online { "●" } else { "○" };
-                    let dot_style = if online { theme.ok() } else { theme.warn() };
-                    let hops = if n.hops_away == 0 {
-                        "direct".to_string()
-                    } else {
-                        format!("{} hops", n.hops_away)
-                    };
-                    let snr = match n.snr {
-                        Some(v) => format!("{:.1} dB", v),
-                        None => "—".to_string(),
-                    };
-                    ListItem::new(Line::from(vec![
-                        Span::styled(format!("{} ", dot), dot_style),
-                        Span::styled(format!("{:>8}", truncate(&n.label(), 8)), theme.accent),
-                        Span::styled(format!("  {:<10}", hops), theme.fg),
-                        Span::styled(format!("  {:>8}", snr), theme.dim()),
-                    ]))
-                })
-                .collect()
-        };
-        let right_highlight = if app.lora_nodes.is_empty() {
+            for n in &app.lora_nodes {
+                let online = n.is_online_at(now);
+                let dot = if online { "●" } else { "○" };
+                let dot_style = if online { theme.ok() } else { theme.warn() };
+                let hops = if n.hops_away == 0 {
+                    "direct".to_string()
+                } else {
+                    format!("{} hops", n.hops_away)
+                };
+                let snr = match n.snr {
+                    Some(v) => format!("{:.1} dB", v),
+                    None => "—".to_string(),
+                };
+                // Highlight the row whose DM is currently the active
+                // thread so the user can see which conversation the
+                // compose line is wired to.
+                let peer_active = matches!(
+                    app.lora_active_thread,
+                    ChannelKind::Direct(num) if node_id_to_num(&n.node_id) == num
+                );
+                let name_style = if peer_active {
+                    theme.ok()
+                } else {
+                    ratatui::style::Style::default().fg(theme.accent)
+                };
+                right_items.push(ListItem::new(Line::from(vec![
+                    Span::styled(format!("{} ", dot), dot_style),
+                    Span::styled(format!("{:>8}", truncate(&n.label(), 8)), name_style),
+                    Span::styled(format!("  {:<10}", hops), theme.fg),
+                    Span::styled(format!("  {:>8}", snr), theme.dim()),
+                ])));
+            }
+        }
+        let right_highlight = if app.lora_nodes.is_empty() && total_rows == 0 {
             None
         } else {
-            Some(self.nodes_selected.min(right_items.len() - 1))
+            Some(self.cursor.min(right_items.len().saturating_sub(1)))
         };
         let mut right_state = ListState::default().with_selected(right_highlight);
         let right_focused = matches!(app.region, crate::app::Region::ContentRight);
         let right = List::new(right_items)
             .block(
                 Block::default()
-                    .title(Span::styled(" nodes ", theme.title()))
+                    .title(Span::styled(" channels & nodes ", theme.title()))
                     .borders(Borders::ALL)
                     .border_style(theme.border(right_focused)),
             )
@@ -663,10 +933,26 @@ impl Screen for LoraScreen {
         } else {
             Span::styled("○ not connected ", theme.warn())
         };
-        let to_node = if let Some(n) = app.lora_nodes.get(self.nodes_selected) {
-            format!("to: {}", truncate(&n.label(), 8))
-        } else {
-            "to: (broadcast)".to_string()
+        // The compose line's `to:` chip now reflects the active
+        // thread (`app.lora_active_thread`), NOT a node index. The
+        // user flips it with `Enter` on the right pane's focused
+        // row; `Esc` snaps it back. Keeping this in one place means
+        // the chip and the left pane's title can never disagree.
+        let to_node = match &app.lora_active_thread {
+            ChannelKind::LongFast => "to: broadcast".to_string(),
+            ChannelKind::Direct(n) => {
+                // Prefer the operator-chosen label if we know the
+                // peer; fall back to `!xxxxxxxx` so the user can
+                // still tell which node they're replying to.
+                let nid = format!("!{:08x}", n);
+                let label = app
+                    .lora_nodes
+                    .iter()
+                    .find(|cand| cand.node_id == nid)
+                    .map(|cand| cand.label())
+                    .unwrap_or_else(|| truncate(&nid, 8));
+                format!("to: {}", label)
+            }
         };
         // IP-modal binding chip — always visible so the user can
         // re-enter the modal (and switch to a different node) at any
@@ -741,6 +1027,7 @@ pub fn is_meshtastic_serial_path(_p: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::Region;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use tokio::sync::mpsc;
 
@@ -852,14 +1139,20 @@ mod tests {
             is_local: false,
         };
         let mut t = FakeTransport::with_nodes(vec![node.clone()]).with_connected(true);
-        t.messages.push(line.clone());
+        let mut th = Thread::new(ChannelKind::LongFast, "longfast");
+        th.lines.push(line.clone());
+        t.threads.push(th);
 
         let mut app = make_app();
         let mut screen = LoraScreen::new(Box::new(t));
         screen.poll(&mut app);
         assert!(app.lora_connected);
         assert_eq!(app.lora_nodes, vec![node]);
-        assert_eq!(app.lora_chat, vec![line]);
+        assert_eq!(
+            app.lora_threads.first().map(|th| th.lines.as_slice()),
+            Some([line.clone()].as_slice()),
+            "lora_threads must mirror transport.threads() (LongFast first)"
+        );
     }
 
     // Typing builds up the input buffer; Enter sends it via the transport.
@@ -880,9 +1173,15 @@ mod tests {
         // Buffer cleared, line echoed into messages via `poll`.
         assert_eq!(app.lora_input, "");
         screen.poll(&mut app);
-        assert_eq!(app.lora_chat.len(), 1);
-        assert!(app.lora_chat[0].is_local);
-        assert_eq!(app.lora_chat[0].text, "hi");
+        // Default active thread is LongFast; the local echo lives there.
+        let longfast = app
+            .lora_threads
+            .iter()
+            .find(|th| th.kind == ChannelKind::LongFast)
+            .expect("LongFast thread must exist after Enter");
+        assert_eq!(longfast.lines.len(), 1);
+        assert!(longfast.lines[0].is_local);
+        assert_eq!(longfast.lines[0].text, "hi");
     }
 
     // Enter with an empty/disconnected transport pushes a toast and does
@@ -895,7 +1194,10 @@ mod tests {
         let mut screen = LoraScreen::new(Box::new(t));
 
         assert!(screen.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut app));
-        assert!(app.lora_chat.is_empty(), "no line should be added");
+        assert!(
+            app.lora_threads.iter().all(|th| th.lines.is_empty()),
+            "no line should be added to any thread"
+        );
         assert!(
             app.toasts.iter().any(|t| t.text.contains("not connected")),
             "expected a 'not connected' toast, got {:?}",
@@ -936,14 +1238,25 @@ mod tests {
         screen.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE), &mut app);
         assert_eq!(app.lora_input, "a");
 
-        // Tab moves the nodes cursor; BackTab wraps.
-        assert_eq!(screen.nodes_selected, 0);
-        screen.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
-        assert_eq!(screen.nodes_selected, 1);
-        screen.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut app);
-        assert_eq!(screen.nodes_selected, 0, "Tab wraps to first");
-        screen.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE), &mut app);
-        assert_eq!(screen.nodes_selected, 1, "BackTab wraps backward to last");
+        // The right-pane cursor (`self.cursor`) is driven by Up/Down
+        // (and j/k) under the new navigable-UI design. Down advances,
+        // Up retreats, both clamp at the bounds (no wrap). The
+        // handler is gated on `app.region == ContentRight`, so the
+        // test must set the region before pressing the keys.
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        app.region = Region::ContentRight;
+        assert_eq!(screen.cursor, 0);
+        screen.on_key(down, &mut app);
+        assert_eq!(screen.cursor, 1, "Down advances to first node");
+        screen.on_key(down, &mut app);
+        assert_eq!(screen.cursor, 2, "Down advances to second node");
+        screen.on_key(down, &mut app);
+        assert_eq!(screen.cursor, 2, "Down clamps at last row");
+        screen.on_key(up, &mut app);
+        assert_eq!(screen.cursor, 1, "Up retreats from last node");
+        screen.on_key(up, &mut app);
+        assert_eq!(screen.cursor, 0, "Up clamps at first row");
     }
 
     // G/g snap the chat scroll offset.
@@ -966,6 +1279,158 @@ mod tests {
     fn lora_transport_is_object_safe() {
         fn assert_object_safe(_t: Box<dyn LoraTransport + Send>) {}
         assert_object_safe(Box::new(FakeTransport::new()));
+    }
+
+    // ── Slice 4b: DM-thread end-to-end reply ─────────────────────────
+    //
+    // This is the single most important user flow for the LoRa screen:
+    //   1. user picks a peer in the right-pane nav,
+    //   2. types into the input strip,
+    //   3. hits Enter,
+    //   4. sees their message bubble land in that peer's thread.
+    //
+    // It exercises the *whole* chain wired this slice:
+    //   `Region::ContentRight` gate → Down + Enter on the nav cursor
+    //   → typing → Enter → `send_to(&Direct(node_num), …)` →
+    //   `screen.poll(&mut app)` → mirror `transport.threads()` into
+    //   `app.lora_threads` → bubble appears in the right thread.
+    //
+    // Without this test, a regression in any single link of that chain
+    // could ship unnoticed because none of the other tests cross
+    // ChannelKind::LongFast → ChannelKind::Direct(_).
+    #[test]
+    fn send_to_dm_routes_into_dm_thread_via_poll() {
+        // Seed a `FakeTransport` with the LongFast header thread and a
+        // DM thread for `Direct(0x42)`. Pre-seed one inbound line in
+        // the DM thread so we can assert the user's reply *appends*
+        // (doesn't replace) and that `is_local=true` distinguishes it
+        // from the peer.
+        let mut transport = FakeTransport::new().with_connected(true);
+        // LongFast at index 0 — implicit via `longfast_thread_mut`.
+        let _ = transport.longfast_thread_mut();
+        let dm_pre = LoraChatLine {
+            from: "!00000042".into(),
+            text: "ack me?".into(),
+            hops_away: 1,
+            is_local: false,
+        };
+        transport.direct_thread_mut(0x42).lines.push(dm_pre);
+        // Seed a node so it shows up in the right-pane nav list (so
+        // the Down + Enter on `app.region = ContentRight` actually
+        // lands on a Direct thread).
+        transport.nodes.push(LoraNode {
+            node_id: "!00000042".into(),
+            long_name: "trucker".into(),
+            short_name: "T".into(),
+            hops_away: 1,
+            last_heard_secs: 0,
+            snr: None,
+        });
+
+        // Build the screen + app and switch focus to the right pane so
+        // Down + Enter route through the nav handler (not the input
+        // strip). The nav handler indexes `app.lora_nodes` (NOT
+        // `app.lora_threads`): `cursor = 0` ⇒ LongFast header,
+        // `cursor = 1..len ⇒ Direct(node_id_to_num(app.lora_nodes[cursor-1]))`.
+        // So we MUST `screen.poll(&mut app)` first to mirror the
+        // seeded transport state into `app.lora_nodes`; otherwise
+        // the cursor would have an empty rows list and Enter would
+        // have nothing to activate.
+        let mut screen = LoraScreen::new(Box::new(transport));
+        let mut app = make_app();
+        screen.poll(&mut app);
+        app.region = Region::ContentRight;
+        // Initial active thread is LongFast (per `LoraScreen::new`),
+        // and the cursor starts at 0 (LongFast row). One Down moves
+        // the cursor to the first DM row (`app.lora_nodes[0]`); Enter
+        // activates it as Direct(node_id_to_num("!00000042")).
+        assert_eq!(app.lora_nodes.len(), 1);
+        assert_eq!(app.lora_nodes[0].node_id, "!00000042");
+        screen.on_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app,
+        );
+        screen.on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+        );
+
+        // Sanity: we landed on Direct(0x42), NOT LongFast.
+        assert_eq!(
+            app.lora_active_thread,
+            ChannelKind::Direct(0x42),
+            "Down+Enter in ContentRight must activate Direct(0x42), \
+             not stay on LongFast"
+        );
+
+        // Focus back to the input strip and type "hi" + Enter. We pick
+        // a word WITHOUT `j`/`k` because both collide with the
+        // chat-pane scroll handler at line 641 when the right pane
+        // is not focused (`KeyCode::Char('j') | Down` and
+        // `KeyCode::Char('k') | Up` are both captured there before
+        // reaching the input-strip's `KeyCode::Char(c)` handler at
+        // line 736 — those keys are deliberately shared between
+        // nav-scroll and input-cursor, like vim). "hi" is the same
+        // word the design doc uses for the smoke test.
+        app.region = Region::ContentLeft;
+        screen.on_key(kc('h'), &mut app);
+        screen.on_key(kc('i'), &mut app);
+        assert_eq!(app.lora_input, "hi");
+        screen.on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.lora_input, "");
+
+        // poll() mirrors transport.threads() into app.lora_threads
+        // — note: we observe the *user-visible* surface
+        // (`app.lora_threads`) rather than reading `FakeTransport`'s
+        // private `sent` / `sent_dm` logs, because the screen only
+        // sees the transport through `Box<dyn LoraTransport + Send>`,
+        // not the concrete `FakeTransport` type. The trait's
+        // `messages_for(kind)` is what `screen.poll` uses internally
+        // to populate `app.lora_threads`, so observing the mirror
+        // *is* the proof that `send_to` was called correctly.
+        screen.poll(&mut app);
+
+        // The DM thread for 0x42 must now hold BOTH lines:
+        //   - the seeded peer line ("ack me?"),
+        //   - the user's reply ("hi") with is_local = true.
+        let dm = app
+            .lora_threads
+            .iter()
+            .find(|t| t.kind == ChannelKind::Direct(0x42))
+            .expect("Direct(0x42) thread must exist after poll()");
+        assert_eq!(
+            dm.lines.len(),
+            2,
+            "Direct(0x42) thread must contain the seeded line + the user's reply"
+        );
+        assert!(!dm.lines[0].is_local, "seeded line is from peer, not local");
+        assert_eq!(dm.lines[0].text, "ack me?");
+        assert!(dm.lines[1].is_local, "user's reply must be marked is_local");
+        assert_eq!(dm.lines[1].text, "hi");
+        assert_eq!(
+            dm.lines[1].from, "me",
+            "local echo's `from` field is the literal string \"me\" — see \
+             FakeTransport::send_to at lora.rs:404-409"
+        );
+
+        // LongFast thread must remain untouched — the user typed into
+        // a DM, so broadcast had nothing to gain an echoed line.
+        // (Together with `dm.lines.len() == 2` above, this also
+        // proves the routing is DM-only: the user's "hi" went to
+        // Direct(0x42), NOT to the broadcast channel.)
+        let longfast = app
+            .lora_threads
+            .iter()
+            .find(|t| t.kind == ChannelKind::LongFast)
+            .expect("LongFast header thread must still exist");
+        assert_eq!(
+            longfast.lines.len(),
+            0,
+            "LongFast must NOT receive a local echo when the user is in a DM"
+        );
     }
 
     // ── Slice 5: online indicator ────────────────────────────────────

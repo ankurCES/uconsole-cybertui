@@ -37,9 +37,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::screens::lora::proto::{
-    self, FromRadio, NodeInfo, TEXT_MESSAGE_APP,
+    self, FromRadio, NodeInfo, TEXT_MESSAGE_APP, BROADCAST_NUM,
 };
-use crate::screens::lora::{LoraChatLine, LoraError, LoraNode, LoraTransport};
+use crate::screens::lora::{
+    ChannelKind, LoraChatLine, LoraError, LoraNode, LoraTransport, Thread,
+};
 
 /// User-Agent sent with every request. `reqwest` defaults to
 /// `reqwest/0.12` which is useless on the node-side HTTP logs;
@@ -100,7 +102,7 @@ pub struct WireDebug {
 
 /// Shared state between the poll task (which is `Send`-bound) and the
 /// trait accessors (which the renderer calls on the UI thread).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct HttpState {
     /// True after the first 2xx from any endpoint.
     connected: bool,
@@ -126,21 +128,54 @@ struct HttpState {
     /// Decoded nodes from `FromRadio.node_info`. Keyed by `node_id`
     /// (`!xxxxxxxx` hex of `num`) for cheap upserts.
     nodes: HashMap<String, LoraNode>,
-    /// Decoded chat lines from `FromRadio.packet.decoded{portnum=1}`.
-    /// Bounded to `MAX_CHAT_LINES` — oldest entries drop off the front.
-    chat: Vec<LoraChatLine>,
+    /// All chat threads (LongFast plus any auto-created `Direct(n)`).
+    /// `LoraScreen::poll` mirrors this onto `App::lora_threads`; the
+    /// input strip's `to:` chip and the left-pane title reflect
+    /// `app.lora_active_thread`. Inbound DM routing rules:
+    ///
+    ///   * `MeshPacket.to == 0xFFFFFFFF` (broadcast) →
+    ///     append to `threads[LongFast]`.
+    ///   * `MeshPacket.to == <n>` and `n != my_node_num` →
+    ///     auto-create `threads[Direct(n)]` on first sight and append.
+    ///   * `MeshPacket.to == <n>` and `from == <n>` and `n == my_node_num`
+    ///     (self-loop reflection) → dropped, to avoid double-threading
+    ///     our own broadcasts back as DMs.
+    ///
+    /// The LongFast thread always exists; DMs are created on demand.
+    threads: Vec<Thread>,
     /// Our own node num (from `FromRadio.my_info.my_node_num`), if the
-    /// firmware has sent one. Used to label "me" in the chat pane
-    /// (matching `FakeTransport::send_longfast`'s `from: "me"`).
+    /// firmware has sent one. Used to label "me" in the chat pane and
+    /// to drop self-loop DMs during inbound routing.
     my_node_num: Option<u32>,
     /// Wire-debug counters.
     wire: WireDebug,
 }
 
+impl Default for HttpState {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            handshake_issued: false,
+            last_want_config_secs: 0,
+            rx_frames: 0,
+            tx_frames: 0,
+            last_frame_hex: String::new(),
+            last_error: None,
+            nodes: HashMap::new(),
+            // Always include the LongFast anchor so `messages_for` and
+            // `threads` are never empty and the right-pane header row
+            // is always rendered.
+            threads: vec![Thread::new(ChannelKind::LongFast, "LongFast")],
+            my_node_num: None,
+            wire: WireDebug::default(),
+        }
+    }
+}
+
 impl HttpState {
-    /// Snapshot of the chat lines (cloned for the renderer).
-    fn chat_snapshot(&self) -> Vec<LoraChatLine> {
-        self.chat.clone()
+    /// Snapshot of the thread list (cloned for the renderer).
+    fn threads_snapshot(&self) -> Vec<Thread> {
+        self.threads.clone()
     }
 
     /// Snapshot of the nodes (cloned for the renderer).
@@ -153,11 +188,41 @@ impl HttpState {
         v
     }
 
-    fn push_chat(&mut self, line: LoraChatLine) {
-        self.chat.push(line);
-        if self.chat.len() > MAX_CHAT_LINES {
-            let drop = self.chat.len() - MAX_CHAT_LINES;
-            self.chat.drain(0..drop);
+    /// Append `line` to the thread identified by `kind`. If the thread
+    /// doesn't exist yet (a first-time DM from a previously-unseen
+    /// peer) it is auto-created. The cap (`MAX_CHAT_LINES`) is applied
+    /// per-thread so a chatty DM can't drown out LongFast and vice
+    /// versa. Caller has already locked the state mutex.
+    fn push_thread_line(&mut self, kind: ChannelKind, label: impl Into<String>, line: LoraChatLine) {
+        let pos = match kind {
+            ChannelKind::LongFast => 0,
+            ChannelKind::Direct(n) => {
+                let mut idx = 1;
+                while idx < self.threads.len() {
+                    if let ChannelKind::Direct(existing) = self.threads[idx].kind {
+                        if existing == n {
+                            break;
+                        }
+                        if existing > n {
+                            break;
+                        }
+                    }
+                    idx += 1;
+                }
+                // Insert if not already present.
+                if idx >= self.threads.len()
+                    || self.threads[idx].kind != kind
+                {
+                    self.threads
+                        .insert(idx, Thread::new(kind.clone(), label.into()));
+                }
+                idx
+            }
+        };
+        self.threads[pos].lines.push(line);
+        if self.threads[pos].lines.len() > MAX_CHAT_LINES {
+            let drop = self.threads[pos].lines.len() - MAX_CHAT_LINES;
+            self.threads[pos].lines.drain(0..drop);
         }
     }
 
@@ -423,12 +488,82 @@ impl HttpLoraTransport {
                         .get(&from_id)
                         .map(|n| n.label())
                         .unwrap_or(from_id);
-                    s.push_chat(LoraChatLine {
-                        from: from_label,
-                        text,
-                        hops_away: hops,
-                        is_local,
-                    });
+                    // Inbound DM routing — matches what
+                    // `meshtastic/web`'s `MeshClient.sendPacket`
+                    // encodes on the way out, in reverse:
+                    //
+                    //   * broadcast (`to == 0xFFFFFFFF`) → LongFast
+                    //   * DM to us from a peer (`to == us`, `from != us`)
+                    //     → `Direct(from)`
+                    //   * DM to us from ourselves (`from == to == us`,
+                    //     a self-loop reflection) → drop to avoid
+                    //     surfacing our own broadcasts as DMs
+                    //   * DM to a peer from us — impossible inbound,
+                    //     we generated it; ignore if it ever appears
+                    let target: Option<(ChannelKind, String)> = if pkt.to == BROADCAST_NUM {
+                        Some((
+                            ChannelKind::LongFast,
+                            "LongFast".to_string(),
+                        ))
+                    } else if let Some(us) = my_node_num {
+                        if pkt.to == us && pkt.from == us {
+                            // Self-loop reflection — drop.
+                            None
+                        } else if pkt.to == us {
+                            // DM addressed to us from a peer — the
+                            // other end is the sender.
+                            Some((
+                                ChannelKind::Direct(pkt.from),
+                                proto::node_id_from_num(pkt.from),
+                            ))
+                        } else {
+                            // DM between two other nodes that the
+                            // firmware is forwarding to us — show
+                            // it under the recipient's thread (the
+                            // "other end" perspective from our
+                            // vantage point). This matches the
+                            // meshtastic/web UI which also shows
+                            // observed DMs.
+                            Some((
+                                ChannelKind::Direct(pkt.to),
+                                proto::node_id_from_num(pkt.to),
+                            ))
+                        }
+                    } else {
+                        // We don't know our own node num yet (no
+                        // `MyInfo` frame has arrived) — best we can
+                        // do is bucket it under the sender as a DM,
+                        // since we can't tell broadcast from DM in
+                        // this state. (Once `MyInfo` arrives the
+                        // next packet will be routed correctly.)
+                        if pkt.from == pkt.to {
+                            None
+                        } else if pkt.to == 0 {
+                            // to == 0 isn't a valid Meshtastic node
+                            // num — treat as broadcast to be safe.
+                            Some((
+                                ChannelKind::LongFast,
+                                "LongFast".to_string(),
+                            ))
+                        } else {
+                            Some((
+                                ChannelKind::Direct(pkt.to),
+                                proto::node_id_from_num(pkt.to),
+                            ))
+                        }
+                    };
+                    if let Some((kind, label)) = target {
+                        s.push_thread_line(
+                            kind,
+                            label,
+                            LoraChatLine {
+                                from: from_label,
+                                text,
+                                hops_away: hops,
+                                is_local,
+                            },
+                        );
+                    }
                 }
                 FromRadio::NodeInfo(ni) => {
                     let node = node_info_to_lora_node(&ni);
@@ -507,19 +642,37 @@ impl LoraTransport for HttpLoraTransport {
         self.state.lock().expect("http state poisoned").nodes_snapshot()
     }
 
-    fn messages(&self) -> Vec<LoraChatLine> {
-        self.state.lock().expect("http state poisoned").chat_snapshot()
+    fn messages_for(&self, kind: &ChannelKind) -> Vec<LoraChatLine> {
+        let s = self.state.lock().expect("http state poisoned");
+        s.threads_snapshot()
+            .into_iter()
+            .find(|t| &t.kind == kind)
+            .map(|t| t.lines)
+            .unwrap_or_default()
+    }
+
+    fn threads(&self) -> Vec<Thread> {
+        self.state.lock().expect("http state poisoned").threads_snapshot()
     }
 
     fn connected(&self) -> bool {
         self.state.lock().expect("http state poisoned").connected
     }
 
-    /// Validate the text and, on success, hand it to `put_toradio`.
-    /// The actual HTTP call is async; we spawn it so the trait method
-    /// (sync) doesn't block the UI. The user gets a toast on spawn;
-    /// transport errors surface as toasts from the spawned task.
-    fn send_longfast(&mut self, text: &str) -> Result<(), LoraError> {
+    /// Validate the text, encode a `ToRadio { packet: MeshPacket { to,
+    /// decoded: Data{portnum=TEXT_MESSAGE_APP, payload=text} } }` via
+    /// `proto::encode_to_radio_packet`, and PUT it to `/api/v1/toradio`.
+    /// Mirrors `MeshClient.sendPacket` in `meshtastic/web` exactly:
+    /// the only field that differs between LongFast and a DM is
+    /// `MeshPacket.to` (broadcast vs peer num). The actual HTTP call is
+    /// async; we spawn it so the trait method (sync) doesn't block the
+    /// UI. Errors from the spawned task are logged via `tracing`.
+    ///
+    /// `kind.to_num()` is the single source of truth for which `to`
+    /// field the encoder writes — `ChannelKind::LongFast` →
+    /// `BROADCAST_NUM`, `ChannelKind::Direct(n)` → `n`. Pinning this
+    /// here keeps the trait and the encoder aligned.
+    fn send_to(&mut self, kind: &ChannelKind, text: &str) -> Result<(), LoraError> {
         let trimmed = text.trim();
         if !self.connected() {
             return Err(LoraError::NotConnected);
@@ -530,11 +683,11 @@ impl LoraTransport for HttpLoraTransport {
         if trimmed.len() > 200 {
             return Err(LoraError::TooLong);
         }
+        let bytes = proto::encode_to_radio_packet(kind.to_num(), trimmed.as_bytes());
         let me = Arc::new(self.clone_handle());
-        let body = trimmed.as_bytes().to_vec();
         tokio::spawn(async move {
-            if let Err(e) = me.put_toradio(body).await {
-                tracing::warn!(error = ?e, "lora http: send failed");
+            if let Err(e) = me.put_toradio(bytes).await {
+                tracing::warn!(error = ?e, "lora http: send_to failed");
             }
         });
         Ok(())
@@ -548,7 +701,7 @@ impl LoraTransport for HttpLoraTransport {
 // through `LoraTransport::clone` (which would re-build the client), so
 // we expose a tiny `clone_handle` helper.
 impl HttpLoraTransport {
-    /// Cheap "handle" clone for `send_longfast`.
+    /// Cheap "handle" clone for `send_to`.
     fn clone_handle(&self) -> HttpLoraTransport {
         HttpLoraTransport {
             base: self.base.clone(),
@@ -790,6 +943,11 @@ mod tests {
         let data: Vec<u8> = vec![0x08, 0x01, 0x12, 0x02, b'h', b'i'];
         let mut mp: Vec<u8> = vec![0x0d];
         mp.extend_from_slice(&7u32.to_le_bytes());
+        // to=BROADCAST_NUM (field 2, fixed32) so the packet routes to
+        // LongFast — that's what `messages()` (the LongFast shim) reads.
+        // Without this, the routing branch treats `from=to=0` as a DM
+        // between two unknown nodes and lands in `Direct(0)`, not LongFast.
+        mp.extend_from_slice(&[0x15, 0xff, 0xff, 0xff, 0xff]);
         mp.extend_from_slice(&[0x30, 0x03, 0x38, 0x03]);
         mp.extend_from_slice(&[0x42, data.len() as u8]);
         mp.extend_from_slice(&data);

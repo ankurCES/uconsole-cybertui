@@ -25,8 +25,18 @@
 
 use std::collections::HashMap;
 
-/// `Data.portnum` value for plain-text chat. Pinned by a test.
+/// `Data.portnum` value for plain-text chat (broadcast on a channel, or
+/// a DM — distinguished by `MeshPacket.to` being broadcast vs a node num,
+/// NOT by a separate portnum). Pinned by a test.
 pub const TEXT_MESSAGE_APP: u32 = 1;
+
+/// `MeshPacket.to` value for a broadcast packet (any node on the
+/// configured channel should receive it). Verified from
+/// `packages/sdk/src/core/constants/index.ts:1` in the meshtastic/web
+/// repo: `const broadcastNum = 0xffffffff`. Pinned by a test so a
+/// future meshtastic/web bump that changes the constant surfaces as a
+/// red test rather than a silent DM-vs-broadcast misclassification.
+pub const BROADCAST_NUM: u32 = 0xFFFF_FFFF;
 
 /// One `FromRadio` variant. Every frame the firmware sends is one of
 /// these (or `Unknown` for variants we don't model). The parser slices
@@ -112,6 +122,94 @@ pub fn encode_to_radio_want_config_id(id: u32) -> Vec<u8> {
     out.push(0x18); // (field 3 << 3) | 0 (varint)
     out.extend_from_slice(&encode_leb128(id as u64));
     out
+}
+
+/// Outbound chat frame: build a `ToRadio { packet: MeshPacket { from,
+/// to, hop_limit, hop_start, want_ack, channel, decoded: Data {
+/// portnum, payload } } }` and return the wire bytes for `PUT
+/// /api/v1/toradio`.
+///
+/// The shape mirrors what `MeshClient.sendPacket` produces in
+/// meshtastic/web (`packages/sdk/src/core/client/MeshClient.ts:256`):
+///   * portnum: always `TEXT_MESSAGE_APP` (1) for chat — DMs and
+///     broadcast share the portnum; the routing is decided by `to`.
+///   * `to`: `BROADCAST_NUM` for broadcast, the target node num for DM.
+///   * `from`: 0 — the firmware overwrites with the local node num.
+///   * `hop_limit = hop_start = 3` — matches the meshtastic/web SDK
+///     default; the firmware decrements `hop_limit` on each relay.
+///   * `channel`: 0 (`Primary` / `LongFast`) — pinned by `ChannelNumber`
+///     in meshtastic/web. We only model the primary channel this slice.
+///   * `want_ack`: defaults to false (true would block on the device's
+///     `QueueStatus` reply).
+pub fn encode_to_radio_packet(
+    to: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    encode_to_radio_packet_full(to, payload, 0, 3, 3, false, 0)
+}
+
+/// Full outbound encoder — exposed for tests so we can pin the
+/// `hop_limit = hop_start = 3` default without re-implementing it.
+pub fn encode_to_radio_packet_full(
+    to: u32,
+    payload: &[u8],
+    from: u32,
+    hop_limit: u32,
+    hop_start: u32,
+    want_ack: bool,
+    channel: u32,
+) -> Vec<u8> {
+    // 1. Build the inner Data{portnum=TEXT_MESSAGE_APP, payload=<bytes>}.
+    let mut data: Vec<u8> = Vec::with_capacity(payload.len() + 4);
+    data.push(0x08); // Data.portnum = 1 (field 1, varint)
+    data.extend_from_slice(&encode_leb128(TEXT_MESSAGE_APP as u64));
+    data.push(0x12); // Data.payload (field 2, length-delim)
+    encode_length_delim(&mut data, payload.len());
+    data.extend_from_slice(payload);
+
+    // 2. Build MeshPacket{from, to, hop_limit, hop_start, want_ack, channel, decoded=<Data>}.
+    let mut mp: Vec<u8> = Vec::with_capacity(data.len() + 32);
+    // from=1 (fixed32, wire=5 → tag 0x0d). 0 → firmware overwrites.
+    mp.push(0x0d);
+    mp.extend_from_slice(&from.to_le_bytes());
+    // to=2 (fixed32, wire=5 → tag 0x15).
+    mp.push(0x15);
+    mp.extend_from_slice(&to.to_le_bytes());
+    // channel=3 (varint, wire=0 → tag 0x18).
+    if channel != 0 {
+        mp.push(0x18);
+        mp.extend_from_slice(&encode_leb128(channel as u64));
+    }
+    // hop_limit=6 (varint, wire=0 → tag 0x30).
+    mp.push(0x30);
+    mp.extend_from_slice(&encode_leb128(hop_limit as u64));
+    // hop_start=7 (varint, wire=0 → tag 0x38).
+    mp.push(0x38);
+    mp.extend_from_slice(&encode_leb128(hop_start as u64));
+    // want_ack=8 (bool, varint, wire=0 → tag 0x40).
+    if want_ack {
+        mp.push(0x40);
+        mp.push(0x01);
+    }
+    // decoded=8 (Data, length-delim, wire=2 → tag 0x42).
+    mp.push(0x42);
+    encode_length_delim(&mut mp, data.len());
+    mp.extend_from_slice(&data);
+
+    // 3. Wrap in ToRadio{packet=<MeshPacket>}.
+    // ToRadio.packet=1 (length-delim, wire=2 → tag 0x0a).
+    let mut out: Vec<u8> = Vec::with_capacity(mp.len() + 2);
+    out.push(0x0a);
+    encode_length_delim(&mut out, mp.len());
+    out.extend_from_slice(&mp);
+    out
+}
+
+/// Helper: write a LEB128-prefixed length-delimited header into `out`.
+/// `n` is the byte count of the payload that will follow. Mirrors what
+/// `encode_leb128` does but inlined so the call site stays readable.
+fn encode_length_delim(out: &mut Vec<u8>, n: usize) {
+    out.extend_from_slice(&encode_leb128(n as u64));
 }
 
 // ─── Wire decoders ──────────────────────────────────────────────────────
@@ -609,6 +707,23 @@ pub fn node_id_from_num(num: u32) -> String {
     format!("!{num:08x}")
 }
 
+/// Inverse of `node_id_from_num`. Accepts both the canonical
+/// `!aabbccdd` form and an unprefixed `aabbccdd`; trims surrounding
+/// whitespace; returns `None` if the string isn't valid 1–8 hex
+/// characters (per `node_id_from_num`'s `%08x` shape). Used by the
+/// screen to convert `LoraNode::node_id` back to a numeric u32 for
+/// `ChannelKind::Direct(n)` when the user opens a node row with
+/// Enter.
+pub fn node_id_to_num(id: &str) -> u32 {
+    let trimmed = id.trim();
+    let hex = trimmed.strip_prefix('!').unwrap_or(trimmed);
+    // 1–8 hex chars → at most u32.
+    if hex.is_empty() || hex.len() > 8 {
+        return 0;
+    }
+    u32::from_str_radix(hex, 16).unwrap_or(0)
+}
+
 /// Resolve a `from` field from a chat packet to a human-friendly label
 /// using the current `nodes` table. Falls back to the raw `!xxxxxxxx`
 /// hex if we haven't seen the node yet.
@@ -682,6 +797,93 @@ mod tests {
             encode_to_radio_want_config_id(128),
             vec![0x18, 0x80, 0x01]
         );
+    }
+
+    // ─── Outbound chat encoder ──────────────────────────────────────────
+    //
+    // The shape mirrors what `MeshClient.sendPacket` produces in
+    // meshtastic/web (see `packages/sdk/src/core/client/MeshClient.ts:256`).
+    // The pin tests below lock the byte-exact wire shape so a future
+    // refactor that silently breaks outgoing chat surfaces as a red
+    // test, not a silently-misframed packet.
+
+    /// Hand-compute the expected bytes for
+    /// `encode_to_radio_packet(BROADCAST_NUM, b"hi")` and compare against
+    /// the encoder output. Layout (innermost first):
+    ///
+    /// ```text
+    /// Data{portnum=1, payload="hi"}:
+    ///     0x08 0x01          portnum=1 (varint)
+    ///     0x12 0x02 'h' 'i'  payload (length-delim, len=2)
+    ///
+    /// MeshPacket{from=0, to=BROADCAST_NUM, hop_limit=3, hop_start=3, decoded=<Data>}:
+    ///     0x0d 00 00 00 00                                from=0 (fixed32)
+    ///     0x15 ff ff ff ff                                to=BROADCAST_NUM
+    ///     0x30 0x03                                       hop_limit=3
+    ///     0x38 0x03                                       hop_start=3
+    ///     0x42 0x06 <Data bytes>                          decoded (length-delim, len=6)
+    ///
+    /// ToRadio{packet=<MeshPacket>}:
+    ///     0x0a 0x12 <MeshPacket bytes>                    packet (length-delim, len=18)
+    /// ```
+    #[test]
+    fn encode_to_radio_packet_broadcast_chat_wire_bytes_pinned() {
+        let got = encode_to_radio_packet(BROADCAST_NUM, b"hi");
+        let mut expected: Vec<u8> = Vec::new();
+        // MeshPacket body (18 bytes):
+        expected.extend_from_slice(&[0x0d, 0, 0, 0, 0]);          // from=0
+        expected.extend_from_slice(&[0x15, 0xff, 0xff, 0xff, 0xff]); // to=broadcast
+        expected.extend_from_slice(&[0x30, 0x03]);                 // hop_limit=3
+        expected.extend_from_slice(&[0x38, 0x03]);                 // hop_start=3
+        expected.extend_from_slice(&[0x42, 0x06]);                 // decoded length
+        // Data{portnum=1, payload="hi"} (6 bytes):
+        expected.extend_from_slice(&[0x08, 0x01, 0x12, 0x02, b'h', b'i']);
+        // ToRadio wrapper:
+        let mp_len = expected.len();
+        let mut framed: Vec<u8> = vec![0x0a, mp_len as u8];
+        framed.extend_from_slice(&expected);
+        assert_eq!(got, framed, "broadcast chat wire bytes mismatch");
+    }
+
+    /// DM to a specific node: same as broadcast except `to = <num>`.
+    #[test]
+    fn encode_to_radio_packet_dm_wire_bytes_pinned() {
+        let got = encode_to_radio_packet(0x42424242, b"yo");
+        let mut expected: Vec<u8> = Vec::new();
+        expected.extend_from_slice(&[0x0d, 0, 0, 0, 0]);                   // from=0
+        expected.extend_from_slice(&[0x15, 0x42, 0x42, 0x42, 0x42]);        // to=0x42424242
+        expected.extend_from_slice(&[0x30, 0x03]);                          // hop_limit=3
+        expected.extend_from_slice(&[0x38, 0x03]);                          // hop_start=3
+        // Data{portnum=1, payload="yo"} = 0x08 0x01 0x12 0x02 'y' 'o' = 6 bytes
+        expected.extend_from_slice(&[0x42, 0x06]);                          // decoded length
+        expected.extend_from_slice(&[0x08, 0x01, 0x12, 0x02, b'y', b'o']);  // Data
+        let mp_len = expected.len();
+        let mut framed: Vec<u8> = vec![0x0a, mp_len as u8];
+        framed.extend_from_slice(&expected);
+        assert_eq!(got, framed, "DM wire bytes mismatch");
+    }
+
+    /// Outbound packets must default to `hop_limit = hop_start = 3` so
+    /// the recipient can derive `hops_away = hop_start - hop_limit` on
+    /// each hop. The value is also the source of truth for "how many
+    /// hops is this message allowed to travel"; pinned here.
+    #[test]
+    fn encode_to_radio_packet_defaults_hops_to_three() {
+        let bytes = encode_to_radio_packet(BROADCAST_NUM, b"x");
+        // The encoder emits:
+        //     [0x0a, <len>, 0x0d, ...from..., 0x15, ...to..., 0x30, 3, 0x38, 3, ...]
+        // We know `from=0` is 5 bytes (0x0d + 4 zero LE bytes), `to=broadcast`
+        // is 5 bytes (0x15 + 0xFF 0xFF 0xFF 0xFF), and that
+        // `hop_limit`/`hop_start` come right after. So the byte positions of
+        // `0x30` and `0x38` are deterministic — assert them directly rather
+        // than reimplementing the wire parser here.
+        //
+        // Position math: 1 (ToRadio tag) + 1 (len) + 5 (from) + 5 (to) = 12,
+        // so `0x30` is at index 12 and `3` at 13; `0x38` at 14, `3` at 15.
+        assert_eq!(bytes[12], 0x30, "byte 12 must be hop_limit tag");
+        assert_eq!(bytes[13], 3, "byte 13 must be hop_limit value");
+        assert_eq!(bytes[14], 0x38, "byte 14 must be hop_start tag");
+        assert_eq!(bytes[15], 3, "byte 15 must be hop_start value");
     }
 
     // ─── FromRadio parser: chat packet ────────────────────────────────
@@ -858,5 +1060,43 @@ mod tests {
     fn node_id_format() {
         assert_eq!(node_id_from_num(0xaabbccdd), "!aabbccdd");
         assert_eq!(node_id_from_num(0), "!00000000");
+    }
+
+    #[test]
+    fn node_id_to_num_round_trips_canonical_form() {
+        // Round-trip: `node_id_from_num(n)` → `!xxxxxxxx` →
+        // `node_id_to_num(...)` ≡ `n`.
+        for n in [0u32, 1, 0xaabbccdd, 0xffffffff, 0xdeadbeef] {
+            assert_eq!(
+                node_id_to_num(&node_id_from_num(n)),
+                n,
+                "round-trip broke for {n:#x}"
+            );
+        }
+    }
+
+    #[test]
+    fn node_id_to_num_accepts_unprefixed_hex() {
+        // The renderer may hand us a label without the leading `!`
+        // (e.g. an operator-customised short_name that happens to
+        // be hex). Be tolerant — return the parsed u32 rather than 0.
+        assert_eq!(node_id_to_num("aabbccdd"), 0xaabbccdd);
+    }
+
+    #[test]
+    fn node_id_to_num_trims_whitespace() {
+        // `LoraNode::node_id` may carry a trailing newline from a
+        // copy-paste; the parser should still produce the right u32.
+        assert_eq!(node_id_to_num("  !deadbeef  "), 0xdeadbeef);
+    }
+
+    #[test]
+    fn node_id_to_num_returns_zero_for_garbage() {
+        // Empty, non-hex, or over-long input should *not* panic —
+        // we use the return as a fallback ("didn't recognise the
+        // id, default to 0 and the chat renders the raw bytes").
+        assert_eq!(node_id_to_num(""), 0);
+        assert_eq!(node_id_to_num("zzzzzzzz"), 0);
+        assert_eq!(node_id_to_num("123456789abcdef"), 0); // 15 hex chars > 8
     }
 }

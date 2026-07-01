@@ -737,13 +737,21 @@ pub struct App {
     /// the snapshot (not the `Box<dyn LoraTransport>`) so test code can
     /// build an `App` without any HTTP handle open.
     pub lora_nodes: Vec<crate::screens::lora::LoraNode>,
-    /// Longfast channel chat history. Same lifecycle as `lora_nodes`:
-    /// populated by `LoraScreen::poll`, never read directly by other
-    /// screens.
-    pub lora_chat: Vec<crate::screens::lora::LoraChatLine>,
-    /// Live tail offset for the chat list. `0` = tail; growing values
-    /// scroll up (away from the tail). `usize::MAX` (set on `g`) jumps
-    /// to the start of the buffer.
+    /// All threads the transport currently knows about — always at
+    /// least the `LongFast` anchor, plus `Direct(n)` entries
+    /// auto-created on the first inbound DM from a previously-unseen
+    /// node. Same lifecycle as `lora_nodes`: populated by
+    /// `LoraScreen::poll`, never read directly by other screens.
+    pub lora_threads: Vec<crate::screens::lora::Thread>,
+    /// Which thread the input strip currently composes into. Default
+    /// `LongFast` so a fresh user sees the shared channel. `Enter`
+    /// on a node in the right pane swaps this to `Direct(n)`; `Esc`
+    /// snaps it back. The whole screen's `to: …` chip and chat pane
+    /// mirror this state.
+    pub lora_active_thread: crate::screens::lora::ChannelKind,
+    /// Live tail offset for the active thread's chat list. `0` =
+    /// tail; growing values scroll up (away from the tail).
+    /// `usize::MAX` (set on `g`) jumps to the start of the buffer.
     pub lora_chat_offset: usize,
     /// Current input buffer for the chat compose line. Cleared after a
     /// successful send.
@@ -964,7 +972,8 @@ impl App {
             files_right: PathBuf::from("/"),
             files_right_entries: Vec::new(),
             lora_nodes: Vec::new(),
-            lora_chat: Vec::new(),
+            lora_threads: Vec::new(),
+            lora_active_thread: crate::screens::lora::ChannelKind::LongFast,
             lora_chat_offset: 0,
             lora_input: String::new(),
             lora_connected: false,
