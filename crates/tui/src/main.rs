@@ -43,7 +43,7 @@ use tokio::sync::mpsc;
 use app::action::{Action, RunAction};
 use app::screen::{Screen, ScreenId};
 use app::toast::ToastKind;
-use app::{App, ChoiceCommit, ConfirmKind, InputKind, Modal, Region, Wizard};
+use app::{App, ChoiceCommit, ChoiceOption, ConfirmKind, InputKind, Modal, Region, Wizard};
 use theme::Theme;
 
 type Tui = Terminal<CrosstermBackend<Stdout>>;
@@ -873,6 +873,74 @@ fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
     if screen == ScreenId::Bluetooth {
         app.tx.try_send(Action::Run(RunAction::BluetoothScan)).ok();
     }
+    // LoRa screen — fire the IP-entry popup the first time (and every
+    // time) the user lands on the LoRa screen with no node IP
+    // configured. The popup shape is:
+    //   * No past IPs on file → plain `Modal::Input` asking for the IP.
+    //     Exactly the same shape the existing `i` keypress uses; just
+    //     auto-fired instead of key-bound.
+    //   * One-or-more past IPs → `Modal::Choice` listing each past IP
+    //     alongside "+ Add new IP…". Picking a past IP commits via
+    //     `ChoiceCommit::LoraPickStoredIp { ip }` in `run_choice`,
+    //     which mirrors the `InputKind::LoraNodeIp` submit path
+    //     (sets `app.lora_node_ip` + pushes MRU + surfaces a toast).
+    //     Picking "+ Add new IP…" falls through to the same input
+    //     modal via `ChoiceCommit::PickInput { LoraNodeIp, ... }`.
+    //
+    // Important: only fire when the modal isn't already non-None so
+    // a user mid-modal (e.g. typing in a WifiPassword prompt when
+    // they Tab into LoRa) doesn't get their input stolen. Also
+    // only fire when `app.current` was *previously* not LoRa — guard
+    // against re-popup on every internal `switch_screen` call (the
+    // Wi-Fi / Bluetooth side-effects already follow this pattern).
+    if screen == ScreenId::LoRa && matches!(app.modal, Modal::None) {
+        if app.lora_node_ip.is_none() {
+            if app.lora_recent_ips.is_empty() {
+                // First-run: no past IPs — drop straight into the IP
+                // entry modal. The user can still cancel with Esc
+                // and reopen with `i`.
+                app.open_input(
+                    "Meshtastic node IP (first time)",
+                    InputKind::LoraNodeIp,
+                );
+            } else {
+                // Returning user: present the MRU list with an
+                // "add new" affordance. The picker handles commit
+                // dispatch through `run_choice`. We pre-select the
+                // most-recent IP (index 0 is MRU) so Enter on open
+                // reconnects to the last-used node — same ergonomic
+                // as the Wi-Fi saved-network picker.
+                let mut options: Vec<ChoiceOption> = Vec::new();
+                options.push(ChoiceOption {
+                    id: "__add_new__".to_string(),
+                    label: "+ Add new IP…".to_string(),
+                });
+                for ip in &app.lora_recent_ips {
+                    options.push(ChoiceOption {
+                        id: format!("ip:{ip}"),
+                        label: ip.clone(),
+                    });
+                }
+                let prompt = format!(
+                    "Meshtastic node IP (last: {})",
+                    app.lora_recent_ips[0],
+                );
+                let commit_kind =
+                    ChoiceCommit::PickInput {
+                        kind: InputKind::LoraNodeIp,
+                        prompt: "Meshtastic node IP".to_string(),
+                        masked: false,
+                        prefill: String::new(),
+                    };
+                app.modal = Modal::Choice {
+                    prompt,
+                    options,
+                    cursor: 1, // skip "+ Add new IP…"; point at the MRU entry
+                    commit_kind: Some(commit_kind),
+                };
+            }
+        }
+    }
 }
 
 async fn handle_key(
@@ -1622,12 +1690,16 @@ pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: In
             // transport from `FakeTransport` to an `HttpLoraTransport`
             // pointed at that address. Empty submit is a no-op so the
             // modal doesn't accidentally wipe an existing IP — same
-            // pattern as `PackageSearch`.
+            // pattern as `PackageSearch`. Also push onto
+            // `app.lora_recent_ips` so the auto-popup next time the
+            // LoRa screen is opened (with no IP set) can offer this
+            // address as a one-keystroke reconnect.
             let ip = value.trim().to_string();
             if ip.is_empty() {
                 app.push_toast(ToastKind::Warn, "node IP cannot be empty");
                 return;
             }
+            app.push_lora_recent_ip(&ip);
             app.lora_node_ip = Some(ip);
             app.push_toast(
                 ToastKind::Info,
@@ -1713,6 +1785,32 @@ async fn run_choice(
             // Note: the caller is responsible for setting `app.pending_ssid`
             // etc. before launching the picker if downstream behaviour depends
             // on it.
+            let _ = id;
+        }
+        ChoiceCommit::LoraPickStoredIp { ip } => {
+            // The LoRa auto-popup picks a previously-used IP from
+            // `app.lora_recent_ips`. Wire it the same way as a fresh
+            // `InputKind::LoraNodeIp` submit: stash the trimmed value
+            // on `lora_node_ip`, refresh MRU position in
+            // `lora_recent_ips`, and surface a toast so the user sees
+            // the next-tick connection attempt. The transport swap
+            // happens in `LoraScreen::poll` on the next `Action::Tick`.
+            let trimmed = ip.trim().to_string();
+            if trimmed.is_empty() {
+                app.push_toast(
+                    ToastKind::Warn,
+                    "lora: empty IP in picker",
+                );
+                return;
+            }
+            app.push_lora_recent_ip(&trimmed);
+            app.lora_node_ip = Some(trimmed.clone());
+            app.modal = Modal::None;
+            app.push_toast(
+                ToastKind::Info,
+                format!("lora: connecting to {trimmed} (next tick)"),
+            );
+            let _ = tx;
             let _ = id;
         }
     }

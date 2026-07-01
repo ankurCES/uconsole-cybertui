@@ -538,9 +538,15 @@ impl HttpLoraTransport {
                         // next packet will be routed correctly.)
                         if pkt.from == pkt.to {
                             None
-                        } else if pkt.to == 0 {
-                            // to == 0 isn't a valid Meshtastic node
-                            // num — treat as broadcast to be safe.
+                        } else if pkt.to == BROADCAST_NUM || pkt.to == 0 {
+                            // BROADCAST_NUM is the firmware-defined
+                            // broadcast; `to == 0` is a malformed
+                            // sender-set field we also treat as
+                            // broadcast to be safe. Both belong on
+                            // LongFast — landing a pre-`MyInfo`
+                            // broadcast in `Direct(0xFFFFFFFF)` would
+                            // hide every LongFast packet behind a
+                            // thread the user never navigates to.
                             Some((
                                 ChannelKind::LongFast,
                                 "LongFast".to_string(),

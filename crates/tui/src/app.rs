@@ -120,7 +120,9 @@ pub struct ChoiceOption {
 
 /// Where a Choice commit lands. `PickInput` opens the named `InputKind`
 /// prompt with `id` pre-supplied via `prefill`; `RunAction` dispatches
-/// directly; `Next` re-enters the wizard with the picked step value.
+/// directly; `LoraPickStoredIp` reconnects to a previously-used
+/// Meshtastic node IP chosen from the auto-popup picker; `Next`
+/// re-enters the wizard with the picked step value.
 #[derive(Debug)]
 pub enum ChoiceCommit {
     /// Open an Input/Secret modal with `prefill` already in the buffer.
@@ -132,6 +134,12 @@ pub enum ChoiceCommit {
     },
     /// Dispatch this RunAction verbatim.
     RunAction(crate::app::action::RunAction),
+    /// Connect to a previously-used Meshtastic node IP (selected from
+    /// the auto-popup fired by `switch_screen` when the user opens
+    /// the LoRa screen with no IP set and at least one recent IP on
+    /// file). Wraps a `String` so the existing `ChoiceCommit` enum's
+    /// `Debug` derive stays accurate.
+    LoraPickStoredIp { ip: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -688,6 +696,12 @@ pub struct App {
     /// `None` means "no node configured yet" and the screen stays on
     /// the FakeTransport (Slice 4 swaps the transport on first set).
     pub lora_node_ip: Option<String>,
+    /// Recently-used Meshtastic node IPs, MRU-ordered, dedup'd. Capped
+    /// at `LORA_RECENT_IPS_CAP`. The auto-popup on opening the LoRa
+    /// screen reads this to offer "pick a past IP" alongside "add a
+    /// new IP" so the user doesn't retype the same address. In-memory
+    /// only for this slice — file persistence is a follow-up.
+    pub lora_recent_ips: Vec<String>,
     pub theme_name: screen::ThemeNameReexport,
     pub mouse: bool,
     pub show_help: bool,
@@ -977,6 +991,12 @@ impl App {
             lora_chat_offset: 0,
             lora_input: String::new(),
             lora_connected: false,
+            // LoRa recent-IPs list, MRU-ordered, dedup'd on push.
+            // Empty by default; populated by `push_lora_recent_ip`
+            // on every successful `InputKind::LoraNodeIp` submit.
+            // The auto-popup on LoRa screen open consumes this to
+            // let the user reuse a known-good IP without retyping.
+            lora_recent_ips: Vec::new(),
             // Module 5.2 — initialise empty. The 1Hz refiller populates
             // this on its first tick; the header sparkline falls back to
             // a dashed placeholder until something lands.
@@ -986,6 +1006,44 @@ impl App {
             // toggles the tree view.
             proc_tree: Vec::new(),
             proc_tree_view: false,
+        }
+    }
+
+    /// Maximum number of past LoRa node IPs remembered in
+    /// `App::lora_recent_ips`. Eight covers a typical home setup
+    /// (router + a couple of mesh repeaters) without growing the
+    /// picker modal unbounded. Capped loosely so older IPs fall off
+    /// automatically as the user adds new ones.
+    pub const LORA_RECENT_IPS_CAP: usize = 8;
+
+    /// Push a new IP into `lora_recent_ips`, dedup'd (existing
+    /// entries move-to-front) and capped at `LORA_RECENT_IPS_CAP`.
+    /// Called by the `InputKind::LoraNodeIp` submit arm and by the
+    /// past-IP picker so the list stays MRU regardless of which
+    /// path connected the user. Whitespace-only and duplicate-of-
+    /// front entries are no-ops so a no-op submit doesn't churn
+    /// the list.
+    pub fn push_lora_recent_ip(&mut self, ip: &str) {
+        let trimmed = ip.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // Move-to-front (MRU) semantics: if the IP is already in
+        // the list, remove its old position and put it at the head.
+        if let Some(pos) = self.lora_recent_ips.iter().position(|e| e == trimmed) {
+            if pos == 0 {
+                return; // already at front — nothing to do
+            }
+            let entry = self.lora_recent_ips.remove(pos);
+            self.lora_recent_ips.insert(0, entry);
+        } else {
+            self.lora_recent_ips.insert(0, trimmed.to_string());
+        }
+        // Cap at the well-known limit. Older entries fall off the
+        // tail. `Vec::truncate` is O(1).
+        let cap = Self::LORA_RECENT_IPS_CAP;
+        if self.lora_recent_ips.len() > cap {
+            self.lora_recent_ips.truncate(cap);
         }
     }
 

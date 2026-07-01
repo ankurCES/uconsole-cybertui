@@ -466,14 +466,65 @@ impl LoraScreen {
         app.lora_connected = self.transport.connected();
         app.lora_nodes = self.transport.nodes();
         app.lora_threads = self.transport.threads();
-        // Make sure the active thread keeps pointing at a real one.
-        // If a DM thread is currently active and the transport has
-        // since dropped it (e.g. cleared `HttpState` on a transport
-        // swap), snap back to LongFast so the chat pane always
-        // renders. If the active thread is LongFast it's always
-        // valid — `threads()` guarantees a LongFast anchor exists.
+        // Reconcile `lora_active_thread` against the transport's threads.
+        //
+        // Two failure modes to fix here:
+        //
+        //   1. User activated a DM via the right pane (Enter on a node
+        //      row) but the transport hasn't yet seen an inbound DM
+        //      from that peer — so `app.lora_threads` has no
+        //      `Direct(n)` for it. `find(...)` in the renderer then
+        //      returns `None` and the chat pane renders empty.
+        //      Worse, on the *next* tick the previous behaviour was
+        //      to snap `lora_active_thread` back to `LongFast`,
+        //      which made the title flash on every selection.
+        //
+        //   2. LongFast is always present (the contract), so it never
+        //      lands here.
+        //
+        // Fix: when `lora_active_thread` is `Direct(n)` and the thread
+        // is missing, auto-create it from the matching `LoraNode` (if
+        // we know the peer) or a placeholder label. This:
+        //   * keeps `find(...)` happy so the chat pane renders an
+        //     empty thread (with the "no messages yet" copy) instead
+        //     of a placeholder,
+        //   * prevents the title from flashing back to `longfast`
+        //     because `lora_active_thread` stays pinned to `Direct(n)`,
+        //   * keeps the transport's source of truth unmutated — the
+        //     placeholder thread lives only on `app`, not on the
+        //     transport. When the first real inbound DM from that
+        //     peer arrives, `ingest_frame` lands it on the matching
+        //     transport thread, and the next `poll()` mirrors it onto
+        //     `app` (replacing our placeholder, which had `lines: []`).
+        //
+        // We DON'T snap back to `LongFast` here — keeping the user's
+        // selection sticky is the whole point.
         if !app.lora_threads.iter().any(|t| t.kind == app.lora_active_thread) {
-            app.lora_active_thread = ChannelKind::LongFast;
+            if let ChannelKind::Direct(n) = app.lora_active_thread {
+                let label = app
+                    .lora_nodes
+                    .iter()
+                    .find(|node| {
+                        node_id_to_num(&node.node_id) == n
+                    })
+                    .map(|node| node.label())
+                    .unwrap_or_else(|| format!("!{:08x}", n));
+                app.lora_threads.push(Thread::new(
+                    ChannelKind::Direct(n),
+                    label,
+                ));
+                // Sort DM threads by `to_num` after the LongFast
+                // anchor so the right-pane list order stays stable
+                // and matches the order the renderer expects when
+                // cross-referencing against `app.lora_nodes`.
+                sort_lora_threads(&mut app.lora_threads);
+            } else {
+                // LongFast or any other fallback — snap to LongFast
+                // as a last resort (shouldn't happen given the
+                // transport's `LongFast` anchor contract, but
+                // defensive).
+                app.lora_active_thread = ChannelKind::LongFast;
+            }
         }
     }
 
@@ -1000,6 +1051,22 @@ fn truncate(s: &str, n: usize) -> String {
     }
 }
 
+/// Stable sort for the `app.lora_threads` mirror: LongFast first (always
+/// at index 0), then `Direct(n)` entries sorted ascending by `n`. Used
+/// after `LoraScreen::poll` auto-seeds a `Direct(n)` placeholder so the
+/// right-pane list order matches the order the renderer and tests
+/// expect.
+fn sort_lora_threads(threads: &mut Vec<Thread>) {
+    threads.sort_by(|a, b| {
+        match (&a.kind, &b.kind) {
+            (ChannelKind::LongFast, ChannelKind::LongFast) => std::cmp::Ordering::Equal,
+            (ChannelKind::LongFast, _) => std::cmp::Ordering::Less,
+            (_, ChannelKind::LongFast) => std::cmp::Ordering::Greater,
+            (ChannelKind::Direct(a), ChannelKind::Direct(b)) => a.cmp(b),
+        }
+    });
+}
+
 /// Convenience: detect whether a path looks like a Meshtastic USB-CDC
 /// mount (`/dev/ttyUSB*` or `/dev/ttyACM*`). Kept around for the legacy
 /// serial-transport path; the LoRa screen's runtime IP modal does NOT
@@ -1430,6 +1497,152 @@ mod tests {
             longfast.lines.len(),
             0,
             "LongFast must NOT receive a local echo when the user is in a DM"
+        );
+    }
+
+    // ── Slice 6: chat-invisible / title-flash regression pins ──────
+    //
+    // User-reported bug: after pressing Enter to activate a DM thread
+    // in the right pane, the chat pane renders empty AND the title
+    // flashes back to "longfast" on the next tick.
+    //
+    // Root cause was `LoraScreen::poll` snapping
+    // `app.lora_active_thread` back to `LongFast` whenever the
+    // transport's `threads()` did not yet contain a `Direct(n)`
+    // entry (which is true until the first inbound DM from that
+    // peer arrives). The renderer's `find(...)` then returns `None`
+    // and the chat pane renders the empty-thread placeholder.
+    //
+    // Fix: when `lora_active_thread` is `Direct(n)` and the thread
+    // is missing from the transport mirror, auto-seed it on
+    // `App::lora_threads` with the peer's label so:
+    //   (a) the title sticks to `dm:…` (no flash back to longfast),
+    //   (b) the chat pane has a thread to render against (empty
+    //       lines + the "(no messages yet)" copy),
+    //   (c) typing still routes to that thread via
+    //       `send_to(&Direct(n), …)` (covered by
+    //       `send_to_dm_routes_into_dm_thread_via_poll` above).
+    //
+    // These tests pin each part of that contract.
+    #[test]
+    fn poll_does_not_snap_active_thread_back_when_direct_is_activated() {
+        // Seed a FakeTransport with one node but no thread for that
+        // node (matches the live path: the user has activated a node
+        // in the right pane before the firmware has emitted any
+        // inbound DM from them).
+        let mut t = FakeTransport::new().with_connected(true);
+        t.nodes.push(LoraNode {
+            node_id: "!0000000a".into(),
+            long_name: String::new(),
+            short_name: String::new(),
+            hops_away: 1,
+            last_heard_secs: 0,
+            snr: None,
+        });
+        // Critically: no `Direct(0xa)` thread exists in the
+        // transport yet. The user's typical path on the real HTTP
+        // backend looks like this until the first DM round-trips.
+
+        let mut app = make_app();
+        let mut screen = LoraScreen::new(Box::new(t));
+        // Mirror transport state into App and activate the DM the
+        // way the right-pane Enter handler would.
+        screen.poll(&mut app);
+        app.region = Region::ContentRight;
+        screen.on_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app,
+        );
+        screen.on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+        );
+        assert_eq!(app.lora_active_thread, ChannelKind::Direct(0xa));
+
+        // Now run another `poll` — the previous behaviour snapped
+        // back to `LongFast` here, which is exactly the title-flash
+        // bug. After the fix, the active thread must stick.
+        screen.poll(&mut app);
+        assert_eq!(
+            app.lora_active_thread,
+            ChannelKind::Direct(0xa),
+            "poll() must NOT snap lora_active_thread back to LongFast; \
+             that was the user-visible title-flash bug"
+        );
+    }
+
+    #[test]
+    fn poll_auto_seeds_missing_direct_thread_when_user_activates_it() {
+        // Companion test: when poll() pins the activated DM, it must
+        // also create a matching `Direct(n)` entry on
+        // `app.lora_threads` so the renderer's `find(...)` returns
+        // `Some(...)` instead of falling back to the empty-thread
+        // placeholder copy.
+        let mut t = FakeTransport::new().with_connected(true);
+        t.nodes.push(LoraNode {
+            node_id: "!0000000a".into(),
+            long_name: "trucker".into(),
+            short_name: "T".into(),
+            hops_away: 1,
+            last_heard_secs: 0,
+            snr: None,
+        });
+
+        let mut app = make_app();
+        let mut screen = LoraScreen::new(Box::new(t));
+        screen.poll(&mut app);
+        app.region = Region::ContentRight;
+        screen.on_key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut app,
+        );
+        screen.on_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+        );
+        screen.poll(&mut app);
+
+        let dm = app
+            .lora_threads
+            .iter()
+            .find(|t| t.kind == ChannelKind::Direct(0xa))
+            .expect("poll() must auto-seed a Direct(0xa) thread so \
+                     the renderer can show the chat pane (even if empty)");
+        // Label uses the operator-chosen long_name when known.
+        assert_eq!(dm.label, "trucker");
+        // The seeded thread is empty — first real inbound DM from
+        // that peer will replace the placeholder via the transport's
+        // own thread (lines populated, label preserved).
+        assert!(
+            dm.lines.is_empty(),
+            "auto-seeded DM thread has no lines until inbound traffic arrives"
+        );
+    }
+
+    #[test]
+    fn sort_lora_threads_keeps_longfast_first_and_orders_dms_ascending() {
+        // Pin the thread-list sort order so the right-pane list is
+        // deterministic. The renderer doesn't depend on this order
+        // but the renderer + tests cross-reference DM threads
+        // against `app.lora_nodes`, where stable ordering matters
+        // for diffs in screen captures.
+        let mut threads = vec![
+            Thread::new(ChannelKind::Direct(3), "three"),
+            Thread::new(ChannelKind::Direct(1), "one"),
+            Thread::new(ChannelKind::LongFast, "longfast"),
+            Thread::new(ChannelKind::Direct(2), "two"),
+        ];
+        sort_lora_threads(&mut threads);
+        let kinds: Vec<_> = threads.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ChannelKind::LongFast,
+                ChannelKind::Direct(1),
+                ChannelKind::Direct(2),
+                ChannelKind::Direct(3),
+            ],
+            "LongFast at index 0, then Direct(n) ascending"
         );
     }
 
