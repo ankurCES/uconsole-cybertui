@@ -63,15 +63,29 @@ ping -i 0.05 <AP_or_target_ip>   # ~20 Hz → pass --csi-rate 20 below
 
 ## 3. Feed it to wifi-radar
 
-The reliable path pipes tcpdump straight in (`-U` = unbuffered, so it streams):
+Once nexmon is flashed (step 1), **one script does the rest** — build, load the
+CSI params, bring up monitor mode, and start the capture pipe:
+
+```sh
+sudo ./install.sh --vitals                 # foreground; Ctrl-C to stop
+sudo ./install.sh --vitals --service       # or a persistent systemd service
+```
+
+Flags (all optional): `--iface wlan0 --channel 6/20 --rate 20 --bind
+0.0.0.0:8743 --motion 0.15`. Add `--dry-run` to print every step without
+running it. The script (`install/wifi-vitals.sh`) refuses to run and prints
+instructions if `nexutil`/`makecsiparams` or the patched firmware are missing.
+
+Open `http://<uconsole>:8743/` — the **Human sensing** panel and the green
+radar contact show presence, breathing bpm, and heart bpm. `GET /api/vitals`
+returns the raw JSON.
+
+Under the hood it runs the reliable streaming pipe (`-U` = unbuffered):
 
 ```sh
 sudo tcpdump -i wlan0 -s 0 -U -w - 'udp port 5500' \
   | wifi-radar --csi-pcap - --csi-rate 20 --bind 0.0.0.0:8743
 ```
-
-Open `http://<uconsole>:8743/` — the **Human sensing** panel shows presence,
-breathing bpm, and heart bpm. `GET /api/vitals` returns the raw JSON.
 
 Alternative (if your setup delivers datagrams to a local socket, e.g. via a
 `socat` bridge): `wifi-radar --nexmon` binds `0.0.0.0:5500` directly.
