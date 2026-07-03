@@ -2592,6 +2592,7 @@ dependencies = [
  "askama",
  "axum",
  "chrono",
+ "cyberdeck-core",
  "futures",
  "pcap-file",
  "serde",

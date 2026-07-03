@@ -16,6 +16,8 @@ name = "wifi-radar"
 path = "src/main.rs"
 
 [dependencies]
+cyberdeck-core = { path = "../core" }
+
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
