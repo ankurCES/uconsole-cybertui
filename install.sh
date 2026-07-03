@@ -48,10 +48,11 @@
 #   --uninstall          Remove installed binaries, user, service, token.
 #
 # What it does (in order):
-#   1. Sanity-checks (repo layout, cargo, systemctl).
+#   1. Sanity-checks (repo layout, systemctl).
 #   2. Installs OS-level dependencies (apt/dnf/pacman). Skipped with
 #      --skip-deps or on distros we don't recognise.
-#   3. Builds the requested binaries (release) — skipped on --install-only.
+#   3. Bootstraps the Rust toolchain via rustup if cargo is missing, then
+#      builds the requested binaries (release) — skipped on --install-only.
 #   4. Escalates to root for system install steps (skipped for --tui,
 #      --build, and when already root).
 #   5. Installs binaries to ${INSTALL_PREFIX}/bin.
@@ -231,12 +232,14 @@ APT_PKGS=(
     # System: ps, log tail
     procps
     systemd             # journalctl
-    # Build deps for the Rust toolchain
+    # Build deps for the Rust toolchain (+ curl/ca-certificates for rustup)
     build-essential
     pkg-config
     libssl-dev
     libdbus-1-dev
     libudev-dev
+    curl
+    ca-certificates
 )
 
 DNF_PKGS=(
@@ -261,6 +264,8 @@ DNF_PKGS=(
     openssl-devel
     dbus-devel
     systemd-devel
+    curl
+    ca-certificates
 )
 
 PACMAN_PKGS=(
@@ -282,6 +287,8 @@ PACMAN_PKGS=(
     pkgconf
     openssl
     dbus
+    curl
+    ca-certificates
 )
 
 detect_distro() {
@@ -352,6 +359,36 @@ install_deps() {
             "${sys_cmd[@]}" enable --now "$unit.service" >/dev/null 2>&1 || true
         done
     fi
+}
+
+# Ensure a Rust toolchain (cargo) is available, installing it via rustup for
+# the current user if missing. The build step runs unprivileged, so this
+# installs to the invoking user's ~/.cargo — no root, no system pollution.
+# `--no-modify-path` keeps it out of shell profiles; we source the env
+# ourselves so the build below sees cargo.
+ensure_rust() {
+    if command -v cargo >/dev/null 2>&1; then return 0; fi
+    # Already installed but not on PATH (fresh rustup, un-sourced shell)?
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck disable=SC1091
+        . "$HOME/.cargo/env"
+        command -v cargo >/dev/null 2>&1 && return 0
+    fi
+    log "Rust toolchain not found — installing via rustup (user-local)…"
+    if command -v curl >/dev/null 2>&1; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --no-modify-path
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --no-modify-path
+    else
+        die "need curl or wget to install Rust. Install one and re-run, or install Rust manually: https://rustup.rs"
+    fi
+    # shellcheck disable=SC1091
+    . "$HOME/.cargo/env" 2>/dev/null || true
+    command -v cargo >/dev/null 2>&1 \
+        || die "cargo still not found after rustup install — check the output above."
+    log "Installed Rust: $(cargo --version 2>/dev/null || echo cargo)"
 }
 
 # ---------- 0a. system dependencies ----------
@@ -431,8 +468,7 @@ NEED_RADAR_BUILD=0
 [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]] && NEED_RADAR_BUILD=1
 
 if [[ $INSTALL_ONLY -eq 0 ]] && [[ $NEED_BUILD -eq 1 || $NEED_WEB_BUILD -eq 1 || $NEED_RADAR_BUILD -eq 1 ]]; then
-    command -v cargo >/dev/null 2>&1 \
-        || die "cargo not found in PATH. Install Rust first: https://rustup.rs"
+    ensure_rust
     if [[ $NEED_WEB_BUILD -eq 1 ]]; then
         log "Building ${WEB_BIN} (release) as $(id -un)…"
         ( cd "$REPO_DIR" && cargo build --release -p cyberdeck-web )
