@@ -83,7 +83,7 @@ Icons are a fixed enum: `person`, `phone`, `laptop`, `tablet`, `speaker`, `tv`, 
 - Create: `crates/wifi-radar/src/main.rs`
 - Modify: `Cargo.toml` (root) — add `"crates/wifi-radar"` to `[workspace] members`
 
-- [ ] **Step 1.1: Write the failing test**
+- [x] **Step 1.1: Write the failing test**
 
 Add `crates/wifi-radar/tests/skeleton.rs`:
 
@@ -97,12 +97,12 @@ fn exposes_version_string() {
 }
 ```
 
-- [ ] **Step 1.2: Run test to verify it fails**
+- [x] **Step 1.2: Run test to verify it fails**
 
 Run: `cargo test -p wifi-radar --test skeleton`
 Expected: FAIL with `error[E0432]: unresolved import 'wifi_radar'` because the crate doesn't exist yet.
 
-- [ ] **Step 1.3: Register the new workspace member**
+- [x] **Step 1.3: Register the new workspace member**
 
 Edit the root `Cargo.toml` `[workspace] members` list to add `crates/wifi-radar`:
 
@@ -119,7 +119,7 @@ Also add `pcap-file = "2"` to `[workspace.dependencies]`:
 pcap-file = "2"
 ```
 
-- [ ] **Step 1.4: Create the crate manifest**
+- [x] **Step 1.4: Create the crate manifest**
 
 Create `crates/wifi-radar/Cargo.toml`:
 
@@ -161,7 +161,7 @@ pcap-file.workspace = true
 tower = { workspace = true, features = ["util"] }
 ```
 
-- [ ] **Step 1.5: Create `src/lib.rs`**
+- [x] **Step 1.5: Create `src/lib.rs`**
 
 Create `crates/wifi-radar/src/lib.rs`:
 
@@ -176,7 +176,7 @@ pub fn version() -> String {
 }
 ```
 
-- [ ] **Step 1.6: Create `src/main.rs` (minimal)**
+- [x] **Step 1.6: Create `src/main.rs` (minimal)**
 
 Create `crates/wifi-radar/src/main.rs`:
 
@@ -186,12 +186,12 @@ fn main() {
 }
 ```
 
-- [ ] **Step 1.7: Run test to verify it passes**
+- [x] **Step 1.7: Run test to verify it passes**
 
 Run: `cargo test -p wifi-radar --test skeleton`
 Expected: PASS, 1 test green.
 
-- [ ] **Step 1.8: Commit**
+- [x] **Step 1.8: Commit**
 
 ```bash
 git add Cargo.toml crates/wifi-radar/
