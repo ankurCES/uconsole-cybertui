@@ -41,6 +41,7 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
     let state = Arc::new(AppState {
         store,
         tags,
+        vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
     });

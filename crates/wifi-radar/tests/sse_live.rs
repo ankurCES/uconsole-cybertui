@@ -35,6 +35,7 @@ async fn sse_endpoint_streams_events_over_real_socket() {
     let state = Arc::new(AppState {
         store: store.clone(),
         tags: tags.clone(),
+        vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx: events_tx.clone(),
         scanner_tx,
     });

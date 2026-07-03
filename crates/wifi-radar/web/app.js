@@ -9,6 +9,7 @@
     const store = {
         devices: new Map(), // mac -> {mac, rssi_dbm, channel, last_kind, last_seen_unix}
         tags: {},            // mac -> {label, icon, color}
+        vitals: null,        // latest /api/vitals reading (CSI human sensing)
     };
 
     let radar = null;
@@ -99,6 +100,41 @@
         };
     }
 
+    // CSI vitals: poll /api/vitals ~1/s and paint the human-sensing panel.
+    // Breathing needs a ~20 s window, so a 1 s poll is plenty.
+    function pct(x) { return `${Math.round((x || 0) * 100)}%`; }
+
+    async function refreshVitals() {
+        let v;
+        try {
+            v = await fetch("/api/vitals").then((r) => r.json());
+        } catch (_) {
+            return; // transient; keep last paint
+        }
+        store.vitals = v; // drive the radar contact
+        const panel = $("vitals");
+        panel.dataset.present = String(!!v.presence);
+
+        const dot = $("vitals-dot");
+        dot.className = "vitals-dot" + (v.presence ? " on" : "");
+        $("vitals-presence-text").textContent = v.presence
+            ? `present · ${v.motion_level} motion`
+            : (v.frames_in_window > 0 ? "no one detected" : "no signal");
+
+        const breath = v.breathing_rate_bpm > 0 ? v.breathing_rate_bpm.toFixed(1) : "–";
+        const heart = v.heart_rate_bpm > 0 ? Math.round(v.heart_rate_bpm) : "–";
+        $("vitals-breath").textContent = breath;
+        $("vitals-heart").textContent = heart;
+        $("vitals-breath-conf").textContent =
+            v.breathing_rate_bpm > 0 ? `conf ${pct(v.breathing_confidence)}` : "";
+        $("vitals-heart-conf").textContent =
+            v.heart_rate_bpm > 0 ? `conf ${pct(v.heartbeat_confidence)}` : "";
+
+        $("vitals-meta").textContent = v.sample_rate_hz > 0
+            ? `${v.subcarrier_count} subcarriers · ${v.sample_rate_hz.toFixed(0)} Hz · ${v.frames_in_window} frames`
+            : "waiting for nexmon CSI on :5500…";
+    }
+
     async function saveTag() {
         const mac = $("tag-mac").value.trim();
         const label = $("tag-label").value.trim();
@@ -135,9 +171,11 @@
         connect();
         refreshSnapshot();
         setInterval(refreshSnapshot, 10_000);
+        refreshVitals();
+        setInterval(refreshVitals, 1_000);
 
         function loop() {
-            radar.draw(Array.from(store.devices.values()), store.tags);
+            radar.draw(Array.from(store.devices.values()), store.tags, store.vitals);
             requestAnimationFrame(loop);
         }
         requestAnimationFrame(loop);

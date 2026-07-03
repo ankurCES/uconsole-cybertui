@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod assets;
+pub mod csi;
 pub mod devices;
 pub mod frames;
 pub mod run;

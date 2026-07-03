@@ -248,6 +248,7 @@ API exposes:
 | Method | Path                       | Purpose                              |
 | ------ | -------------------------- | ------------------------------------ |
 | GET    | `/api/health`              | `{"ok": true}`                       |
+| GET    | `/api/vitals`              | CSI human sensing: breathing/heart/presence |
 | GET    | `/api/devices`             | devices snapshot with tag overlay    |
 | GET    | `/api/tags`                | persistent tag DB                    |
 | POST   | `/api/tags`                | upsert a tag                         |
@@ -258,6 +259,23 @@ For live (non-dev) capture you'll need a monitor-mode adapter; the
 service runs unprivileged (`DynamicUser`) so it doesn't ship the
 `cap_net_raw` privilege for radiotap capture — call the binary by hand
 with `sudo` in that case.
+
+**Human sensing (breathing / heartbeat / presence).** RSSI shows *devices*;
+Channel State Information (CSI) shows *people*. On the uConsole CM4 the on-board
+BCM43455c0 can produce CSI via [nexmon_csi](https://github.com/seemoo-lab/nexmon_csi).
+One script builds, configures nexmon CSI, and starts the capture pipe so the
+UI's "Human sensing" panel + radar contact + `/api/vitals` light up:
+
+```sh
+sudo ./install.sh --vitals                 # run in foreground
+sudo ./install.sh --vitals --service       # or install a persistent systemd service
+# knobs: --channel 6/20 --rate 20 --bind 0.0.0.0:8743 --motion 0.15 ; --dry-run to preview
+```
+
+It stops with instructions if the nexmon firmware/tools aren't flashed yet
+(a one-time, kernel-specific step it won't automate). Full CM4 setup, tuning
+knobs, and a no-hardware smoke test:
+[docs/wiki/WiFi-Vitals-Nexmon-CM4.md](docs/wiki/WiFi-Vitals-Nexmon-CM4.md).
 
 ## Keys
 

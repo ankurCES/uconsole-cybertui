@@ -40,6 +40,7 @@ async fn get_root_returns_radar_html() {
     let state = Arc::new(AppState {
         store,
         tags,
+        vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
     });
@@ -70,6 +71,7 @@ async fn static_assets_are_served() {
     let state = Arc::new(AppState {
         store,
         tags,
+        vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
     });
@@ -106,6 +108,7 @@ async fn static_assets_fall_back_to_embedded_when_dir_absent() {
     let state = Arc::new(AppState {
         store,
         tags,
+        vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
     });

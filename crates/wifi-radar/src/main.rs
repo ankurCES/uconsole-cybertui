@@ -18,6 +18,12 @@ Options:
   --tags <PATH>       Tag DB path (default: data/tags.json)
   --static-dir <DIR>  Static asset directory (default: crates/wifi-radar/web)
   --pcap <PATH>       Read frames from a pcap file instead of scanning live
+  --nexmon            Enable CSI vitals on 0.0.0.0:5500 (nexmon_csi default)
+  --csi-udp <ADDR>    Listen for nexmon_csi UDP frames on this address
+  --csi-pcap <PATH>   Read nexmon CSI from a pcap stream (- = stdin; use with
+                      `tcpdump -i wlan0 -U -w - 'udp port 5500'`)
+  --csi-rate <HZ>     Fixed CSI sample rate; omit to estimate from arrivals
+  --csi-motion-threshold <F>  Presence/motion sensitivity (default: 0.15)
   -h, --help          Print this help
 ";
 
@@ -27,6 +33,10 @@ fn main() {
     let mut tags_path = PathBuf::from(DEFAULT_TAGS_PATH);
     let mut static_dir = PathBuf::from(DEFAULT_STATIC_DIR);
     let mut pcap_path: Option<PathBuf> = None;
+    let mut csi_udp: Option<SocketAddr> = None;
+    let mut csi_pcap: Option<PathBuf> = None;
+    let mut csi_rate_hz: Option<f32> = None;
+    let mut csi_motion_threshold: f32 = wifi_radar::csi::DEFAULT_MOTION_THRESHOLD;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -51,6 +61,37 @@ fn main() {
                 i += 1;
                 pcap_path = Some(PathBuf::from(&args[i]));
             }
+            "--nexmon" => {
+                if csi_udp.is_none() {
+                    csi_udp = Some("0.0.0.0:5500".parse().unwrap());
+                }
+            }
+            "--csi-udp" => {
+                i += 1;
+                csi_udp = Some(
+                    args[i]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("invalid --csi-udp: {}", args[i])),
+                );
+            }
+            "--csi-pcap" => {
+                i += 1;
+                csi_pcap = Some(PathBuf::from(&args[i]));
+            }
+            "--csi-rate" => {
+                i += 1;
+                csi_rate_hz = Some(
+                    args[i]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("invalid --csi-rate: {}", args[i])),
+                );
+            }
+            "--csi-motion-threshold" => {
+                i += 1;
+                csi_motion_threshold = args[i]
+                    .parse()
+                    .unwrap_or_else(|_| panic!("invalid --csi-motion-threshold: {}", args[i]));
+            }
             "-h" | "--help" => {
                 println!("{USAGE}");
                 return;
@@ -71,6 +112,10 @@ fn main() {
         tags_path,
         static_dir,
         pcap_path,
+        csi_udp,
+        csi_pcap,
+        csi_rate_hz,
+        csi_motion_threshold,
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");

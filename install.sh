@@ -133,6 +133,18 @@ ENV
 EOF
 }
 
+# --vitals: CSI human sensing (breathing/heart/presence) has its own installer.
+# It needs a different privilege model than the DynamicUser services here (root
+# raw capture + nexmon config), so delegate the whole invocation to it.
+if [[ "${1:-}" == "--vitals" ]]; then
+    shift
+    _here="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
+    _vit="${_here}/install/wifi-vitals.sh"
+    [[ -f "$_vit" ]] || _vit="${_here}/wifi-vitals.sh"
+    [[ -f "$_vit" ]] || { echo "Run --vitals from a cloned repo (needs cargo build + nexmon). See docs/wiki/WiFi-Vitals-Nexmon-CM4.md" >&2; exit 1; }
+    exec bash "$_vit" "$@"
+fi
+
 # Map legacy flags to the new ones so older docs / scripts still work.
 declare -a PASSTHROUGH=()
 i=1
