@@ -97,6 +97,7 @@ SKIP_DEPS=0
 DO_DEPS=0
 FORCE_DEV=0
 RADAR_TAGS_PATH="${RADAR_TAGS_PATH:-/var/lib/wifi-radar/tags.json}"
+RADAR_PCAP="${RADAR_PCAP:-}"
 
 usage() {
     sed -n '2,40p' "$0"
