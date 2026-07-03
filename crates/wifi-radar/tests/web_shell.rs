@@ -52,8 +52,11 @@ async fn get_root_returns_radar_html() {
     assert_eq!(resp.status(), 200);
     let body = axum::body::to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
     let s = String::from_utf8_lossy(&body);
-    assert!(s.contains("canvas"), "shell body should contain a <canvas>: {s}");
-    assert!(s.contains("radar"), "shell body should reference the radar id");
+    assert!(s.contains("<canvas"), "shell body should contain a <canvas>: {s}");
+    assert!(
+        s.contains("id=\"radar\""),
+        "shell body should contain <canvas id=\"radar\">: {s}"
+    );
 }
 
 #[tokio::test]
