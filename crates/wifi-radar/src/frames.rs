@@ -27,7 +27,7 @@
 //! [`scanner`]: crate::scanner
 
 /// What we observed for a single device on a single frame.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceEvent {
     /// Transmitter MAC (6 bytes, lowercase hex, colon-separated).
     pub mac: String,

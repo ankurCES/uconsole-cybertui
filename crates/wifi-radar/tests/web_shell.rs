@@ -1,0 +1,88 @@
+//! Integration test: the full router (shell + API + SSE) returns 200 on
+//! `GET /` and the body contains the radar canvas element.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use axum::body::Body;
+use axum::http::Request;
+use tokio::sync::{broadcast, mpsc};
+use tower::ServiceExt;
+
+use wifi_radar::api::AppState;
+use wifi_radar::devices::DeviceStore;
+use wifi_radar::frames::DeviceEvent;
+use wifi_radar::run::build_router;
+use wifi_radar::tags::TagDb;
+
+fn temp_tags_path() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "wifi-radar-webshell-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("tags.json")
+}
+
+fn workspace_web_dir() -> PathBuf {
+    // tests/ run from the crate root, so `web/` is the static dir.
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web")
+}
+
+#[tokio::test]
+async fn get_root_returns_radar_html() {
+    let tags_path = temp_tags_path();
+    let _ = std::fs::remove_file(&tags_path);
+    let tags = Arc::new(TagDb::load(&tags_path).unwrap());
+    let store = Arc::new(DeviceStore::new());
+    let (events_tx, _) = broadcast::channel::<DeviceEvent>(16);
+    let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
+    let state = Arc::new(AppState {
+        store,
+        tags,
+        events_tx,
+        scanner_tx,
+    });
+    let app = build_router(state, workspace_web_dir());
+
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = axum::body::to_bytes(resp.into_body(), 256 * 1024).await.unwrap();
+    let s = String::from_utf8_lossy(&body);
+    assert!(s.contains("canvas"), "shell body should contain a <canvas>: {s}");
+    assert!(s.contains("radar"), "shell body should reference the radar id");
+}
+
+#[tokio::test]
+async fn static_assets_are_served() {
+    let tags_path = temp_tags_path();
+    let _ = std::fs::remove_file(&tags_path);
+    let tags = Arc::new(TagDb::load(&tags_path).unwrap());
+    let store = Arc::new(DeviceStore::new());
+    let (events_tx, _) = broadcast::channel::<DeviceEvent>(16);
+    let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
+    let state = Arc::new(AppState {
+        store,
+        tags,
+        events_tx,
+        scanner_tx,
+    });
+    let app = build_router(state, workspace_web_dir());
+
+    for asset in ["style.css", "app.js", "radar.js"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/static/{asset}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{asset} returned {}", resp.status());
+    }
+}

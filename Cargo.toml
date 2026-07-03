@@ -12,6 +12,7 @@ rust-version = "1.80"
 [workspace.dependencies]
 # async
 tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
 futures = "0.3"
 async-trait = "0.1"
 

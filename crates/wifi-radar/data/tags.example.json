@@ -1,0 +1,17 @@
+{
+  "aa:bb:cc:dd:ee:01": {
+    "label": "Ankur's phone",
+    "icon": "phone",
+    "color": "#7fdcff"
+  },
+  "aa:bb:cc:dd:ee:02": {
+    "label": "Living room speaker",
+    "icon": "speaker",
+    "color": "#ffa657"
+  },
+  "aa:bb:cc:dd:ee:03": {
+    "label": "Office laptop",
+    "icon": "laptop",
+    "color": "#6ee787"
+  }
+}
