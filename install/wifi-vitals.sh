@@ -3,9 +3,11 @@
 # heartbeat / presence) on the ClockworkPi uConsole CM4.
 #
 # Runs the whole chain:
-#   1. build wifi-radar (with --csi-pcap support)
-#   2. configure nexmon_csi on the on-board BCM43455c0 (makecsiparams+nexutil)
-#   3. start the capture pipe:  tcpdump 'udp port 5500' | wifi-radar --csi-pcap -
+#   1. install dependencies — apt/dnf/pacman packages + the Rust toolchain
+#      (via rustup) if they're missing
+#   2. build wifi-radar (with --csi-pcap support)
+#   3. configure nexmon_csi on the on-board BCM43455c0 (makecsiparams+nexutil)
+#   4. start the capture pipe:  tcpdump 'udp port 5500' | wifi-radar --csi-pcap -
 #      (foreground by default, or as a persistent systemd service with --service)
 #
 # It does NOT flash nexmon firmware — that step is kernel-version-specific and
@@ -26,6 +28,7 @@
 #   --motion <f>         --csi-motion-threshold presence sensitivity (default: 0.15)
 #   --service            Install + enable a systemd service instead of running once
 #   --no-build           Skip the cargo build (use an existing binary)
+#   --skip-deps          Don't install apt/Rust deps (assume they're present)
 #   --dry-run            Print every step without executing (runs anywhere)
 #   -h, --help           This help
 set -euo pipefail
@@ -40,6 +43,7 @@ MOTION=0.15
 DO_SERVICE=0
 NO_BUILD=0
 DRY_RUN=0
+SKIP_DEPS=0
 SERVICE_NAME=wifi-vitals
 PREFIX=/usr/local
 
@@ -54,6 +58,62 @@ run() {
     if [[ $DRY_RUN -eq 1 ]]; then printf '  + %s\n' "$*"; else "$@"; fi
 }
 
+# Find cargo, pulling in an existing rustup install from the usual places
+# (root's, or the sudo-invoking user's home) so `sudo` doesn't hide it.
+have_cargo() {
+    command -v cargo >/dev/null 2>&1 && return 0
+    local envf candidates=("$HOME/.cargo/env" "/root/.cargo/env")
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        local uh; uh="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)"
+        [[ -n "$uh" ]] && candidates+=("$uh/.cargo/env")
+    fi
+    for envf in "${candidates[@]}"; do
+        if [[ -f "$envf" ]]; then
+            # shellcheck disable=SC1090
+            source "$envf"
+            command -v cargo >/dev/null 2>&1 && return 0
+        fi
+    done
+    return 1
+}
+
+# Install the Rust toolchain via rustup if cargo isn't already available.
+ensure_rust() {
+    if have_cargo; then
+        log "Rust toolchain: $(command -v cargo 2>/dev/null || echo cargo)"
+        return
+    fi
+    log "Installing Rust toolchain via rustup…"
+    run bash -c "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --no-modify-path"
+    # rustup installs to \$HOME/.cargo (root's here, since we run under sudo).
+    if [[ $DRY_RUN -eq 0 ]]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.cargo/env"
+        have_cargo || die "cargo still not found after rustup install"
+    fi
+}
+
+# Install system packages (a C toolchain + tcpdump + iw) then Rust.
+ensure_deps() {
+    if [[ $SKIP_DEPS -eq 1 ]]; then
+        log "Skipping dependency install (--skip-deps)"
+        ensure_rust
+        return
+    fi
+    log "Installing system packages…"
+    if command -v apt-get >/dev/null 2>&1; then
+        run apt-get update -y
+        run apt-get install -y tcpdump iw curl ca-certificates build-essential pkg-config libssl-dev
+    elif command -v dnf >/dev/null 2>&1; then
+        run dnf install -y tcpdump iw curl ca-certificates gcc gcc-c++ make pkgconf-pkg-config openssl-devel
+    elif command -v pacman >/dev/null 2>&1; then
+        run pacman -Sy --noconfirm tcpdump iw curl ca-certificates base-devel pkgconf openssl
+    else
+        warn "unknown package manager — ensure tcpdump, iw and a C toolchain are installed"
+    fi
+    ensure_rust
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --iface)   IFACE="$2"; shift 2 ;;
@@ -65,8 +125,9 @@ while [[ $# -gt 0 ]]; do
         --motion)  MOTION="$2"; shift 2 ;;
         --service) DO_SERVICE=1; shift ;;
         --no-build) NO_BUILD=1; shift ;;
+        --skip-deps) SKIP_DEPS=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
-        -h|--help) sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) die "unknown option: $1 (see --help)" ;;
     esac
 done
@@ -79,10 +140,14 @@ if [[ $DRY_RUN -eq 0 && $EUID -ne 0 ]]; then
     die "needs root (tcpdump raw capture + nexutil). Re-run: sudo $0 $*"
 fi
 
-need() { command -v "$1" >/dev/null 2>&1 || [[ $DRY_RUN -eq 1 ]] || die "missing '$1'. $2"; }
-need cargo    "install Rust: https://rustup.rs"
-need tcpdump  "sudo apt-get install -y tcpdump"
-need iw       "sudo apt-get install -y iw"
+# ---------- 0b. dependencies (apt packages + Rust toolchain) ----------
+ensure_deps
+
+# Verify the essentials are now present (unless previewing).
+need() { command -v "$1" >/dev/null 2>&1 || [[ $DRY_RUN -eq 1 ]] || die "'$1' still missing after install — see errors above"; }
+need cargo
+need tcpdump
+need iw
 
 # nexmon tools are the hard prerequisite — we do not auto-flash firmware.
 if ! command -v nexutil >/dev/null 2>&1 || ! command -v makecsiparams >/dev/null 2>&1; then
