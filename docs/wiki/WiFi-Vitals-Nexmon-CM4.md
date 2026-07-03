@@ -18,24 +18,28 @@ ruview has no nexmon ingestion path, so we parse the frames ourselves.
 ## 1. Flash nexmon_csi on the CM4
 
 The BCM43455c0 is supported by [nexmon_csi](https://github.com/seemoo-lab/nexmon_csi).
-The patch is **kernel-version specific** — use the branch of
-[nexmonster/nexmon_csi](https://github.com/nexmonster/nexmon_csi) that matches
-`uname -r` on your uConsole image (e.g. `pi-5.4.51-plus`). Follow that repo's
-build steps; the short version:
+**Automated (recommended):** let the installer build and flash it —
 
 ```sh
-# On the CM4, matching branch for your kernel:
-git clone https://github.com/nexmonster/nexmon_csi.git
-cd nexmon_csi
-# build the toolchain + firmware patch per the repo README, then:
-make install-firmware          # installs the patched BCM43455c0 firmware
-# build the utilities:
-make -C utilities/nexutil && make -C utilities/makecsiparams
+sudo ./install.sh --vitals --setup-nexmon
 ```
 
+It picks the right path by kernel: the **seemoo-lab `Makefile.rpi`** source build
+on modern 6.x kernels (Bookworm/Trixie — kernel-agnostic, upgrade-safe via
+`update-alternatives` on the Cypress `cyfmac43455-sdio.bin`), or the
+**[nexmon_csi_bin](https://github.com/nexmonster/nexmon_csi_bin)** precompiled
+installer on legacy 5.10/5.4/4.19 kernels. The modern build takes a while (it
+compiles the nexmon toolchain). Both install `nexutil` + `makecsiparams`.
+
 > ⚠️ Patching Wi-Fi firmware disables normal station Wi-Fi while active. On the
-> uConsole, connect over Ethernet/USB or a second adapter, or plan to revert
-> (`make restore-firmware`).
+> uConsole, connect over Ethernet/USB or a second adapter first. Reversible with
+> `sudo ./install.sh --vitals --revert-nexmon`.
+
+**Manual** (if you'd rather do it yourself, or you're on an unusual kernel): the
+[seemoo-lab/nexmon_csi](https://github.com/seemoo-lab/nexmon_csi) README and
+[discussion #395](https://github.com/seemoo-lab/nexmon_csi/discussions/395) (Pi
+5 / CM4, recent kernels) have the full sequence; the firmware version dir for
+the BCM43455c0 is `7_45_189`.
 
 ## 2. Configure a CSI collection
 

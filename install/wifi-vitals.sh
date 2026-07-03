@@ -5,15 +5,18 @@
 # Runs the whole chain:
 #   1. install dependencies — apt/dnf/pacman packages + the Rust toolchain
 #      (via rustup) if they're missing
-#   2. build wifi-radar (with --csi-pcap support)
-#   3. configure nexmon_csi on the on-board BCM43455c0 (makecsiparams+nexutil)
-#   4. start the capture pipe:  tcpdump 'udp port 5500' | wifi-radar --csi-pcap -
+#   2. (with --setup-nexmon) build + flash nexmon_csi firmware on the on-board
+#      BCM43455c0 — picks the seemoo-lab Makefile.rpi path on 6.x kernels, the
+#      nexmon_csi_bin precompiled installer on 5.10/5.4/4.19
+#   3. build wifi-radar (with --csi-pcap support)
+#   4. configure the CSI collection (makecsiparams + nexutil, monitor mode)
+#   5. start the capture pipe:  tcpdump 'udp port 5500' | wifi-radar --csi-pcap -
 #      (foreground by default, or as a persistent systemd service with --service)
 #
-# It does NOT flash nexmon firmware — that step is kernel-version-specific and
-# can knock out Wi-Fi on a headless deck, so it must be done by hand once. See
-# docs/wiki/WiFi-Vitals-Nexmon-CM4.md. This script checks the firmware/tools are
-# in place and stops with clear instructions if they aren't.
+# Without --setup-nexmon the firmware is a prerequisite: the script stops with
+# instructions if nexutil/makecsiparams aren't present. Flashing patches the
+# Wi-Fi firmware and disrupts normal Wi-Fi while active — it is reversible with
+# --revert-nexmon. See docs/wiki/WiFi-Vitals-Nexmon-CM4.md.
 #
 # Usage:
 #   sudo ./install/wifi-vitals.sh [OPTIONS]
@@ -27,8 +30,12 @@
 #   --rate <hz>          --csi-rate; set to your CSI/ping rate (default: 20)
 #   --motion <f>         --csi-motion-threshold presence sensitivity (default: 0.15)
 #   --service            Install + enable a systemd service instead of running once
+#   --setup-nexmon       Build + flash nexmon_csi firmware (patches Wi-Fi firmware)
+#   --revert-nexmon      Restore stock Wi-Fi firmware and exit
+#   --nexmon-dir <path>  Where to build nexmon (default: /opt/nexmon)
 #   --no-build           Skip the cargo build (use an existing binary)
 #   --skip-deps          Don't install apt/Rust deps (assume they're present)
+#   -y, --yes            Assume yes (skip the nexmon-flash confirmation)
 #   --dry-run            Print every step without executing (runs anywhere)
 #   -h, --help           This help
 set -euo pipefail
@@ -44,6 +51,10 @@ DO_SERVICE=0
 NO_BUILD=0
 DRY_RUN=0
 SKIP_DEPS=0
+SETUP_NEXMON=0
+REVERT_NEXMON=0
+ASSUME_YES=0
+NEXMON_DIR=/opt/nexmon
 SERVICE_NAME=wifi-vitals
 PREFIX=/usr/local
 
@@ -114,6 +125,140 @@ ensure_deps() {
     ensure_rust
 }
 
+# Yes/no prompt. Auto-yes under -y or --dry-run; defaults to No.
+confirm() {
+    [[ $ASSUME_YES -eq 1 || $DRY_RUN -eq 1 ]] && return 0
+    local reply
+    read -r -p "$1 [y/N] " reply || true
+    [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+# Print (dry-run) or execute a multi-line shell block under strict mode.
+run_block() {
+    if [[ $DRY_RUN -eq 1 ]]; then
+        printf '  --- would run: ---\n%s\n  ------------------\n' "$1"
+    else
+        bash -c "set -euo pipefail
+$1"
+    fi
+}
+
+# Build + flash nexmon_csi. Picks the path by kernel: seemoo-lab Makefile.rpi
+# for modern (6.x) kernels, the nexmon_csi_bin precompiled installer for the
+# legacy 5.10/5.4/4.19 kernels. This PATCHES the Wi-Fi firmware — it's gated
+# behind --setup-nexmon and a confirmation.
+setup_nexmon() {
+    cat >&2 <<'EOF'
+
+  ==================================================================
+   nexmon_csi setup PATCHES the Wi-Fi firmware. Normal Wi-Fi will be
+   disrupted while CSI is active. Have Ethernet/USB or console access
+   to the deck first. It is reversible: sudo ./install.sh --vitals
+   --revert-nexmon. Based on seemoo-lab/nexmon_csi (discussions/395).
+  ==================================================================
+EOF
+    confirm "Build & flash nexmon_csi now?" || die "aborted nexmon setup (nothing changed)"
+
+    local kernel; kernel="$(uname -r)"
+    log "Kernel: $kernel  →  build dir: $NEXMON_DIR"
+    case "$kernel" in
+        6.*)                 setup_nexmon_modern ;;
+        5.10.*|5.4.*|4.19.*) setup_nexmon_legacy ;;
+        *) die "kernel $kernel has no automated path — see docs/wiki/WiFi-Vitals-Nexmon-CM4.md" ;;
+    esac
+    hash -r 2>/dev/null || true
+    if [[ $DRY_RUN -eq 0 ]] && { ! command -v nexutil >/dev/null 2>&1 || ! command -v makecsiparams >/dev/null 2>&1; }; then
+        die "nexmon setup ran but nexutil/makecsiparams still aren't on PATH — check the log above."
+    fi
+    log "nexmon_csi ready. Revert any time: sudo ./install.sh --vitals --revert-nexmon"
+}
+
+# Legacy kernels (5.10/5.4/4.19): reuse the maintained precompiled installer.
+setup_nexmon_legacy() {
+    log "Legacy kernel → nexmonster/nexmon_csi_bin precompiled installer"
+    run_block 'curl -fsSL https://raw.githubusercontent.com/nexmonster/nexmon_csi_bin/main/install.sh | bash'
+}
+
+# Modern kernels (6.x, Bookworm/Trixie): seemoo-lab Makefile.rpi source build.
+# Kernel-agnostic, upgrade-safe (update-alternatives on the Cypress firmware).
+setup_nexmon_modern() {
+    log "Modern kernel → seemoo-lab Makefile.rpi build (this takes a while)…"
+    export NEXMON_DIR
+    run_block '
+: "${NEXMON_DIR:?}"
+export DEBIAN_FRONTEND=noninteractive
+
+# 1. build deps
+apt-get update -y
+apt-get install -y git libgmp3-dev gawk qpdf bison flex make autoconf libtool \
+  texinfo xxd libnl-3-dev libnl-genl-3-dev bc libssl-dev tcpdump
+apt-get install -y raspberrypi-kernel-headers || apt-get install -y "linux-headers-$(uname -r)" || true
+
+# 2. armhf cross-libs for the 32-bit nexmon toolchain on a 64-bit userland
+dpkg --add-architecture armhf
+apt-get update -y
+apt-get install -y libc6:armhf libisl23:armhf libmpfr6:armhf libmpc3:armhf libstdc++6:armhf
+[ -e /usr/lib/arm-linux-gnueabihf/libisl.so.10 ] || ln -s /usr/lib/arm-linux-gnueabihf/libisl.so.23 /usr/lib/arm-linux-gnueabihf/libisl.so.10
+[ -e /usr/lib/arm-linux-gnueabihf/libmpfr.so.4 ] || ln -s /usr/lib/arm-linux-gnueabihf/libmpfr.so.6 /usr/lib/arm-linux-gnueabihf/libmpfr.so.4
+
+# 3. python2.7 (needed by b43-beautifier) from the Debian archive
+if ! command -v python2.7 >/dev/null 2>&1; then
+  cp /etc/apt/sources.list /tmp/nexmon-sources.bak
+  echo "deb http://archive.debian.org/debian/ stretch contrib main non-free" >> /etc/apt/sources.list
+  apt-get update -y -o Acquire::Check-Valid-Until=false || true
+  apt-get install -y --allow-unauthenticated python2.7 || true
+  mv /tmp/nexmon-sources.bak /etc/apt/sources.list
+  apt-get update -y || true
+fi
+
+# 4. toolchain
+rm -rf "$NEXMON_DIR"
+git clone --depth=1 https://github.com/seemoo-lab/nexmon.git "$NEXMON_DIR"
+cd "$NEXMON_DIR"
+source ./setup_env.sh
+sed -i "1 s/\$/2.7/" "$NEXMON_ROOT/buildtools/b43-v3/debug/b43-beautifier" || true
+make
+
+# 5. nexutil (vendor-command build is required for the Makefile.rpi path)
+cd "$NEXMON_ROOT/utilities/nexutil"
+make install USE_VENDOR_CMD=1
+setcap cap_net_admin+ep "$(command -v nexutil)" || true
+
+# 6. nexmon_csi patch + firmware (update-alternatives on cyfmac43455-sdio.bin)
+cd "$NEXMON_ROOT/patches/bcm43455c0/7_45_189"
+rm -rf nexmon_csi
+git clone --depth=1 https://github.com/seemoo-lab/nexmon_csi.git
+cd nexmon_csi
+make -f Makefile.rpi install-firmware
+make -f Makefile.rpi unmanage
+make -f Makefile.rpi reload-full
+
+# 7. makecsiparams has no install target — build and symlink it
+cd utils/makecsiparams
+make
+ln -sf "$PWD/makecsiparams" /usr/local/bin/makecsiparams
+ln -sf "$PWD/makecsiparams" /usr/local/bin/mcp
+'
+}
+
+# Restore stock Wi-Fi firmware (undo --setup-nexmon).
+revert_nexmon() {
+    log "Reverting nexmon_csi → stock Wi-Fi firmware…"
+    run_block '
+# Modern (update-alternatives) path
+if update-alternatives --list cyfmac43455-sdio.bin >/dev/null 2>&1; then
+  update-alternatives --auto cyfmac43455-sdio.bin
+fi
+# Reload whichever brcmfmac module variant is in use
+if modinfo brcmfmac_wcc >/dev/null 2>&1; then
+  modprobe -r brcmfmac_wcc 2>/dev/null || true; modprobe brcmfmac_wcc 2>/dev/null || true
+else
+  modprobe -r brcmfmac 2>/dev/null || true; modprobe brcmfmac 2>/dev/null || true
+fi
+'
+    log "Reverted. If Wi-Fi is still off: sudo apt-get install --reinstall firmware-brcm80211 && sudo reboot"
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --iface)   IFACE="$2"; shift 2 ;;
@@ -124,8 +269,12 @@ while [[ $# -gt 0 ]]; do
         --rate)    RATE="$2"; shift 2 ;;
         --motion)  MOTION="$2"; shift 2 ;;
         --service) DO_SERVICE=1; shift ;;
+        --setup-nexmon) SETUP_NEXMON=1; shift ;;
+        --revert-nexmon) REVERT_NEXMON=1; shift ;;
+        --nexmon-dir) NEXMON_DIR="$2"; shift 2 ;;
         --no-build) NO_BUILD=1; shift ;;
         --skip-deps) SKIP_DEPS=1; shift ;;
+        -y|--yes) ASSUME_YES=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "${BASH_SOURCE[0]}"; exit 0 ;;
         *) die "unknown option: $1 (see --help)" ;;
@@ -140,6 +289,12 @@ if [[ $DRY_RUN -eq 0 && $EUID -ne 0 ]]; then
     die "needs root (tcpdump raw capture + nexutil). Re-run: sudo $0 $*"
 fi
 
+# --revert-nexmon short-circuits: undo the firmware patch and stop.
+if [[ $REVERT_NEXMON -eq 1 ]]; then
+    revert_nexmon
+    exit 0
+fi
+
 # ---------- 0b. dependencies (apt packages + Rust toolchain) ----------
 ensure_deps
 
@@ -149,21 +304,23 @@ need cargo
 need tcpdump
 need iw
 
-# nexmon tools are the hard prerequisite — we do not auto-flash firmware.
+# ---------- 0c. nexmon_csi firmware ----------
+# --setup-nexmon builds + flashes it; otherwise it's a prerequisite we won't
+# auto-flash (a bad flash can disable Wi-Fi on the deck).
+if [[ $SETUP_NEXMON -eq 1 ]]; then
+    setup_nexmon
+fi
+
 if ! command -v nexutil >/dev/null 2>&1 || ! command -v makecsiparams >/dev/null 2>&1; then
     if [[ $DRY_RUN -eq 0 ]]; then
         cat >&2 <<EOF
 
   nexmon_csi is not installed. CSI capture needs the patched BCM43455c0
-  firmware plus 'nexutil' and 'makecsiparams'. This is a one-time, kernel-
-  specific step this script deliberately does not automate (a bad flash can
-  disable Wi-Fi on the deck).
+  firmware plus 'nexutil' and 'makecsiparams'.
 
-  Install it once, matching your kernel ($(uname -r)):
-    https://github.com/nexmonster/nexmon_csi   (pick the pi-<kernel> branch)
-  Full walkthrough: docs/wiki/WiFi-Vitals-Nexmon-CM4.md
-
-  Then re-run this script.
+  Let this script build + flash it for you (patches Wi-Fi firmware; reversible):
+    sudo ./install.sh --vitals --setup-nexmon
+  Or do it by hand: docs/wiki/WiFi-Vitals-Nexmon-CM4.md
 EOF
         exit 1
     fi

@@ -267,14 +267,17 @@ One script builds, configures nexmon CSI, and starts the capture pipe so the
 UI's "Human sensing" panel + radar contact + `/api/vitals` light up:
 
 ```sh
-sudo ./install.sh --vitals                 # run in foreground
-sudo ./install.sh --vitals --service       # or install a persistent systemd service
+sudo ./install.sh --vitals --setup-nexmon --service   # everything: firmware → service
+sudo ./install.sh --vitals                             # or foreground, firmware already flashed
 # knobs: --channel 6/20 --rate 20 --bind 0.0.0.0:8743 --motion 0.15 ; --dry-run to preview
 ```
 
-It stops with instructions if the nexmon firmware/tools aren't flashed yet
-(a one-time, kernel-specific step it won't automate). Full CM4 setup, tuning
-knobs, and a no-hardware smoke test:
+`--setup-nexmon` builds + flashes the nexmon_csi firmware for you (seemoo-lab
+Makefile.rpi on 6.x kernels, the precompiled installer on 5.10/5.4/4.19) — this
+patches the Wi-Fi firmware and disrupts normal Wi-Fi while active, so have
+console/wired access; it's reversible with `--revert-nexmon`. Without it, the
+installer treats nexmon as a prerequisite and stops with instructions. Full CM4
+setup, tuning knobs, and a no-hardware smoke test:
 [docs/wiki/WiFi-Vitals-Nexmon-CM4.md](docs/wiki/WiFi-Vitals-Nexmon-CM4.md).
 
 ## Keys
