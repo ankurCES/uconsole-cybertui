@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ title }}</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header class="topbar">
+        <span class="title">{{ title }}</span>
+        <span class="version">{{ version }}</span>
+        <span id="status" class="status">connecting…</span>
+    </header>
+    <main class="layout">
+        <section class="radar-pane">
+            <canvas id="radar" width="640" height="640"></canvas>
+        </section>
+        <aside class="tag-pane">
+            <h2>Devices</h2>
+            <ul id="device-list" class="device-list"></ul>
+            <details class="tag-editor">
+                <summary>Add / edit a tag</summary>
+                <label>MAC <input id="tag-mac" placeholder="aa:bb:cc:dd:ee:ff"></label>
+                <label>Label <input id="tag-label" placeholder="Ankur's phone"></label>
+                <label>Icon
+                    <select id="tag-icon">
+                        <option value="person">person</option>
+                        <option value="phone">phone</option>
+                        <option value="laptop">laptop</option>
+                        <option value="tablet">tablet</option>
+                        <option value="speaker">speaker</option>
+                        <option value="tv">tv</option>
+                        <option value="watch">watch</option>
+                        <option value="generic">generic</option>
+                    </select>
+                </label>
+                <label>Color <input id="tag-color" type="color" value="#7fdcff"></label>
+                <div class="actions">
+                    <button id="tag-save" type="button">Save</button>
+                    <button id="tag-delete" type="button">Delete</button>
+                </div>
+            </details>
+        </aside>
+    </main>
+    <script src="/static/radar.js"></script>
+    <script src="/static/app.js"></script>
+</body>
+</html>
