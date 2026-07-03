@@ -165,3 +165,35 @@ canvas#radar {
     color: var(--bad);
     border: 1px solid var(--bad);
 }
+/* CSI human-sensing panel. */
+.vitals {
+    background: var(--bg-elevated);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.7rem 0.8rem;
+    margin-bottom: 1rem;
+}
+.vitals[data-present="true"] { border-color: var(--good); }
+.vitals h2 { margin: 0 0 0.5rem; font-size: 0.95rem; display: flex; align-items: center; gap: 0.5rem; }
+.vitals-src {
+    font-size: 0.65rem; color: var(--accent); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 0.35rem; letter-spacing: 0.05em;
+}
+.vitals-presence { display: flex; align-items: center; gap: 0.5rem; color: var(--fg-muted); margin-bottom: 0.6rem; }
+.vitals-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--border); box-shadow: none; transition: all 0.3s;
+}
+.vitals-dot.on {
+    background: var(--good);
+    box-shadow: 0 0 8px var(--good);
+    animation: vitals-pulse 1.2s ease-in-out infinite;
+}
+@keyframes vitals-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.vitals-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.vital { background: var(--bg); border-radius: 6px; padding: 0.5rem 0.6rem; }
+.vital-label { font-size: 0.7rem; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.vital-num { font-size: 1.5rem; font-weight: 600; color: var(--accent); }
+.vital-unit { font-size: 0.75rem; color: var(--fg-muted); }
+.vital-conf { font-size: 0.65rem; color: var(--fg-muted); min-height: 0.9rem; }
+.vitals-meta { margin-top: 0.5rem; font-size: 0.65rem; color: var(--fg-muted); }

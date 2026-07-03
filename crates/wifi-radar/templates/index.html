@@ -20,6 +20,26 @@
             <canvas id="radar" width="640" height="640"></canvas>
         </section>
         <aside class="tag-pane">
+            <section id="vitals" class="vitals" data-present="false">
+                <h2>Human sensing <span id="vitals-src" class="vitals-src">CSI</span></h2>
+                <div class="vitals-presence">
+                    <span id="vitals-dot" class="vitals-dot"></span>
+                    <span id="vitals-presence-text">no signal</span>
+                </div>
+                <div class="vitals-grid">
+                    <div class="vital">
+                        <div class="vital-label">breathing</div>
+                        <div><span id="vitals-breath" class="vital-num">–</span> <span class="vital-unit">bpm</span></div>
+                        <div id="vitals-breath-conf" class="vital-conf"></div>
+                    </div>
+                    <div class="vital">
+                        <div class="vital-label">heart</div>
+                        <div><span id="vitals-heart" class="vital-num">–</span> <span class="vital-unit">bpm</span></div>
+                        <div id="vitals-heart-conf" class="vital-conf"></div>
+                    </div>
+                </div>
+                <div id="vitals-meta" class="vitals-meta">waiting for nexmon CSI on :5500…</div>
+            </section>
             <h2>Devices</h2>
             <ul id="device-list" class="device-list"></ul>
             <details class="tag-editor">

@@ -248,6 +248,7 @@ API exposes:
 | Method | Path                       | Purpose                              |
 | ------ | -------------------------- | ------------------------------------ |
 | GET    | `/api/health`              | `{"ok": true}`                       |
+| GET    | `/api/vitals`              | CSI human sensing: breathing/heart/presence |
 | GET    | `/api/devices`             | devices snapshot with tag overlay    |
 | GET    | `/api/tags`                | persistent tag DB                    |
 | POST   | `/api/tags`                | upsert a tag                         |
@@ -258,6 +259,18 @@ For live (non-dev) capture you'll need a monitor-mode adapter; the
 service runs unprivileged (`DynamicUser`) so it doesn't ship the
 `cap_net_raw` privilege for radiotap capture — call the binary by hand
 with `sudo` in that case.
+
+**Human sensing (breathing / heartbeat / presence).** RSSI shows *devices*;
+Channel State Information (CSI) shows *people*. On the uConsole CM4 the on-board
+BCM43455c0 can produce CSI via [nexmon_csi](https://github.com/seemoo-lab/nexmon_csi).
+Pipe it in and the UI's "Human sensing" panel + `/api/vitals` light up:
+
+```sh
+sudo tcpdump -i wlan0 -s0 -U -w - 'udp port 5500' | wifi-radar --csi-pcap - --csi-rate 20
+```
+
+Full CM4 setup (firmware flash, tuning knobs, no-hardware smoke test):
+[docs/wiki/WiFi-Vitals-Nexmon-CM4.md](docs/wiki/WiFi-Vitals-Nexmon-CM4.md).
 
 ## Keys
 

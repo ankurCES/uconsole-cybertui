@@ -45,6 +45,16 @@ pub struct RunConfig {
     pub tags_path: PathBuf,
     pub static_dir: PathBuf,
     pub pcap_path: Option<PathBuf>,
+    /// UDP address to listen on for nexmon_csi frames (vitals sensing).
+    /// `None` disables the UDP path. Default bind: `0.0.0.0:5500`.
+    pub csi_udp: Option<SocketAddr>,
+    /// Read nexmon CSI from a pcap stream (`-` = stdin). This is the reliable
+    /// nexmon_csi path: `tcpdump -i wlan0 -U -w - 'udp port 5500' | ...`.
+    pub csi_pcap: Option<PathBuf>,
+    /// Fixed CSI sample rate override (Hz). `None` = estimate from arrivals.
+    pub csi_rate_hz: Option<f32>,
+    /// Presence/motion detection threshold on the chest signal.
+    pub csi_motion_threshold: f32,
 }
 
 /// Long-lived handle returned by `run_with`. Drop it (or call [`shutdown`])
@@ -137,6 +147,7 @@ async fn shell_handler() -> Result<impl IntoResponse, axum::http::StatusCode> {
 pub async fn run_with(cfg: RunConfig) -> anyhow::Result<StandaloneLive> {
     let tags = Arc::new(TagDb::load(&cfg.tags_path)?);
     let store = Arc::new(DeviceStore::new());
+    let vitals = Arc::new(crate::csi::VitalsStore::new());
 
     let (events_tx, _) = broadcast::channel::<DeviceEvent>(SSE_CHANNEL_CAPACITY);
     let (scanner_tx, mut scanner_rx) =
@@ -145,9 +156,33 @@ pub async fn run_with(cfg: RunConfig) -> anyhow::Result<StandaloneLive> {
     let state = Arc::new(AppState {
         store: store.clone(),
         tags: tags.clone(),
+        vitals: vitals.clone(),
         events_tx: events_tx.clone(),
         scanner_tx: scanner_tx.clone(),
     });
+
+    // CSI vitals sensing (nexmon_csi → UDP). Additive: it runs alongside the
+    // RSSI radar and only starts when a listen address is configured.
+    if let Some(csi_bind) = cfg.csi_udp {
+        let vitals = vitals.clone();
+        let rate = cfg.csi_rate_hz;
+        let thr = cfg.csi_motion_threshold;
+        tokio::spawn(async move {
+            if let Err(e) = crate::csi::run_csi_udp(csi_bind, vitals, rate, thr).await {
+                tracing::warn!(error = %e, "csi: UDP listener exited");
+            }
+        });
+    }
+    if let Some(pcap) = cfg.csi_pcap.clone() {
+        let vitals = vitals.clone();
+        let rate = cfg.csi_rate_hz;
+        let thr = cfg.csi_motion_threshold;
+        tokio::spawn(async move {
+            if let Err(e) = crate::csi::run_csi_pcap(pcap, vitals, rate, thr).await {
+                tracing::warn!(error = %e, "csi: pcap reader exited");
+            }
+        });
+    }
 
     // Scanner → broadcast fan-out.
     let fanout_tx = events_tx.clone();

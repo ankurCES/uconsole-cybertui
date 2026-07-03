@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::csi::{VitalReading, VitalsStore};
 use crate::devices::{DeviceState, DeviceStore};
 use crate::frames::DeviceEvent;
 use crate::tags::{Tag, TagDb};
@@ -37,6 +38,8 @@ use crate::tags::{Tag, TagDb};
 pub struct AppState {
     pub store: Arc<DeviceStore>,
     pub tags: Arc<TagDb>,
+    /// Latest CSI-derived vitals reading (breathing/heart/presence).
+    pub vitals: Arc<VitalsStore>,
     /// Live `DeviceEvent` channel — new events are broadcast here for SSE.
     pub events_tx: broadcast::Sender<DeviceEvent>,
     /// Scanner writes here; we forward into `events_tx` for SSE clients.
@@ -71,6 +74,7 @@ pub struct UpsertTagResponse {
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/vitals", get(get_vitals))
         .route("/api/devices", get(get_devices))
         .route("/api/tags", get(get_tags))
         .route("/api/tags", post(post_tag))
@@ -87,6 +91,12 @@ pub fn sse_router(state: Arc<AppState>) -> Router {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// `GET /api/vitals` — the latest CSI-derived vitals reading. Returns the
+/// "empty" reading (all zero, `presence:false`) when no nexmon CSI is flowing.
+async fn get_vitals(State(state): State<Arc<AppState>>) -> Json<VitalReading> {
+    Json(state.vitals.get())
 }
 
 async fn get_devices(State(state): State<Arc<AppState>>) -> Json<DevicesResponse> {
