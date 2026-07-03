@@ -27,6 +27,7 @@ use axum::{
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
+use tokio_stream::wrappers::BroadcastStream;
 
 use crate::devices::{DeviceState, DeviceStore};
 use crate::frames::DeviceEvent;
@@ -138,37 +139,16 @@ async fn get_events(
     State(state): State<Arc<AppState>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events_tx.subscribe();
-    let stream = BroadcastStream(rx).filter_map(|ev| async move {
-        match serde_json::to_string(&ev) {
-            Ok(s) => Some(Ok(Event::default().data(s))),
+    let stream = BroadcastStream::new(rx).filter_map(|ev| async move {
+        match ev {
+            Ok(ev) => match serde_json::to_string(&ev) {
+                Ok(s) => Some(Ok(Event::default().data(s))),
+                Err(_) => None,
+            },
+            // Lagged or closed: drop and let the stream continue — the
+            // browser will reconnect if the connection itself dies.
             Err(_) => None,
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)))
-}
-
-/// Adapter: yield every broadcast value as a stream item.
-struct BroadcastStream(broadcast::Receiver<DeviceEvent>);
-
-impl Stream for BroadcastStream {
-    type Item = DeviceEvent;
-
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        loop {
-            match self.0.try_recv() {
-                Ok(ev) => return std::task::Poll::Ready(Some(ev)),
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    cx.waker().wake_by_ref();
-                    return std::task::Poll::Pending;
-                }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    return std::task::Poll::Ready(None);
-                }
-                Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
-            }
-        }
-    }
 }
