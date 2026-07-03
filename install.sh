@@ -9,6 +9,7 @@
 #   ./install.sh --tui
 #   ./install.sh --web
 #   ./install.sh --full
+#   ./install.sh --radar
 #   ./install.sh --build
 #   ./install.sh --uninstall
 #
@@ -19,6 +20,12 @@
 #            Creates a dedicated system user, writes the sudoers fragment,
 #            installs the unit, opens the firewall port, generates a token.
 #            Skips the TUI binary.
+#   --radar  Build + install the wifi-radar binary as a systemd service.
+#            Passive 802.11 monitor — no privileged sudoers needed; just
+#            a unit, a bind address, and a firewall hole. By default runs
+#            in --dev mode (synthetic 8-MAC stream) so you can see it work
+#            without a monitor-mode adapter; pass --pcap to point at a
+#            capture file. Skips the TUI binary.
 #   --full   Both (default if no preset is given). Equivalent to legacy
 #            behaviour.
 #   --build  Build both binaries into target/release and exit.
@@ -70,13 +77,17 @@ BIND_ADDR="${BIND_ADDR:-0.0.0.0:7878}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 TOKEN_FILE="${TOKEN_FILE:-/etc/cyberdeck/token}"
 SERVICE_NAME="cyberdeck-web"
+RADAR_SERVICE_NAME="wifi-radar"
 TUI_BIN="cyberdeck-tui"
 WEB_BIN="cyberdeck-web"
+RADAR_BIN="wifi-radar"
+RADAR_BIND_ADDR="${RADAR_BIND_ADDR:-0.0.0.0:8743}"
 
 # ---------- preset / flag state ----------
 PRESET_FULL=0
 PRESET_TUI=0
 PRESET_WEB=0
+PRESET_RADAR=0
 PRESET_BUILD=0
 PRESET_DEPS=0
 ASSUME_YES=0
@@ -84,6 +95,8 @@ REFUSE_SUDO=0
 DO_UNINSTALL=0
 SKIP_DEPS=0
 DO_DEPS=0
+FORCE_DEV=0
+RADAR_TAGS_PATH="${RADAR_TAGS_PATH:-/var/lib/wifi-radar/tags.json}"
 
 usage() {
     sed -n '2,40p' "$0"
@@ -92,6 +105,7 @@ usage() {
 PRESETS
   --tui      TUI binary only. No sudo, no service.
   --web      Web service only. Sudo for install steps.
+  --radar    Wi-Fi radar service. Sudo for install steps.
   --full     TUI + web (default).
   --build    Build only; no install, no sudo.
   --deps     Install OS-level packages the TUI shells out to (bluez,
@@ -103,14 +117,18 @@ OPTIONS
   -y, --yes            Non-interactive.
   --prefix <dir>       Bin install prefix (default: /usr/local).
   --bind <addr>        Web bind address (default: 0.0.0.0:7878).
+  --radar-bind <addr>  Wi-Fi radar bind address (default: 0.0.0.0:8743).
   --service-user <u>   Service user (default: cyberdeck).
+  --radar-dev          Force the wifi-radar into dev mode (synthetic 8-MAC
+                       stream). Default in --radar install.
+  --radar-pcap <path>  Use a pcap file instead of dev mode.
   --refuse-sudo        Refuse to escalate; require preset to be non-sudo.
   --skip-deps          Don't install OS-level packages.
   --uninstall          Reverse the install.
 
 ENV
-  INSTALL_PREFIX, BIND_ADDR, SERVICE_USER, TOKEN_FILE, REPO_DIR
-  override the corresponding flag/default.
+  INSTALL_PREFIX, BIND_ADDR, RADAR_BIND_ADDR, SERVICE_USER, TOKEN_FILE,
+  REPO_DIR override the corresponding flag/default.
 EOF
 }
 
@@ -122,6 +140,7 @@ while [[ $# -gt 0 ]]; do
     case "$arg" in
         --tui)        PRESET_TUI=1 ;;
         --web)        PRESET_WEB=1 ;;
+        --radar)      PRESET_RADAR=1 ;;
         --full)       PRESET_FULL=1 ;;
         --build)      PRESET_BUILD=1 ;;
         --deps)       PRESET_DEPS=1 ;;
@@ -131,9 +150,13 @@ while [[ $# -gt 0 ]]; do
         --uninstall)  DO_UNINSTALL=1 ;;
         --prefix)     INSTALL_PREFIX="$2"; shift ;;
         --bind)       BIND_ADDR="$2"; shift ;;
+        --radar-bind) RADAR_BIND_ADDR="$2"; shift ;;
+        --radar-dev)  FORCE_DEV=1 ;;
+        --radar-pcap) RADAR_PCAP="$2"; shift ;;
         --service-user) SERVICE_USER="$2"; shift ;;
         # legacy aliases
         --web-only)   PRESET_WEB=1 ;;
+        --radar-only) PRESET_RADAR=1 ;;
         --build-only) PRESET_BUILD=1 ;;
         --install-only) PASSTHROUGH+=("--install-only") ;;  # internal, used by sudo re-exec
         -h|--help)    usage; exit 0 ;;
@@ -149,7 +172,7 @@ for p in "${PASSTHROUGH[@]}"; do
 done
 
 # Pick a default preset if none was given.
-if [[ $((PRESET_TUI + PRESET_WEB + PRESET_FULL + PRESET_BUILD + PRESET_DEPS)) -eq 0 ]]; then
+if [[ $((PRESET_TUI + PRESET_WEB + PRESET_RADAR + PRESET_FULL + PRESET_BUILD + PRESET_DEPS)) -eq 0 ]]; then
     PRESET_FULL=1
 fi
 
@@ -346,17 +369,23 @@ if [[ $DO_UNINSTALL -eq 1 ]]; then
         log "Re-executing with sudo for uninstall"
         exec sudo -E REPO_DIR="$REPO_DIR" \
                    INSTALL_PREFIX="$INSTALL_PREFIX" \
+                   RADAR_TAGS_PATH="$RADAR_TAGS_PATH" \
                    SERVICE_USER="$SERVICE_USER" \
                    TOKEN_FILE="$TOKEN_FILE" \
                    SERVICE_NAME="$SERVICE_NAME" \
+                   RADAR_SERVICE_NAME="$RADAR_SERVICE_NAME" \
                    "$0" --uninstall
     fi
     systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+    systemctl disable --now "${RADAR_SERVICE_NAME}.service" 2>/dev/null || true
+    rm -f "/etc/systemd/system/${RADAR_SERVICE_NAME}.service"
     rm -f "/etc/sudoers.d/cyberdeck"
     rm -f "${INSTALL_PREFIX}/bin/${WEB_BIN}"
     rm -f "${INSTALL_PREFIX}/bin/${TUI_BIN}"
+    rm -f "${INSTALL_PREFIX}/bin/${RADAR_BIN}"
     rm -rf /etc/cyberdeck
+    rm -rf "$(dirname -- "${RADAR_TAGS_PATH}")"
     if id -u "$SERVICE_USER" >/dev/null 2>&1; then
         userdel "$SERVICE_USER" 2>/dev/null || warn "Could not delete user $SERVICE_USER"
     fi
@@ -368,14 +397,14 @@ fi
 # ---------- 1. sanity ----------
 [[ -d "$REPO_DIR/crates" ]] \
     || die "Could not find $REPO_DIR/crates — set REPO_DIR to the repo root."
-if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
+if [[ $PRESET_WEB -eq 1 || $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
     command -v systemctl >/dev/null 2>&1 \
-        || die "systemctl not found — --web/--full need a systemd system."
+        || die "systemctl not found — --web/--radar/--full need a systemd system."
 fi
 
 # ---------- 2. refuse-sudo guard ----------
 if [[ $REFUSE_SUDO -eq 1 ]]; then
-    if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    if [[ $PRESET_WEB -eq 1 || $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
         die "--refuse-sudo given but preset needs sudo. Use --tui or --build instead."
     fi
 fi
@@ -385,13 +414,19 @@ NEED_BUILD=0
 [[ $PRESET_TUI  -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]] && NEED_BUILD=1
 NEED_WEB_BUILD=0
 [[ $PRESET_WEB  -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]] && NEED_WEB_BUILD=1
+NEED_RADAR_BUILD=0
+[[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]] && NEED_RADAR_BUILD=1
 
-if [[ $INSTALL_ONLY -eq 0 ]] && [[ $NEED_BUILD -eq 1 || $NEED_WEB_BUILD -eq 1 ]]; then
+if [[ $INSTALL_ONLY -eq 0 ]] && [[ $NEED_BUILD -eq 1 || $NEED_WEB_BUILD -eq 1 || $NEED_RADAR_BUILD -eq 1 ]]; then
     command -v cargo >/dev/null 2>&1 \
         || die "cargo not found in PATH. Install Rust first: https://rustup.rs"
     if [[ $NEED_WEB_BUILD -eq 1 ]]; then
         log "Building ${WEB_BIN} (release) as $(id -un)…"
         ( cd "$REPO_DIR" && cargo build --release -p cyberdeck-web )
+    fi
+    if [[ $NEED_RADAR_BUILD -eq 1 ]]; then
+        log "Building ${RADAR_BIN} (release) as $(id -un)…"
+        ( cd "$REPO_DIR" && cargo build --release -p wifi-radar )
     fi
     if [[ $NEED_BUILD -eq 1 ]]; then
         log "Building ${TUI_BIN} (release)…"
@@ -413,27 +448,38 @@ if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]]; then
         || die "Expected $REPO_DIR/target/release/${WEB_BIN} — build first."
 fi
 
+if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]]; then
+    [[ -x "$REPO_DIR/target/release/${RADAR_BIN}" ]] \
+        || die "Expected $REPO_DIR/target/release/${RADAR_BIN} — build first."
+fi
+
 if [[ $PRESET_BUILD -eq 1 ]]; then
     log "Build complete."
     log "  ${WEB_BIN}: $REPO_DIR/target/release/${WEB_BIN}"
     log "  ${TUI_BIN}: $REPO_DIR/target/release/${TUI_BIN}"
+    log "  ${RADAR_BIN}: $REPO_DIR/target/release/${RADAR_BIN}"
     exit 0
 fi
 
 # ---------- 4. escalate to root for the rest (only when needed) ----------
 NEED_SUDO_STEPS=0
 [[ $PRESET_TUI -eq 1 ]] && [[ "$INSTALL_PREFIX" == "/usr/local" || "$INSTALL_PREFIX" == "/usr" ]] && NEED_SUDO_STEPS=1
-[[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]] && NEED_SUDO_STEPS=1
+[[ $PRESET_WEB -eq 1 || $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]] && NEED_SUDO_STEPS=1
 
 if [[ $NEED_SUDO_STEPS -eq 1 ]] && [[ $EUID -ne 0 ]]; then
     log "Re-executing with sudo for system install steps"
     exec sudo -E REPO_DIR="$REPO_DIR" \
                INSTALL_PREFIX="$INSTALL_PREFIX" \
                BIND_ADDR="$BIND_ADDR" \
+               RADAR_BIND_ADDR="$RADAR_BIND_ADDR" \
+               FORCE_DEV="$FORCE_DEV" \
+               RADAR_PCAP="$RADAR_PCAP" \
+               RADAR_TAGS_PATH="$RADAR_TAGS_PATH" \
                SERVICE_USER="$SERVICE_USER" \
                TOKEN_FILE="$TOKEN_FILE" \
                PRESET_TUI="$PRESET_TUI" \
                PRESET_WEB="$PRESET_WEB" \
+               PRESET_RADAR="$PRESET_RADAR" \
                PRESET_FULL="$PRESET_FULL" \
                ASSUME_YES="$ASSUME_YES" \
                "$0" --install-only
@@ -456,6 +502,15 @@ if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
     install -m 0755 \
         "$REPO_DIR/target/release/${WEB_BIN}" \
         "${INSTALL_PREFIX}/bin/${WEB_BIN}"
+fi
+
+if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    [[ -x "$REPO_DIR/target/release/${RADAR_BIN}" ]] \
+        || die "Expected $REPO_DIR/target/release/${RADAR_BIN} — build first."
+    log "Installing ${RADAR_BIN} to ${INSTALL_PREFIX}/bin/${RADAR_BIN}"
+    install -m 0755 \
+        "$REPO_DIR/target/release/${RADAR_BIN}" \
+        "${INSTALL_PREFIX}/bin/${RADAR_BIN}"
 fi
 
 # ---------- 6. (web only) system user ----------
@@ -563,6 +618,55 @@ WantedBy=multi-user.target
 EOF
 fi
 
+# ---------- 9b. (radar only) data dir + systemd unit ----------
+# wifi-radar only writes the persistent tag DB at --tags PATH; the
+# scanner in --dev mode doesn't touch the radio at all, so we run the
+# service unprivileged (DynamicUser), avoiding the cap_net_raw requirement
+# of monitor-mode live capture. For real radiotap capture, run the binary
+# by hand with sudo.
+if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    RADAR_TAGS_DIR="$(dirname -- "${RADAR_TAGS_PATH}")"
+    mkdir -p "${RADAR_TAGS_DIR}"
+    if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+        log "Creating system user '$SERVICE_USER'"
+        useradd --system --no-create-home --shell /usr/sbin/nologin "$SERVICE_USER"
+    fi
+    chown "${SERVICE_USER}:${SERVICE_USER}" "${RADAR_TAGS_DIR}"
+
+    RADAR_UNIT_FILE="/etc/systemd/system/${RADAR_SERVICE_NAME}.service"
+    log "Writing $RADAR_UNIT_FILE"
+    if [[ -n "${RADAR_PCAP:-}" ]]; then
+        RADAR_ARGS="--bind ${RADAR_BIND_ADDR} --pcap ${RADAR_PCAP} --tags ${RADAR_TAGS_PATH}"
+    else
+        RADAR_DEV_FLAG=""
+        [[ $FORCE_DEV -eq 1 ]] && RADAR_DEV_FLAG="--dev "
+        RADAR_ARGS="--bind ${RADAR_BIND_ADDR} ${RADAR_DEV_FLAG}--tags ${RADAR_TAGS_PATH}"
+    fi
+    cat > "$RADAR_UNIT_FILE" <<EOF
+[Unit]
+Description=Wi-Fi Radar (passive 802.11 monitor with synthetic fallback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+StateDirectory=wifi-radar
+ExecStart=${INSTALL_PREFIX}/bin/${RADAR_BIN} ${RADAR_ARGS}
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/wifi-radar
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
 # ---------- 10. (web only) firewall ----------
 if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
     if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
@@ -571,6 +675,20 @@ if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
     elif command -v nft >/dev/null 2>&1 && [[ -f /etc/nftables.conf ]]; then
         warn "nftables detected — not editing /etc/nftables.conf automatically."
         warn "If the host firewall is nftables, add a rule to allow ${BIND_ADDR##*:}/tcp."
+    else
+        warn "No active firewall detected (no ufw, no nftables.conf). Skipping."
+    fi
+fi
+
+# ---------- 10b. (radar only) firewall ----------
+if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    RADAR_PORT="${RADAR_BIND_ADDR##*:}"
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+        log "Opening ${RADAR_PORT}/tcp in ufw"
+        ufw allow "${RADAR_PORT}/tcp" comment "wifi-radar" >/dev/null || true
+    elif command -v nft >/dev/null 2>&1 && [[ -f /etc/nftables.conf ]]; then
+        warn "nftables detected — not editing /etc/nftables.conf automatically."
+        warn "If the host firewall is nftables, add a rule to allow ${RADAR_PORT}/tcp."
     else
         warn "No active firewall detected (no ufw, no nftables.conf). Skipping."
     fi
@@ -587,6 +705,20 @@ if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
     if ! systemctl is-active --quiet "${SERVICE_NAME}.service"; then
         die "Service failed to start. Last 20 log lines:
 $(journalctl -u "${SERVICE_NAME}.service" -n 20 --no-pager 2>&1 || true)"
+    fi
+fi
+
+# ---------- 11b. (radar only) enable + start ----------
+if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    log "Reloading systemd, enabling and starting $RADAR_SERVICE_NAME"
+    systemctl daemon-reload
+    systemctl enable "${RADAR_SERVICE_NAME}.service" >/dev/null
+    systemctl restart "${RADAR_SERVICE_NAME}.service"
+
+    sleep 1
+    if ! systemctl is-active --quiet "${RADAR_SERVICE_NAME}.service"; then
+        die "Service failed to start. Last 20 log lines:
+$(journalctl -u "${RADAR_SERVICE_NAME}.service" -n 20 --no-pager 2>&1 || true)"
     fi
 fi
 
@@ -616,6 +748,18 @@ if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
     Token     : stored at ${TOKEN_FILE} (delete the file to regenerate)
     LAN URL   : http://${HOST_IP:-<host>}:${PORT}/?token=${TOKEN}
     Local URL : http://127.0.0.1:${PORT}/?token=${TOKEN}
+
+EOF
+fi
+
+if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    RADAR_PORT="${RADAR_BIND_ADDR##*:}"
+    cat <<EOF
+    Radar     : systemctl {status,restart,stop} ${RADAR_SERVICE_NAME}
+    Logs      : journalctl -u ${RADAR_SERVICE_NAME} -f
+    Tags      : ${RADAR_TAGS_PATH}
+    LAN URL   : http://${HOST_IP:-<host>}:${RADAR_PORT}/
+    Local URL : http://127.0.0.1:${RADAR_PORT}/
 
 EOF
 fi

@@ -144,6 +144,12 @@ curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/ins
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --full
 
+# Wi-Fi radar — passive 802.11 monitor with synthetic fallback (no
+# monitor-mode adapter required). Installs wifi-radar as a systemd
+# service on http://<host>:8743/.
+curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
+  | bash -s -- --radar
+
 # Build only — no install, no sudo, no service. For CI or dev.
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --build
@@ -155,7 +161,8 @@ curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/ins
 | ------ | ------------ | ----------- | --------- |
 | `--tui` | Build + install `cyberdeck-tui` to `/usr/local/bin`. | Only if `/usr/local` needs it. | No service. |
 | `--web` | Build + install `cyberdeck-web`, create `cyberdeck` system user, write the NOPASSWD sudoers fragment, install the systemd unit, open the firewall, generate a bearer token. | Yes. | The web service. |
-| `--full` | Both of the above. (Default if no preset is given.) | Yes. | The web service. |
+| `--radar` | Build + install `wifi-radar` as a systemd service. Passive 802.11 monitor with a synthetic 8-MAC fallback (so it shows something even without a monitor-mode adapter). | Yes. | The radar service. |
+| `--full` | Both `--tui` and `--web`. (Default if no preset is given.) | Yes. | The web service. |
 | `--build` | Build both binaries into `./target/release` and exit. | No. | Nothing. |
 
 ### Options
@@ -224,6 +231,33 @@ cyberdeck-web 0.0.0.0:7878
 
 Same bearer-token model, same JSON API, same WebSocket payload. Useful for
 headless deployments or for putting the cyberdeck behind a reverse proxy.
+
+### Wi-Fi radar
+
+```sh
+cargo run -p wifi-radar -- --dev --bind 127.0.0.1:8743
+# → http://127.0.0.1:8743/
+```
+
+Passive 802.11 monitor with a synthetic 8-MAC fallback so you can see it
+work without a monitor-mode adapter. The service-mode install (`--radar`
+preset) ships a `wifi-radar.service` unit, a `DynamicUser` system user,
+and the persistent tag DB at `/var/lib/wifi-radar/tags.json`. The radar
+API exposes:
+
+| Method | Path                       | Purpose                              |
+| ------ | -------------------------- | ------------------------------------ |
+| GET    | `/api/health`              | `{"ok": true}`                       |
+| GET    | `/api/devices`             | devices snapshot with tag overlay    |
+| GET    | `/api/tags`                | persistent tag DB                    |
+| POST   | `/api/tags`                | upsert a tag                         |
+| DELETE | `/api/tags/:mac`           | remove a tag                         |
+| GET    | `/api/events`              | SSE stream of `DeviceEvent`s         |
+
+For live (non-dev) capture you'll need a monitor-mode adapter; the
+service runs unprivileged (`DynamicUser`) so it doesn't ship the
+`cap_net_raw` privilege for radiotap capture — call the binary by hand
+with `sudo` in that case.
 
 ## Keys
 

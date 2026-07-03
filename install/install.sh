@@ -6,6 +6,7 @@
 #   curl -fsSL …/install/install.sh | bash -s -- --tui
 #   curl -fsSL …/install/install.sh | bash -s -- --web
 #   curl -fsSL …/install/install.sh | bash -s -- --full
+#   curl -fsSL …/install/install.sh | bash -s -- --radar
 #   curl -fsSL …/install/install.sh | bash -s -- --build
 #   curl -fsSL …/install/install.sh | bash -s -- --help
 #
@@ -45,6 +46,10 @@ PRESETS
   --web      Build + install cyberdeck-web as a systemd service.
              Creates the cyberdeck system user, opens the firewall port,
              generates a bearer token. Skips the TUI binary.
+  --radar    Build + install wifi-radar as a systemd service.
+             Passive 802.11 monitor with synthetic 8-MAC fallback
+             (works without a monitor-mode adapter). Binds on
+             0.0.0.0:8743. Skips the TUI binary.
   --full     Both TUI and web (default if no preset is given).
   --build    Build both binaries into ./target/release and exit.
              No install, no sudo, no service.
@@ -54,6 +59,8 @@ OPTIONS (passed through to the repo's install.sh)
   -y/--yes            Non-interactive; assume yes for any prompt.
   --prefix <dir>      Install prefix for binaries (default: /usr/local).
   --bind <addr>       Web server bind address (default: 0.0.0.0:7878).
+  --radar-bind <addr> Wi-Fi radar bind address (default: 0.0.0.0:8743).
+  --radar-pcap <path> Use a pcap file instead of dev mode.
   --service-user <u>  System user for the web service (default: cyberdeck).
   --uninstall         Remove installed binaries, user, service, token.
 
@@ -71,6 +78,9 @@ EXAMPLES
   # Everything:
   curl -fsSL …/install/install.sh | bash -s -- --full
 
+  # Wi-Fi radar as a systemd service (passive monitor, synth fallback):
+  curl -fsSL …/install/install.sh | bash -s -- --radar
+
   # Pin to a specific tag:
   curl -fsSL …/install/install.sh | CYBERDECK_REF=v0.1.0 bash -s -- --tui
 EOF
@@ -87,7 +97,7 @@ command -v git >/dev/null 2>&1 \
 NEED_SUDO=0
 for arg in "$@"; do
     case "$arg" in
-        --web|--full|--uninstall) NEED_SUDO=1 ;;
+        --web|--full|--radar|--uninstall) NEED_SUDO=1 ;;
     esac
 done
 
