@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/tui", "crates/web"]
+members = ["crates/core", "crates/tui", "crates/web", "crates/wifi-radar"]
 
 [workspace.package]
 version = "0.1.0"
@@ -55,6 +55,9 @@ crossbeam-channel = "0.5"
 # resolver entry — only enabled when the user opts into the
 # `cyberdeck-tui/http` feature.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+
+# wifi-radar: 802.11 frame capture (pure-Rust pcap reader, no libpcap C dep)
+pcap-file = "2"
 
 [profile.release]
 opt-level = 3

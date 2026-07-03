@@ -1,0 +1,35 @@
+[package]
+name = "wifi-radar"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Browser-accessible Wi-Fi radar: ruview-style surveillance + OpenScope-style radar canvas."
+
+[lib]
+name = "wifi_radar"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wifi-radar"
+path = "src/main.rs"
+
+[dependencies]
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+askama.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+chrono.workspace = true
+futures.workspace = true
+pcap-file.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
