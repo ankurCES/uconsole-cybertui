@@ -10,12 +10,16 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::response::IntoResponse;
+use axum::extract::Request;
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 use askama::Template;
 use tokio::sync::{broadcast, mpsc};
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::api::{sse_router, AppState};
@@ -56,6 +60,50 @@ impl StandaloneLive {
     }
 }
 
+/// Stamp `Cache-Control: no-store` on every response. We use
+/// `tower_http::set_header::SetResponseHeaderLayer` rather than an
+/// axum `from_fn` middleware because `nest_service("/static", ...)`
+/// mounts `ServeDir` as an internal router node, and axum 0.7's
+/// `from_fn` only wraps responses from routes defined on the router
+/// itself. The `tower-http` layer wraps the whole tower stack and
+/// reliably stamps the header on every response, including
+/// `nest_service` and SSE responses.
+fn no_store_layer() -> SetResponseHeaderLayer<HeaderValue> {
+    SetResponseHeaderLayer::overriding(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store"),
+    )
+}
+
+/// Fallback middleware: if `ServeDir` returns 404 for a `/static/*` request,
+/// try the embedded asset set (see [`crate::assets`]). This makes the
+/// binary self-contained when launched from a cwd that doesn't contain
+/// the workspace's `crates/wifi-radar/web` directory (e.g. when installed
+/// to `/usr/local/bin/wifi-radar` and started by systemd).
+async fn static_fallback(req: Request, next: Next) -> Response {
+    // Read the path off the request itself, before running the inner
+    // service. `nest_service` doesn't populate `OriginalUri`, so we have
+    // to grab it from the incoming request.
+    let uri_path = req.uri().path().to_string();
+
+    let resp = next.run(req).await;
+    if resp.status() != StatusCode::NOT_FOUND {
+        return resp;
+    }
+
+    let Some(name) = uri_path.strip_prefix("/static/") else {
+        return resp;
+    };
+    // Guard against path traversal: embedded keys are flat filenames only.
+    if name.is_empty() || name.contains("..") || name.starts_with('/') {
+        return resp;
+    }
+    if !crate::assets::contains(name) {
+        return resp;
+    }
+    crate::assets::get(name)
+}
+
 /// Build the full axum app: HTML shell + static assets + API + SSE.
 pub fn build_router(state: Arc<AppState>, static_dir: PathBuf) -> Router {
     let api = crate::api::router(state.clone());
@@ -65,6 +113,13 @@ pub fn build_router(state: Arc<AppState>, static_dir: PathBuf) -> Router {
     api.merge(sse)
         .merge(shell)
         .nest_service("/static", ServeDir::new(static_dir))
+        // Order matters: `no_store_layer` MUST be applied first so it
+        // wraps the entire stack including `nest_service` and the
+        // `static_fallback` middleware below.
+        .layer(no_store_layer())
+        // Run the embedded-asset fallback only over the `/static` mount
+        // so API routes are unaffected.
+        .layer(middleware::from_fn(static_fallback))
         .layer(TraceLayer::new_for_http())
 }
 

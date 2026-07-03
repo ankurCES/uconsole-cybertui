@@ -1,6 +1,7 @@
 //! wifi-radar: a browser-accessible Wi-Fi radar. See README + design doc.
 
 pub mod api;
+pub mod assets;
 pub mod devices;
 pub mod frames;
 pub mod run;

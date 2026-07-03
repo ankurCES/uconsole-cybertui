@@ -89,3 +89,61 @@ async fn static_assets_are_served() {
         assert_eq!(resp.status(), 200, "{asset} returned {}", resp.status());
     }
 }
+
+/// Regression test: when `--static-dir` doesn't exist on disk (e.g. the
+/// binary is installed at `/usr/local/bin/wifi-radar` and started from
+/// cwd `/`), the embedded-asset fallback must still serve CSS/JS. Before
+/// this fix the browser rendered only the topbar (`<span>wifi-radar
+/// wifi-radar 0.1.0 connecting…</span>`) because every static asset 404'd.
+#[tokio::test]
+async fn static_assets_fall_back_to_embedded_when_dir_absent() {
+    let tags_path = temp_tags_path();
+    let _ = std::fs::remove_file(&tags_path);
+    let tags = Arc::new(TagDb::load(&tags_path).unwrap());
+    let store = Arc::new(DeviceStore::new());
+    let (events_tx, _) = broadcast::channel::<DeviceEvent>(16);
+    let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
+    let state = Arc::new(AppState {
+        store,
+        tags,
+        events_tx,
+        scanner_tx,
+    });
+
+    // Point at a path that definitely doesn't exist on disk.
+    let missing = PathBuf::from("/tmp/wifi-radar-does-not-exist-1234567890/web");
+    assert!(
+        !missing.exists(),
+        "test precondition: {missing:?} must not exist"
+    );
+
+    let app = build_router(state, missing);
+
+    for asset in ["style.css", "app.js", "radar.js"] {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/static/{asset}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "{asset} should fall back to embedded (got {})",
+            resp.status()
+        );
+        // Body should not be empty — the browser would otherwise log a
+        // "Refused to execute script" warning.
+        let body = axum::body::to_bytes(resp.into_body(), 256 * 1024)
+            .await
+            .unwrap();
+        assert!(
+            !body.is_empty(),
+            "{asset} fell back but body was empty (mime guess wrong?)"
+        );
+    }
+}

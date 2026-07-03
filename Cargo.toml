@@ -24,7 +24,7 @@ tui-input = "0.10"
 # web
 axum = { version = "0.7", features = ["ws", "macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["fs", "trace"] }
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
 askama = "0.12"
 
 # serde
@@ -59,6 +59,13 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 
 # wifi-radar: 802.11 frame capture (pure-Rust pcap reader, no libpcap C dep)
 pcap-file = "2"
+
+# Embed the SPA assets into the binary so `/static/*` works regardless of cwd.
+# Without this, a system-installed `wifi-radar` served from `/usr/local/bin`
+# would 404 every CSS/JS asset because `--static-dir=crates/wifi-radar/web`
+# resolves against the cwd (which is `/` under systemd).
+rust-embed = "8"
+mime_guess = "2"
 
 [profile.release]
 opt-level = 3
