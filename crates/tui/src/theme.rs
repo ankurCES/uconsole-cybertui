@@ -173,3 +173,5 @@ pub fn glyphs() -> &'static Glyphs {
         &GLYPHS_NERD
     }
 }
+
+pub use crate::ui::palette::Palette;

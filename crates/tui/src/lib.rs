@@ -17,5 +17,7 @@ pub mod util;
 pub mod workspace;
 pub mod wm;
 
+pub use ui::palette::Palette;
+
 #[cfg(feature = "web")]
 pub mod web_bridge;
