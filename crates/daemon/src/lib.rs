@@ -3,6 +3,7 @@
 
 pub mod rpc;
 pub mod socket;
+pub mod state;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
