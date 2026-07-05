@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
 use crate::rpc::RpcError;
 
@@ -131,6 +130,19 @@ impl DaemonState {
         None
     }
 
+    /// Read-only counterpart of [`Self::pane_mut`]. Used by handlers that
+    /// only need to inspect (e.g. `PaneState`) without taking a write lock.
+    pub fn pane_mut_for_read(&self, id: PaneId) -> Option<&Pane> {
+        for ws in &self.workspaces {
+            for tab in &ws.tabs {
+                if let Some(p) = tab.panes.iter().find(|p| p.id == id) {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+
     pub fn focus_pane(&mut self, pane: PaneId) -> Result<(), RpcError> {
         for ws in &mut self.workspaces {
             for (ti, tab) in ws.tabs.iter_mut().enumerate() {
@@ -169,7 +181,10 @@ impl DaemonState {
     }
 }
 
-pub type SharedState = RwLock<DaemonState>;
+/// Shared handle to the daemon's [`DaemonState`]. Cheap to clone (it's
+/// just two Arcs) so every RPC handler holds its own reference without
+/// worrying about contention. Handlers grab read/write locks per call.
+pub type SharedState = std::sync::Arc<tokio::sync::RwLock<DaemonState>>;
 
 #[cfg(test)]
 mod tests {
@@ -214,5 +229,61 @@ mod tests {
         let mut s = DaemonState::new();
         let err = s.focus_pane(PaneId(404)).unwrap_err();
         assert_eq!(err.code, "not_found");
+    }
+
+    /// Confirms `PaneKind` emits `kind: "screen"` (lowercase) — matching the
+    /// TUI workspace model. If the serde tag style ever drifts back to PascalCase
+    /// this test will catch it and prevent silent wire-format breakage.
+    #[test]
+    fn pane_kind_serializes_lowercase_to_match_tui() {
+        let s = PaneKind::Screen { id: "System".into() };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["kind"], "screen", "DaemonPaneKind::Screen must serialize as lowercase \"screen\"");
+        assert_eq!(v["id"], "System");
+
+        let p = PaneKind::Pty { command: "sh".into(), cwd: None };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["kind"], "pty", "DaemonPaneKind::Pty must serialize as lowercase \"pty\"");
+        assert_eq!(v["command"], "sh");
+        assert!(v["cwd"].is_null());
+
+        // Round-trip back to itself — proves the wire shape is invertible.
+        let back: PaneKind = serde_json::from_value(v).unwrap();
+        match back {
+            PaneKind::Pty { command, cwd } => {
+                assert_eq!(command, "sh");
+                assert_eq!(cwd, None);
+            }
+            _ => panic!("expected Pty after round-trip"),
+        }
+    }
+
+    /// The full Workspace shape that the daemon hands back to the TUI over
+    /// the RPC socket must deserialise as `cyberdeck_tui::workspace::Workspace`.
+    /// This is the test that would have caught the daemon/tui serde-tag
+    /// mismatch had it ever shipped.
+    #[test]
+    fn daemon_workspace_round_trips_into_tui_workspace() {
+        let mut s = DaemonState::new();
+        let anchor = Pane {
+            id: PaneId(7),
+            kind: PaneKind::Screen { id: "System".into() },
+            title: "system".into(),
+            state: PaneState::Idle,
+            last_state_change_seq: 1,
+            seen: false,
+        };
+        s.focused_workspace_mut().unwrap().tabs[0].panes.push(anchor);
+        let ws = s.focused_workspace().unwrap().clone();
+        let json = serde_json::to_string(&ws).unwrap();
+        let tui_ws: cyberdeck_tui::workspace::Workspace =
+            serde_json::from_str(&json).expect("daemon Workspace must deserialize into TUI Workspace");
+        assert_eq!(tui_ws.tabs[0].panes.len(), 1);
+        match &tui_ws.tabs[0].panes[0].kind {
+            cyberdeck_tui::workspace::PaneKind::Screen { id } => {
+                assert_eq!(*id, cyberdeck_tui::app::ScreenId::System);
+            }
+            other => panic!("expected Screen, got {other:?}"),
+        }
     }
 }
