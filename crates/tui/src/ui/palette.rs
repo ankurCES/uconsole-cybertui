@@ -5,6 +5,9 @@
 use ratatui::style::Color;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Herd-style 15-color palette. One of [`catppuccin_mocha`], [`gruvbox_dark`],
+/// [`nord`], or [`legacy_dark`]. Mirrors herdr's `Palette` shape so a future
+/// "import herdr theme.toml" can map fields 1:1.
 pub struct Palette {
     pub accent: Color,
     pub panel_bg: Color,
@@ -24,7 +27,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub fn catppuccin_mocha() -> Self {
+    pub const fn catppuccin_mocha() -> Self {
         Self {
             accent:     Color::Rgb(137, 180, 250), // blue
             panel_bg:   Color::Rgb(30, 30, 46),
@@ -44,7 +47,7 @@ impl Palette {
         }
     }
 
-    pub fn gruvbox_dark() -> Self {
+    pub const fn gruvbox_dark() -> Self {
         Self {
             accent:     Color::Rgb(131, 165, 152),
             panel_bg:   Color::Rgb(40, 40, 40),
@@ -64,7 +67,7 @@ impl Palette {
         }
     }
 
-    pub fn nord() -> Self {
+    pub const fn nord() -> Self {
         Self {
             accent:     Color::Rgb(136, 192, 208),
             panel_bg:   Color::Rgb(46, 52, 64),
@@ -84,9 +87,11 @@ impl Palette {
         }
     }
 
-    pub fn legacy_dark() -> Self {
+    pub const fn legacy_dark() -> Self {
         Self {
             accent:     Color::Rgb(0, 200, 220),
+            // legacy: existing renderer treats Color::Reset as "transparent"
+            // and renders against the terminal's background.
             panel_bg:   Color::Reset,
             surface0:   Color::Rgb(30, 30, 30),
             surface1:   Color::Rgb(50, 50, 50),
@@ -104,6 +109,9 @@ impl Palette {
         }
     }
 
+    /// Look up a palette by its kebab-case identifier (e.g. `"catppuccin-mocha"`,
+    /// `"gruvbox-dark"`, `"nord"`, `"legacy-dark"`). Returns `None` if `name`
+    /// doesn't match a built-in look.
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
             "catppuccin-mocha" => Some(Self::catppuccin_mocha()),
