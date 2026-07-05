@@ -9,6 +9,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request<P = serde_json::Value> {
     pub id: String,
+    /// `#[serde(flatten)]` is critical: it lets the `Method` enum's internal
+    /// tag (`{"method": "daemon_ping", ...}` for unit variants,
+    /// `{"method": "workspace_new", "name": "..."}` for struct variants)
+    /// appear at the top level of the request object instead of being
+    /// wrapped in a nested `method` field. Without this, the wire format
+    /// would be `{"id": "x", "method": {"method": "daemon_ping"}, "params": {}}`
+    /// which no JSON-RPC client would naturally send.
+    #[serde(flatten)]
     pub method: Method,
     pub params: P,
 }

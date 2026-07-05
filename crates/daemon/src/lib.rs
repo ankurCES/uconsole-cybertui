@@ -1,7 +1,9 @@
 //! Daemon process: hosts workspace state and serves JSON-RPC over a
 //! local socket. Both the TUI and the CLI connect to it.
 
+pub mod handlers;
 pub mod rpc;
+pub mod server;
 pub mod socket;
 pub mod state;
 
