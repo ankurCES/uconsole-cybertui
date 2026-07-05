@@ -57,13 +57,13 @@ impl Serialize for PaneKind {
         match self {
             PaneKind::Screen { id } => {
                 let mut s = serializer.serialize_struct("PaneKind", 2)?;
-                s.serialize_field("kind", "Screen")?;
+                s.serialize_field("kind", "screen")?;
                 s.serialize_field("id", id.label())?;
                 s.end()
             }
             PaneKind::Pty { command, cwd } => {
                 let mut s = serializer.serialize_struct("PaneKind", 3)?;
-                s.serialize_field("kind", "Pty")?;
+                s.serialize_field("kind", "pty")?;
                 s.serialize_field("command", command)?;
                 s.serialize_field("cwd", cwd)?;
                 s.end()
