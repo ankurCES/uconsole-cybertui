@@ -1,4 +1,5 @@
 use cyberdeck_tui::workspace::{Pane, Workspace};
+use cyberdeck_tui::app::ScreenId;
 
 #[test]
 fn new_workspace_starts_with_default_tab() {
@@ -12,7 +13,7 @@ fn new_workspace_starts_with_default_tab() {
 fn split_pane_returns_new_pane_with_correct_direction() {
     let mut ws = Workspace::new("w");
     let tab = ws.focused_tab_mut();
-    let p1 = tab.add_pane(Pane::screen("System"));
+    let p1 = tab.add_pane(Pane::screen(ScreenId::System, "System"));
     let p2 = tab
         .split(p1, cyberdeck_tui::workspace::Split::Horizontal)
         .expect("split must succeed");
@@ -24,7 +25,7 @@ fn split_pane_returns_new_pane_with_correct_direction() {
 fn focused_pane_walks_tab_then_workspace() {
     let mut ws = Workspace::new("w");
     let tab_id = ws.focused_tab_id();
-    let pane_id = ws.focused_tab_mut().add_pane(Pane::screen("Network"));
+    let pane_id = ws.focused_tab_mut().add_pane(Pane::screen(ScreenId::Network, "Network"));
     assert_eq!(ws.focused_pane().map(|p| p.id), Some(pane_id));
     assert_eq!(ws.focused_tab_id(), tab_id);
 }
@@ -32,8 +33,8 @@ fn focused_pane_walks_tab_then_workspace() {
 #[test]
 fn pane_id_is_unique_within_workspace() {
     let mut ws = Workspace::new("w");
-    let p1 = ws.focused_tab_mut().add_pane(Pane::screen("System"));
-    let p2 = ws.focused_tab_mut().add_pane(Pane::screen("Network"));
+    let p1 = ws.focused_tab_mut().add_pane(Pane::screen(ScreenId::System, "System"));
+    let p2 = ws.focused_tab_mut().add_pane(Pane::screen(ScreenId::Network, "Network"));
     assert_ne!(p1, p2);
     // reflexivity: proves PartialEq is implemented (Eq is required for
     // HashMap keys; this no-op assertion documents the contract).

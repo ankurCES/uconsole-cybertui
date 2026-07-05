@@ -111,6 +111,8 @@ pub enum PaneState {
     Unknown,
 }
 
+/// A single pane inside a `Tab`. A pane is either a built-in TUI screen
+/// (one of the existing `ScreenId` variants) or a PTY running a shell.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pane {
     pub id: PaneId,
@@ -125,12 +127,10 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub fn screen(label: &str) -> Self {
+    pub fn screen(screen: crate::app::screen::ScreenId, label: &str) -> Self {
         Self {
             id: PaneId::new(),
-            kind: PaneKind::Screen {
-                id: crate::app::screen::ScreenId::System, // overwritten by caller
-            },
+            kind: PaneKind::Screen { id: screen },
             title: label.to_string(),
             state: PaneState::Unknown,
             last_state_change_seq: 0,
@@ -138,14 +138,14 @@ impl Pane {
         }
     }
 
-    pub fn pty(command: impl Into<String>) -> Self {
+    pub fn pty(command: impl Into<String>, title: impl Into<String>) -> Self {
         Self {
             id: PaneId::new(),
             kind: PaneKind::Pty {
                 command: command.into(),
                 cwd: None,
             },
-            title: "sh".to_string(),
+            title: title.into(),
             state: PaneState::Unknown,
             last_state_change_seq: 0,
             seen: false,
@@ -153,12 +153,15 @@ impl Pane {
     }
 }
 
+/// A grouping of panes within a [`Workspace`]. Tabs let the user keep
+/// unrelated sets of panes side by side (e.g. "build" / "debug" tabs).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tab {
     pub id: TabId,
     pub label: String,
     pub panes: Vec<Pane>,
-    /// Index into `panes` of the focused pane within this tab.
+    /// Id of the focused pane within this tab, if any. None only when
+    /// `panes` is empty.
     pub focused: Option<PaneId>,
 }
 
@@ -183,12 +186,11 @@ impl Tab {
         if !self.panes.iter().any(|p| p.id == anchor) {
             return None;
         }
-        let mut new_pane = Pane::pty("sh");
-        new_pane.title = match dir {
+        let title = match dir {
             Split::Horizontal => "sh (right)",
             Split::Vertical => "sh (below)",
-        }
-        .to_string();
+        };
+        let new_pane = Pane::pty("sh", title);
         let id = new_pane.id;
         self.panes.push(new_pane);
         self.focused = Some(id);
