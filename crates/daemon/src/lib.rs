@@ -2,6 +2,7 @@
 //! local socket. Both the TUI and the CLI connect to it.
 
 pub mod rpc;
+pub mod socket;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
