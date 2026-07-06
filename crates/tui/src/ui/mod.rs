@@ -1,6 +1,12 @@
 //! Cross-cutting widgets: header (live values), sidebar (screen list),
 //! status bar (keymap hints + clock), toast overlay.
 
+// herd-style palette — one struct, many named looks (Catppuccin Mocha
+//! default, plus Gruvbox, Nord, and a legacy alias for the existing
+//! dark theme). See `palette.rs` for the struct definition and named
+//! lookups; the renderer will consume a `Palette` from `Settings`.
+pub mod palette;
+
 // Module 5.4 — sparkline for the header chip. Maps each sample to one of
 // eight block glyphs `▁▂▃▄▅▆▇█`, scaled by the per-interface max so a
 // quiet link still produces a visible ribbon. Returns `""` on empty

@@ -129,31 +129,76 @@ cyberdeck-tui on uconsole (Debian 13 trixie, aarch64)
 > See [`docs/wiki/Photos.md`](./docs/wiki/Photos.md) for the full
 > numbered photo index.
 
-## Install (one-liner)
+## Install (one-liner, with a cyberpunk banner)
+
+The installer is a single ~250-line bash script. Run it directly with `curl | bash` —
+no `git clone` first. On a real terminal it prints a cyan-to-magenta ASCII banner,
+sweeps a magenta scan line, and runs a `BOOT ::` checklist before cloning and
+handing off to the heavy `./install.sh`.
+
+```text
+  ____      _              ____            _            _      
+ / ___| ___| |__   ___ _ _|  _ \ ___  _ __| | ___  _ __| | ___ 
+| |    / _ \'_ \ / _ \'__| |_) / _ \| \'__| |/ _ \| \'__| |/ _ \
+| |___|  __/ |_) |  __/ |  |  __/ (_) | |  | | (_) | |  | |  __/
+ \____|\___|_.__/ \___|_|  |_|   \___/|_|  |_|\___/|_|  |_|\___|
+                                                                
+    ▸ one terminal. one mesh.   tui · web · wifi-radar
+       v0.1.0 · curl | bash
+
+  BOOT ::  ⠋ tty mux .......... ONLINE
+           ⠙ ansi driver ...... 24-BIT TRUE
+           ⠹ io channels ...... sudo . git . curl
+           ⠸ power bus ........ mains / battery
+           ⠼ mesh link ........ nmcli . bluetooth . pactl
+           ⠴ ready ............ CYBERDECK
+```
+
+### One-line presets
 
 ```sh
-# TUI only — no sudo, no service, no firewall changes.
+# TUI only - no sudo, no service, no firewall changes.
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --tui
 
-# Web service — installs cyberdeck-web as a systemd unit, opens the firewall.
+# Web service - installs cyberdeck-web as a systemd unit, opens the firewall.
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --web
 
-# Both — TUI binary + web service.
+# Both - TUI binary + web service.
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --full
 
-# Wi-Fi radar — passive 802.11 monitor with synthetic fallback (no
+# Wi-Fi radar - passive 802.11 monitor with synthetic fallback (no
 # monitor-mode adapter required). Installs wifi-radar as a systemd
 # service on http://<host>:8743/.
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --radar
 
-# Build only — no install, no sudo, no service. For CI or dev.
+# Build only - no install, no sudo, no service. For CI or dev.
 curl -fsSL https://raw.githubusercontent.com/ankurCES/uconsole-cybertui/main/install/install.sh \
   | bash -s -- --build
 ```
+
+### Skipping the theatre (CI / logs / accessibility)
+
+The banner is a one-shot, ~1 s of animation, entirely client-side. If it is not
+welcome - in CI logs, on a serial console, or anywhere `NO_COLOR` is set - you
+can suppress it:
+
+| Variable                | Effect                                              |
+| ----------------------- | --------------------------------------------------- |
+| `CYBERDECK_NO_BANNER=1` | Skip the art outright.                              |
+| `CYBERDECK_NO_ANIM=1`   | Keep the static banner, drop the fade + boot sweep. |
+| `NO_COLOR=1`            | Disable all ANSI; the installer auto-detects a TTY. |
+
+```sh
+# CI-friendly: static plain-text output, no sleep-driven animation.
+curl -fsSL .../install/install.sh | CYBERDECK_NO_ANIM=1 bash -s -- --tui
+```
+
+The installer auto-detects a non-TTY (e.g. `curl ... | bash` in a pipeline) and
+falls back to the static banner, so piped installs never hang on a `read`.
 
 ### Presets
 
