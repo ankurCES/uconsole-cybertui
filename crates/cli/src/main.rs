@@ -1,0 +1,3 @@
+fn main() {
+    cyberdeck::main();
+}
