@@ -20,10 +20,46 @@ use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use crate::app::screen::{Screen, ScreenId};
-use crate::app::App;
+use crate::app::{App, Modal};
 use crate::theme::Theme;
 
 pub struct EditorScreen;
+
+/// Phase 2 — Reload helper. If the buffer is dirty, open a Discard
+/// confirm so the user doesn't lose edits silently; otherwise read
+/// the file from disk, normalize line endings, and replace
+/// `editor_buffer`. Shared by the F5 and Ctrl-R keybinds so both
+/// paths exercise the exact same code (one place to fix bugs).
+fn reload_or_confirm(app: &mut App) {
+    if app.editor_dirty {
+        app.modal = Modal::Confirm {
+            message: "Discard unsaved changes?".to_string(),
+            kind: crate::app::ConfirmKind::Discard,
+            arg: app.editor_path.to_string_lossy().to_string(),
+        };
+        return;
+    }
+    match std::fs::read_to_string(&app.editor_path) {
+        Ok(text) => {
+            let mut buf: Vec<String> = text
+                .split('\n')
+                .map(|s| s.trim_end_matches('\r').to_string())
+                .collect();
+            // POSIX convention: a trailing `\n` yields an empty final
+            // element from `split`. Drop it so the editor's
+            // join-with-`\n` round-trips on save.
+            if buf.last().map(|s| s.is_empty()) == Some(true) && text.ends_with('\n') {
+                buf.pop();
+            }
+            app.editor_buffer = buf;
+            app.editor_dirty = false;
+            app.status_message = Some("reloaded".to_string());
+        }
+        Err(e) => {
+            app.status_message = Some(format!("editor: reload failed ({e})"));
+        }
+    }
+}
 
 impl Screen for EditorScreen {
     fn id(&self) -> ScreenId {
@@ -36,12 +72,16 @@ impl Screen for EditorScreen {
     fn on_key(&mut self, key: KeyEvent, app: &mut App) -> bool {
         use crossterm::event::{KeyCode, KeyModifiers};
 
-        // Module 4 GREEN. Two shortcuts are in scope:
-        //   * Ctrl-S — save (no-op in read-only mode).
-        //   * Esc    — exit; dirty buffers must confirm-discard, clean
-        //              buffers focus back to Files.
+        // Module 4 GREEN. Shortcuts in scope:
+        //   * Ctrl-S  — save (no-op in read-only mode).
+        //   * Esc     — exit; dirty buffers must confirm-discard, clean
+        //               buffers focus back to Files.
+        //   * S       — Save As… opens an Input modal pre-filled with
+        //               the current path (Phase 2 dropdown wiring).
+        //   * F5 / Ctrl-R — Reload re-reads from disk; dirty buffers
+        //               confirm first.
         // Typing / arrow nav / etc. land in a follow-up. The 5 spec tests
-        // only assert these two branches; fall-through `false` keeps
+        // only assert these branches; fall-through `false` keeps
         // everything else behaviour-preserving.
         match (key.code, key.modifiers) {
             (KeyCode::Char('s'), m) if m.contains(KeyModifiers::CONTROL) => {
@@ -66,6 +106,33 @@ impl Screen for EditorScreen {
                 }
                 app.editor_dirty = false;
                 app.status_message = Some("saved".to_string());
+                true
+            }
+            // Phase 2 — Save As. Opens an Input modal pre-filled with
+            // the current path so the user can edit it. Submit fires
+            // `RunAction::EditorSaveAs(path)`. Read-only mode silently
+            // drops the key (same contract as Ctrl-S).
+            (KeyCode::Char('S'), _) => {
+                if app.editor_read_only {
+                    return true;
+                }
+                app.modal = Modal::Input {
+                    prompt: "Save as:".to_string(),
+                    buf: app.editor_path.to_string_lossy().to_string(),
+                    kind: crate::app::InputKind::EditorSaveAs,
+                };
+                true
+            }
+            // Phase 2 — Reload. F5 is the canonical "refresh" key on
+            // desktop TUIs (browsers, IDEs); Ctrl-R mirrors Ctrl-S's
+            // modifier style. Dirty buffers open a Discard confirm
+            // instead of clobbering edits.
+            (KeyCode::F(5), _) => {
+                reload_or_confirm(app);
+                true
+            }
+            (KeyCode::Char('r'), m) if m.contains(KeyModifiers::CONTROL) => {
+                reload_or_confirm(app);
                 true
             }
             (KeyCode::Esc, _) => {
@@ -99,9 +166,62 @@ impl Screen for EditorScreen {
         true
     }
 
-    fn render(&mut self, _f: &mut Frame, _area: Rect, _app: &mut App, _theme: &Theme, _focus: bool) {
-        // Render lands in the GREEN step.
+    fn render(&mut self, f: &mut Frame, area: Rect, app: &mut App, theme: &Theme, focus: bool) {
+        // Phase 2 — one-row dropdown chrome at the top of the editor
+        // body. Mirrors the menu bar's `File ▾ Save  Save As…  Reload`
+        // pattern but stays screen-local (no overlay; just a single
+        // row of labels with the current shortcut hint underneath).
+        // The editor body itself (textarea) lands in the GREEN step
+        // — for now this row is the entire visible UI when the
+        // editor is focused, so the user can see Save / Save As /
+        // Reload even before the textarea lands.
+        render_dropdown(f, area, app, theme, focus);
     }
+}
+
+/// Phase 2 — render the editor's dropdown chrome. Called from the
+/// screen's `render` so the dropdown row is owned by the screen
+/// itself, not by `main.rs`. Mirrors the menu bar's visual style
+/// (thin underline + accent for the active shortcut).
+pub fn render_dropdown(f: &mut Frame, area: Rect, app: &App, theme: &Theme, focus: bool) {
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Borders, Paragraph};
+    if area.height < 1 {
+        return;
+    }
+    let block = Block::default()
+        .borders(Borders::NONE)
+        .border_style(theme.border(focus));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height < 1 {
+        return;
+    }
+    let dirty = if app.editor_dirty { " •" } else { "" };
+    let ro = if app.editor_read_only { " (read-only)" } else { "" };
+    let title = format!(
+        " Editor · {}{}{} ",
+        app.editor_path.to_string_lossy(),
+        dirty,
+        ro
+    );
+    // Three items, each prefixed with its shortcut hint so the user
+    // doesn't need to consult the help modal.
+    let items = [
+        (" Ctrl-S ", "Save"),
+        (" S ", "Save As…"),
+        (" F5 ", "Reload"),
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::styled(title, theme.title()));
+    for (key, label) in items.iter() {
+        spans.push(Span::styled(*key, theme.accent));
+        spans.push(Span::styled(format!(" {label} "), theme.fg));
+    }
+    let p = Paragraph::new(Line::from(spans)).style(
+        ratatui::style::Style::default().fg(theme.fg).bg(theme.bg),
+    );
+    f.render_widget(p, inner);
 }
 
 /// File-read gate for editor entry. Mirrors the spec:

@@ -80,6 +80,11 @@ pub enum Action {
     /// only enqueues this Action; the actual HTTP work lives in the
     /// dispatcher's spawned task so the UI thread never blocks.
     CityCtrlRefresh,
+    /// Phase 2 — jump-to-slug from the City palette picker. The
+    /// City screen's `apply_slug` path handles the rest (reset
+    /// viewport_bbox, sync the location marker, save prefs).
+    /// Distinct from `CityCtrlRefresh` which re-fetches IP-geo + weather.
+    CityCtrlSet { slug: String },
     /// Step 9 — IP-geolocated location resolved (from the 10-min
     /// refiller or a `CityCtrlRefresh` tap). Dispatcher applies to
     /// `App::live.city_loc` so the City screen reads a stable snapshot
@@ -151,6 +156,29 @@ pub enum RunAction {
     Hibernate,
     WebStart,
     WebStop,
+    /// Phase 2 — Editor screen: write the current buffer to a new
+    /// path (Save As…). The path comes from a preceding `Modal::Input`
+    /// of kind `InputKind::EditorSaveAs`; the dispatch handler reads
+    /// `app.editor_path` and writes the buffer there. Distinct from
+    /// `Ctrl-S` which always writes to `app.editor_path` in place.
+    EditorSaveAs(String),
+    /// Phase 2 — Editor screen: re-read `app.editor_path` from disk
+    /// and replace `app.editor_buffer`. Used by the Reload dropdown
+    /// item and the `F5` shortcut. A dirty buffer prompts a Discard
+    /// confirm first.
+    EditorReload,
+    /// Phase 2 — City map: re-centre the viewport on the
+    /// (lat, lon) implied by a click at `(col, row)` inside `rect`
+    /// (which is the cached `app.city_map_rect`). Dispatched from
+    /// the mouse handler in `main.rs`; the City screen's on_key arm
+    /// does the actual reprojection. The screen itself reads the
+    /// rect dimensions to compute the braille dot grid, so the
+    /// rect must be the same one the renderer used this frame.
+    CityPan {
+        col: u16,
+        row: u16,
+        rect: ratatui::layout::Rect,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

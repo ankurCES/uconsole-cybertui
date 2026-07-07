@@ -59,6 +59,52 @@ pub fn draw(f: &mut Frame, area: Rect, app: &App, cursor: Option<ScreenId>, them
     }
 }
 
+/// Hit-test a `(col, row)` click against the tab strip in the same
+/// coordinates the renderer used. Mirrors `draw_full`'s windowing
+/// math so the click resolves to whichever tab the user actually
+/// saw on screen. Returns `None` for:
+///   * clicks outside `area`
+///   * the collapsed strip (no per-tab hit-test; user must press
+///     `Left`/`Right` to cycle instead)
+///   * the right-side units/status tag (we don't treat it as a tab)
+pub fn hit_test(area: Rect, col: u16, row: u16, app: &App) -> Option<ScreenId> {
+    if area.width < 1 || area.height < 1 {
+        return None;
+    }
+    if col < area.x || col >= area.x + area.width {
+        return None;
+    }
+    if row < area.y || row >= area.y + area.height {
+        return None;
+    }
+    let visible: Vec<ScreenId> = ScreenId::ALL
+        .iter()
+        .copied()
+        .filter(|id| !matches!(id, ScreenId::Editor))
+        .collect();
+    if visible.is_empty() {
+        return None;
+    }
+    let total_width_needed = visible.len() as u16 * MIN_TAB_WIDTH;
+    if area.width < total_width_needed {
+        // Collapsed — no per-tab hit surface.
+        return None;
+    }
+    let max_tabs = (area.width / MIN_TAB_WIDTH) as usize;
+    let active_pos = visible.iter().position(|id| *id == app.current);
+    let window_start = match active_pos {
+        Some(p) if p >= max_tabs / 2 => p.saturating_sub(max_tabs / 2),
+        _ => 0,
+    };
+    let window_end = (window_start + max_tabs).min(visible.len());
+    let local_col = col - area.x;
+    let tab_idx = (local_col / MIN_TAB_WIDTH) as usize;
+    if tab_idx >= window_end - window_start {
+        return None;
+    }
+    visible.get(window_start + tab_idx).copied()
+}
+
 fn draw_full(
     f: &mut Frame,
     area: Rect,
@@ -317,5 +363,55 @@ mod tests {
                 assert_ne!(id, ScreenId::Editor, "Editor must be skipped");
             }
         }
+    }
+
+    /// Click outside the tab-strip rect must return None. The renderer
+    /// might draw the strip anywhere on the row, so the caller has to
+    /// check both axes — a hit_test that only checks the row would
+    /// mistakenly fire for clicks on the status bar below.
+    #[test]
+    fn hit_test_returns_none_outside_area() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
+        let app = App::with_current(tx, rx, ScreenId::System);
+        let area = ratatui::layout::Rect::new(10, 2, 160, 1);
+        // Above the strip.
+        assert_eq!(hit_test(area, 20, 0, &app), None);
+        // Below the strip.
+        assert_eq!(hit_test(area, 20, 5, &app), None);
+        // Left of the strip.
+        assert_eq!(hit_test(area, 5, 2, &app), None);
+        // Past the right edge.
+        assert_eq!(hit_test(area, 170, 2, &app), None);
+        // Zero-sized area is a no-op.
+        let empty = ratatui::layout::Rect::new(0, 0, 0, 1);
+        assert_eq!(hit_test(empty, 0, 0, &app), None);
+    }
+
+    /// A click in the centre of a visible tab must resolve to that
+    /// tab's `ScreenId`. Centers on `app.current` because the strip
+    /// is windowed around it, so we pick a tab we know is on screen.
+    #[test]
+    fn hit_test_resolves_inner_tab() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
+        let app = App::with_current(tx, rx, ScreenId::Network);
+        // Wide area so the strip is full-mode, not collapsed.
+        let area = ratatui::layout::Rect::new(0, 0, 200, 1);
+        // Network is index 1 in ScreenId::ALL (System=0, Network=1).
+        // With 200 cells / MIN_TAB_WIDTH=6 the window can hold ~33
+        // tabs, so Network is rendered at its natural slot: x ∈
+        // [6, 12). A click at x=8 should land on Network.
+        assert_eq!(hit_test(area, 8, 0, &app), Some(ScreenId::Network));
+    }
+
+    /// In the collapsed view there is no per-tab hit surface — the
+    /// user has to use Left/Right. Returns None for any click.
+    #[test]
+    fn hit_test_returns_none_in_collapsed_mode() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
+        let app = App::with_current(tx, rx, ScreenId::System);
+        // Narrow: fewer cells than `visible.len() * MIN_TAB_WIDTH`.
+        let area = ratatui::layout::Rect::new(0, 0, 20, 1);
+        assert_eq!(hit_test(area, 5, 0, &app), None);
+        assert_eq!(hit_test(area, 10, 0, &app), None);
     }
 }

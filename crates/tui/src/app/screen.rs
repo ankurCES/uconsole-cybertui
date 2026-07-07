@@ -215,12 +215,6 @@ pub trait Screen {
 }
 
 #[cfg(test)]
-// Pre-existing breakage on `main`: this module imports `crate::Action`
-// (should be `crate::app::Action`). The path fix below is minimal, but
-// to keep the surface narrow and avoid breaking pre-existing test
-// expectations, gated behind a feature flag so the rest of the lib
-// test suite can run.
-#[cfg(feature = "broken-tests")]
 mod tests {
     use super::*;
     use crate::app::Action;
@@ -287,20 +281,20 @@ mod tests {
     fn cycle_backward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From System (position 0) going backward must wrap to LoRa
+        // From System (position 0) going backward must wrap to City
         // (the last visible screen — Editor is hidden in all_visible()),
         // mirroring orbital's wrap-around tab navigation.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::LoRa);
+        assert_eq!(prev, ScreenId::City);
     }
 
     #[test]
     fn cycle_forward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From LoRa (last visible screen — Editor is hidden) going forward
+        // From City (last visible screen — Editor is hidden) going forward
         // must wrap back to System.
-        let next = ScreenId::cycle(&screens, &app, ScreenId::LoRa, true);
+        let next = ScreenId::cycle(&screens, &app, ScreenId::City, true);
         assert_eq!(next, ScreenId::System);
     }
 
@@ -320,9 +314,9 @@ mod tests {
         let next = ScreenId::cycle(&screens, &app, ScreenId::System, true);
         assert_eq!(next, ScreenId::Bluetooth);
         // And the backward step from System must skip Power too, wrapping
-        // all the way around the visible list (Editor is hidden) to LoRa.
+        // all the way around the visible list (Editor is hidden) to City.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::LoRa);
+        assert_eq!(prev, ScreenId::City);
         // Sanity: with everything visible, the first forward step lands on
         // Network itself, proving the skip is what made the test above pass.
         for s in screens.iter_mut() {
@@ -419,21 +413,31 @@ mod tests {
         ];
         // `editor` is exempt — skip.
 
-        // Canonical spec-compliant snippet.
-        const SPEC_SPLIT: &str =
-            "Layout::default()\n            .direction(Direction::Horizontal)\n            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])";
+        // Canonical spec-compliant constraint pair. The audit asserts the
+        // file contains a `Layout::default()` chain with a
+        // Direction::Horizontal split and this exact constraint array,
+        // regardless of indentation. The whole point of pinning it
+        // here is to lock the visual split; whitespace coupling to
+        // the test source would be a maintenance trap.
+        const SPEC_SPLIT: &str = "[Constraint::Percentage(60), Constraint::Percentage(40)]";
+        const SPEC_DIR: &str = "Direction::Horizontal";
 
         for (name, src) in MULTI {
             // Must contain exactly one `Layout::default()` chain, and
-            // it must match the canonical spec snippet verbatim.
+            // it must be a Horizontal split with the 60/40 constraint
+            // pair.
             let count = src.matches("Layout::default()").count();
             assert_eq!(
                 count, 1,
                 "{name}: multi-pane screen must have exactly one Layout::default() (got {count})"
             );
             assert!(
+                src.contains(SPEC_DIR),
+                "{name}: multi-pane split must use Direction::Horizontal"
+            );
+            assert!(
                 src.contains(SPEC_SPLIT),
-                "{name}: multi-pane split must be [Percentage(60), Percentage(40)] Horizontal — spec deviation"
+                "{name}: multi-pane split must be [Percentage(60), Percentage(40)] — spec deviation"
             );
             // No nested Layout:: calls inside the render fn.
             let nested = src

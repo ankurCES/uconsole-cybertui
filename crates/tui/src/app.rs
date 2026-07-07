@@ -182,6 +182,19 @@ pub enum InputKind {
     /// pointed at that IP (Slice 4). IP-only at the modal layer; the
     /// port + URL prefix are appended by the transport constructor.
     LoraNodeIp,
+    /// Phase 2 — Editor screen "Save As…". The modal is opened by the
+    /// `S` shortcut or the dropdown item, pre-filled with the current
+    /// `app.editor_path` so the user can edit it. Submit fires
+    /// `RunAction::EditorSaveAs(path)` which writes the buffer and
+    /// updates `app.editor_path` to the new location.
+    EditorSaveAs,
+    /// Phase 2 — City palette search. The submit handler runs a
+    /// case-insensitive substring match against `CityRoads::BUNDLED`
+    /// (slug + human-readable name) and applies the first match.
+    /// Empty submit is a no-op so Esc can dismiss the modal
+    /// without changing cities. The current bundled slug is
+    /// pre-filled in the input so the user can edit-in-place.
+    CityPicker,
 }
 
 #[derive(Debug)]
@@ -724,6 +737,19 @@ pub struct App {
     /// (backtick) or Ctrl-B. When false, the tab strip is the only
     /// screen switcher and `Region::Sidebar` is unreachable.
     pub sidebar_rail: bool,
+    /// Cached tab-strip rect from the last `draw()`. Used by
+    /// `handle_mouse` to hit-test clicks against the strip — without
+    /// this cache we'd have to recompute the layout on every mouse
+    /// event, which would drift from what the renderer drew if any
+    /// sizing changed between frames. `None` before the first frame.
+    pub tab_strip_rect: Option<ratatui::layout::Rect>,
+    /// Cached city-map pane rect from the last `draw()` while the
+    /// City screen is active. Same rationale as `tab_strip_rect` —
+    /// the click-to-pan handler needs to know which dot of the
+    /// braille grid the user clicked without re-running the layout
+    /// pass. `None` on any non-City screen (so a stale rect from a
+    /// previous tab never fires).
+    pub city_map_rect: Option<ratatui::layout::Rect>,
     pub toasts: Vec<Toast>,
     /// Module 7 — persistent history of every toast ever shown, capped at
     /// `TOAST_HISTORY_CAP`. Unlike `toasts` (which `cleanup_toasts` ages out
@@ -1053,6 +1079,16 @@ impl App {
             // Phase 1 — sidebar rail hidden by default; the tab strip
             // is the primary screen switcher (herdr-style).
             sidebar_rail: false,
+            // Phase 2 — tab-strip hit-test rect. Filled in by `draw()`
+            // on every frame so `handle_mouse` can resolve clicks
+            // against the same rect the renderer used.
+            tab_strip_rect: None,
+            // Phase 2 — city-map pane hit-test rect. Filled in by the
+            // City screen's render fn on every frame so the
+            // click-to-pan handler can resolve clicks against the
+            // same rect the braille grid was drawn into. Cleared on
+            // any non-City screen to avoid stale-rect panning.
+            city_map_rect: None,
             toasts: Vec::new(),
             // Module 7.1 — toast history ring. Empty until the first
             // `push_toast` call; cap enforced by `push_toast` itself so

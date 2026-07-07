@@ -189,6 +189,35 @@ impl Viewport {
         let y = ((1.0 - ny) * self.height_dots as f64).round() as i32;
         (x, y)
     }
+
+    /// Inverse of `project`: take a dot-grid `(x, y)` (each unit is
+    /// half a cell on x, a quarter on y) and recover the
+    /// `(lat, lon)` it represents. Used by click-to-pan so the
+    /// City screen can re-centre the viewport on whatever braille
+    /// dot the user clicked. Out-of-bounds clicks still return a
+    /// valid lat/lon; the caller clamps to the bbox.
+    ///
+    /// The aspect correction is inverted the same way `project`
+    /// applies it: lon is scaled by `1/cos(center_lat)` going from
+    /// dots → normalized, then multiplied by `cos(center_lat)`
+    /// going from normalized → degrees.
+    pub fn unproject(&self, x: i32, y: i32) -> (f64, f64) {
+        let [min_lat, min_lon, max_lat, max_lon] = self.bbox;
+        let lat_span = max_lat - min_lat;
+        let lon_span = max_lon - min_lon;
+        if self.width_dots == 0 || self.height_dots == 0 {
+            return ((min_lat + max_lat) / 2.0, (min_lon + max_lon) / 2.0);
+        }
+        let center_lat = 0.5 * (min_lat + max_lat).to_radians();
+        let lat_correction = center_lat.cos().clamp(0.01, 1.0);
+        let nx = x as f64 / self.width_dots as f64;
+        // y is inverted (terminal y grows downward, lat grows
+        // upward), so flip it back before recovering the fraction.
+        let ny = 1.0 - y as f64 / self.height_dots as f64;
+        let lon = min_lon + nx * lon_span * lat_correction;
+        let lat = min_lat + ny * lat_span;
+        (lat, lon)
+    }
 }
 
 /// Stroke weight per importance tag, in dot units. Motorways /

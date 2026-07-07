@@ -29,7 +29,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use crossterm::event::{
     self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -354,6 +354,47 @@ async fn run_app(
                             handle_paste(&mut *app, text);
                             redraw = true;
                         }
+                        // Phase 2 — left-click on the tab strip switches
+                        // screens. Only fires while `app.mouse` is on
+                        // (the Settings → Mouse toggle). We honor Down
+                        // (not Up) so a click-drag-release doesn't
+                        // register as a click if the user landed on the
+                        // strip but released elsewhere. All other mouse
+                        // events are dropped (no scroll wheel handling
+                        // yet; no right-click context menu).
+                        Event::Mouse(m) if app.mouse => {
+                            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                                if let Some(rect) = app.tab_strip_rect {
+                                    if let Some(id) = crate::ui::tab_strip::hit_test(
+                                        rect, m.column, m.row, &*app,
+                                    ) {
+                                        let _ = tx.send(Action::Goto(id)).await;
+                                    }
+                                }
+                                // Phase 2 — click-to-pan on the City
+                                // map pane. The rect was cached by the
+                                // last `draw()`; if it covers the click,
+                                // dispatch a `CityPan` action that the
+                                // City screen's on_key handler resolves
+                                // into a recentred viewport_bbox.
+                                if let Some(map_rect) = app.city_map_rect {
+                                    if m.column >= map_rect.x
+                                        && m.column < map_rect.x + map_rect.width
+                                        && m.row >= map_rect.y
+                                        && m.row < map_rect.y + map_rect.height
+                                    {
+                                        let _ = tx
+                                            .send(Action::Run(RunAction::CityPan {
+                                                col: m.column,
+                                                row: m.row,
+                                                rect: map_rect,
+                                            }))
+                                            .await;
+                                    }
+                                }
+                            }
+                            redraw = true;
+                        }
                         Event::Key(k) if k.kind == KeyEventKind::Press => {
                             // Ctrl+Shift+V fallback. Some terminals (older
                             // xterm, Alacritty before a config option, plain
@@ -403,6 +444,18 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
     // Phase 1 — tab strip (1 row). Always rendered; falls back to a
     // collapsed indicator on narrow terminals.
     ui::tab_strip::draw(f, tab_strip, app, Some(app.current), theme);
+    // Phase 2 — cache the tab-strip rect so `handle_mouse` can resolve
+    // a click against the same geometry the renderer just used. Set
+    // every frame so any layout shift (resize, sidebar toggle) is
+    // picked up automatically.
+    app.tab_strip_rect = Some(tab_strip);
+    // Phase 2 — clear the city-map rect by default. The City
+    // screen's render fn re-populates it on the same frame; this
+    // branch keeps a stale rect from the previous tab from firing
+    // click-to-pan against the new screen's geometry.
+    if app.current != ScreenId::City {
+        app.city_map_rect = None;
+    }
     ui::draw_status(f, status, app, theme);
     // Content area is the remaining space. The optional sidebar rail
     // (toggled on/off) sits in the leftmost cells of this band so we
@@ -432,6 +485,28 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
 
 fn rect(x: u16, y: u16, w: u16, h: u16) -> ratatui::layout::Rect {
     ratatui::layout::Rect::new(x, y, w, h)
+}
+
+/// Phase 2 — substring-match a City palette query against the
+/// bundled city list (slugs + human-readable names). Returns the
+/// first match (slug) or `None` if nothing fits. The match is
+/// case-insensitive and looks at both the kebab-case slug (`"nyc"`)
+/// and the city name (`"New York"`) so users can type either. The
+/// bundled order is the same as `CityRoads::BUNDLED` so callers
+/// that care about cycling order get a deterministic result.
+fn city_picker_match(query: &str) -> Option<String> {
+    let q = query.to_lowercase();
+    for slug in screens::city::roads::CityRoads::BUNDLED {
+        if slug.contains(&q) {
+            return Some((*slug).to_string());
+        }
+        if let Some(roads) = screens::city::roads::CityRoads::load_bundled(slug) {
+            if roads.name.to_lowercase().contains(&q) {
+                return Some((*slug).to_string());
+            }
+        }
+    }
+    None
 }
 
 use ratatui::Frame;
@@ -1346,9 +1421,11 @@ async fn handle_key(
             app.toast_log_offset = 0;
         }
         Char(':') => {
-            app.modal = Modal::CommandPalette;
-            app.palette_buf.clear();
-            app.palette_idx = 0;
+            // Delegate to the menu builder so the menu and the key
+            // share state-reset semantics (cleared buffer, cursor at 0).
+            // The menu item "Help → Command palette (:)" calls the
+            // same `open_palette` — single source of truth.
+            app.modal = crate::ui::menu_bar::open_palette(app);
         }
         // Phase 1 — menu bar keys. F10 (canonical) and Alt+F (herdr
         // style) open the menu bar with the File menu focused. While
@@ -1840,6 +1917,51 @@ pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: In
             );
             return;
         }
+        InputKind::EditorSaveAs => {
+            // Phase 2 — Save As submit. Trim the path, reject empty
+            // (so an accidental Enter doesn't wipe the file), then
+            // dispatch the I/O via the action channel so the write
+            // goes through the same code path as the menu/dropdown
+            // item. Read-only mode is enforced inside the dispatch
+            // handler, not here, so the Input modal can still be
+            // opened (and dismissed) on a read-only buffer.
+            let path = value.trim().to_string();
+            if path.is_empty() {
+                app.push_toast(ToastKind::Warn, "save path cannot be empty");
+                return;
+            }
+            let _ = tx
+                .send(Action::Run(RunAction::EditorSaveAs(path)))
+                .await;
+            return;
+        }
+        InputKind::CityPicker => {
+            // Phase 2 — City palette search. Substring-match the
+            // trimmed query against bundled slugs + human-readable
+            // names, then apply the first match. Empty submit is a
+            // silent no-op (so Esc-style cancel can land on the
+            // same code path). The dispatch goes through
+            // `Action::CityCtrlSet { slug }` so the City screen's
+            // existing `apply_slug` path handles the rest (reset
+            // viewport_bbox, sync the location marker, save prefs).
+            let query = value.trim().to_string();
+            if query.is_empty() {
+                return;
+            }
+            let slug = city_picker_match(&query);
+            match slug {
+                Some(slug) => {
+                    let _ = tx.send(Action::CityCtrlSet { slug }).await;
+                }
+                None => {
+                    app.push_toast(
+                        ToastKind::Warn,
+                        format!("no bundled city matches \"{query}\""),
+                    );
+                }
+            }
+            return;
+        }
         InputKind::WifiEnterpriseIdentity => {
             // Stash on the wizard so advance_wizard can read it.
             if let Modal::Wizard(crate::app::Wizard::WifiEnterprise { identity, step, .. }) =
@@ -2146,7 +2268,101 @@ async fn handle_action(
             }
         }
         Action::Run(act) => {
-            spawn_action(tx.clone(), act);
+            // Phase 2 — Editor Save As / Reload are pure local I/O,
+            // so they don't go through `spawn_action` (which fans out
+            // to cyberdeck_core). Inline keeps them off the tokio
+            // runtime and avoids spawning a task for a single
+            // `std::fs::write` call.
+            match act {
+                RunAction::EditorSaveAs(path) => {
+                    if app.editor_read_only {
+                        app.status_message =
+                            Some("editor: read-only — save ignored".to_string());
+                    } else {
+                        let body = app.editor_buffer.join("\n") + "\n";
+                        match std::fs::write(&path, body) {
+                            Ok(()) => {
+                                app.editor_path = std::path::PathBuf::from(&path);
+                                app.editor_dirty = false;
+                                app.status_message =
+                                    Some(format!("saved as {}", path));
+                            }
+                            Err(e) => {
+                                app.status_message =
+                                    Some(format!("editor: save failed ({e})"));
+                            }
+                        }
+                    }
+                }
+                RunAction::EditorReload => {
+                    // Reload is destructive — if the buffer is dirty
+                    // we open a Discard confirm instead of clobbering
+                    // unsaved edits. Mirrors the Esc-handler semantics.
+                    if app.editor_dirty {
+                        app.modal = Modal::Confirm {
+                            message: "Discard unsaved changes?".to_string(),
+                            kind: crate::app::ConfirmKind::Discard,
+                            arg: app.editor_path.to_string_lossy().to_string(),
+                        };
+                    } else {
+                        match std::fs::read_to_string(&app.editor_path) {
+                            Ok(text) => {
+                                app.editor_buffer = text
+                                    .split('\n')
+                                    .map(|s| s.trim_end_matches('\r').to_string())
+                                    .filter(|s| !s.is_empty() || text.ends_with('\n'))
+                                    .collect();
+                                // The split above keeps a single
+                                // trailing empty line so the on-disk
+                                // representation round-trips. We
+                                // trim the very last element if the
+                                // file ended with `\n` — that's the
+                                // POSIX convention the editor uses.
+                                if app.editor_buffer.last().map(|s| s.is_empty())
+                                    == Some(true)
+                                    && text.ends_with('\n')
+                                {
+                                    app.editor_buffer.pop();
+                                }
+                                app.editor_dirty = false;
+                                app.status_message = Some("reloaded".to_string());
+                            }
+                            Err(e) => {
+                                app.status_message =
+                                    Some(format!("editor: reload failed ({e})"));
+                            }
+                        }
+                    }
+                }
+                RunAction::CityPan { col, row, rect } => {
+                    // Phase 2 — click-to-pan. Routed to the City
+                    // screen's `apply_pan_click` which reprojects
+                    // the click through the same `Viewport` the
+                    // renderer used and re-centres `viewport_bbox`.
+                    // Guarded on `app.current == City` so a stale
+                    // CityPan (e.g. dispatched from a non-City tab)
+                    // is a no-op rather than a state corruption.
+                    if app.current == ScreenId::City {
+                        if let Some(screen) = screens
+                            .iter_mut()
+                            .find(|s| s.id() == ScreenId::City)
+                        {
+                            // `as_any_mut` returns `Option<&mut dyn Any>`.
+                            // Unwrap the option, then downcast to the
+                            // concrete `CityScreen` so we can call its
+                            // pan handler.
+                            if let Some(any) = screen.as_any_mut() {
+                                if let Some(city) =
+                                    any.downcast_mut::<screens::city::CityScreen>()
+                                {
+                                    let _ = city.apply_pan_click(col, row, rect);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => spawn_action(tx.clone(), act),
+            }
         }
         Action::ConfirmModal => {} // handled inline above
         Action::CancelModal => app.modal = Modal::None,
@@ -2302,6 +2518,43 @@ async fn handle_action(
                 }
             });
         }
+        Action::CityCtrlSet { slug } => {
+            // Phase 2 — palette-picked slug from the CityPicker
+            // modal. Routes to the City screen's `apply_slug` so
+            // the road data, location marker, and viewport_bbox
+            // all reset to the new city's bbox. Mirrors the
+            // `KeyCode::Char('c')` cycler in the City screen's
+            // on_key handler — same slug application, different
+            // entry point (the picker is jump-to-by-name rather
+            // than step-to-next).
+            if app.current == ScreenId::City {
+                if let Some(screen) = screens
+                    .iter_mut()
+                    .find(|s| s.id() == ScreenId::City)
+                {
+                    if let Some(any) = screen.as_any_mut() {
+                        if let Some(city) =
+                            any.downcast_mut::<screens::city::CityScreen>()
+                        {
+                            city.apply_slug(slug.clone());
+                            app.city_override = Some(slug);
+                            // Sync the location marker to the new
+                            // bbox centre so the dot lands in the
+                            // middle of the freshly-picked city.
+                            if let Some(loc) = city.location.as_mut() {
+                                let [min_lat, min_lon, max_lat, max_lon] =
+                                    city.roads.bbox;
+                                loc.name = city.roads.name.clone();
+                                loc.lat = (min_lat + max_lat) / 2.0;
+                                loc.lon = (min_lon + max_lon) / 2.0;
+                                loc.bbox = Some(city.roads.bbox);
+                            }
+                            app.save_prefs();
+                        }
+                    }
+                }
+            }
+        }
     }
     false
 }
@@ -2394,6 +2647,27 @@ fn spawn_action(tx: mpsc::Sender<Action>, act: RunAction) {
                 // The tap task handles the actual kill switch.
                 Ok(())
             }
+            // Phase 2 — Editor variants are handled inline in the
+            // main loop's `Action::Run` arm because they're pure
+            // local I/O and don't need to round-trip through
+            // cyberdeck_core. If `spawn_action` ever sees them it's
+            // a programmer error — the inline handler should have
+            // consumed them first.
+            RunAction::EditorSaveAs(_) | RunAction::EditorReload => {
+                Err(cyberdeck_core::CoreError::Command {
+                    cmd: "editor".into(),
+                    detail: "handled inline — should not reach spawn_action".into(),
+                })
+            }
+            // Phase 2 — CityPan is also handled inline (it mutates
+            // the City screen's `viewport_bbox` and that lives in
+            // the main loop's `screens` slice, not in the
+            // `cyberdeck_core` worker pool). Same shape as the
+            // editor guard above.
+            RunAction::CityPan { .. } => Err(cyberdeck_core::CoreError::Command {
+                cmd: "city".into(),
+                detail: "handled inline — should not reach spawn_action".into(),
+            }),
         };
         match res {
             Ok(_) => {

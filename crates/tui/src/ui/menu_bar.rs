@@ -121,6 +121,12 @@ pub const MENUS: &[Menu] = &[
                 fanout: None,
             },
             MenuItem {
+                id: "palette",
+                label: "Command palette (:)",
+                action: MenuAction::OpenModal(open_palette),
+                fanout: None,
+            },
+            MenuItem {
                 id: "toast-log",
                 label: "Toast log (T)",
                 action: MenuAction::OpenModal(open_toast_log),
@@ -162,12 +168,26 @@ fn act_toggle_web(_app: &App) -> Option<Action> {
     Some(Action::Toggle(crate::app::screen::SettingsKey::WebServer))
 }
 
-fn open_help(_app: &App) -> crate::app::Modal {
+fn open_help(_app: &mut App) -> crate::app::Modal {
     crate::app::Modal::Help
 }
 
-fn open_toast_log(_app: &App) -> crate::app::Modal {
+fn open_toast_log(_app: &mut App) -> crate::app::Modal {
     crate::app::Modal::ToastLog
+}
+
+/// Open the command palette. Mirrors the `:` global key handler so
+/// the menu is a single source of truth: pressing `:` OR clicking
+/// Help → Command palette lands in the same place with the same
+/// reset state (cleared buffer, cursor at 0).
+pub fn open_palette(app: &mut App) -> crate::app::Modal {
+    // Reset palette buffer/cursor on every open so a stale query from
+    // a previous session doesn't leak in. The `:` key handler calls
+    // this same builder — keeping both paths in sync here avoids a
+    // "menu-opened palette has leftover text" footgun.
+    app.palette_buf.clear();
+    app.palette_idx = 0;
+    crate::app::Modal::CommandPalette
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -214,7 +234,7 @@ pub enum MenuAction {
     ActionFn(fn(&App) -> Option<Action>),
     /// Build the modal fresh on each invocation so we can copy out of
     /// the static table without taking ownership of a `Modal`.
-    OpenModal(fn(&App) -> crate::app::Modal),
+    OpenModal(fn(&mut App) -> crate::app::Modal),
     Quit,
 }
 
@@ -536,5 +556,21 @@ mod tests {
     #[test]
     fn all_screens_nonempty() {
         assert!(!ScreenId::ALL.is_empty());
+    }
+
+    /// `open_palette` must clear the palette buffer and reset the
+    /// cursor on every call, so opening the palette via either the
+    /// `:` key or the menu item lands on a clean state. Without this,
+    /// a stale query from a previous session leaks into the new one.
+    #[test]
+    fn open_palette_resets_buffer_and_cursor() {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
+        let mut app = App::new(tx, rx);
+        app.palette_buf = "stale query".to_string();
+        app.palette_idx = 4;
+        let modal = open_palette(&mut app);
+        assert!(matches!(modal, crate::app::Modal::CommandPalette));
+        assert_eq!(app.palette_buf, "");
+        assert_eq!(app.palette_idx, 0);
     }
 }
