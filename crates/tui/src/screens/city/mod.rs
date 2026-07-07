@@ -111,6 +111,13 @@ pub struct CityScreen {
     /// Current viewport (pan + zoom). Built from `location.bbox` on
     /// first render and mutated by `h/j/k/l/+/-`.
     pub viewport_bbox: [f64; 4],
+    /// Dot-grid dimensions of the last rendered map. Refreshed by
+    /// `render()` and read by the on-key handler so `+/-` can zoom
+    /// while preserving the on-screen aspect ratio. Zero before the
+    /// first render — handlers must fall back to a square aspect in
+    /// that case.
+    pub last_viewport_w: u16,
+    pub last_viewport_h: u16,
 }
 
 impl CityScreen {
@@ -128,6 +135,8 @@ impl CityScreen {
             weather: None,
             data_fresh: false,
             viewport_bbox: bbox,
+            last_viewport_w: 0,
+            last_viewport_h: 0,
         }
     }
 
@@ -169,6 +178,17 @@ impl CityScreen {
             return None;
         }
         Some(Viewport::new(self.viewport_bbox, inner.width, inner.height))
+    }
+
+    /// Like `viewport` but also records the dot-grid dimensions on
+    /// `self.last_viewport_w/h` so the on-key handler can compute an
+    /// aspect-correct zoom even when the pane hasn't been re-rendered
+    /// this frame.
+    fn viewport_mut(&mut self, inner: Rect) -> Option<Viewport> {
+        let vp = self.viewport(inner)?;
+        self.last_viewport_w = vp.width_dots;
+        self.last_viewport_h = vp.height_dots;
+        Some(vp)
     }
 
     /// Build the synthetic traffic overlay for the current roads +
@@ -226,17 +246,42 @@ impl Screen for CityScreen {
             }
             // ----- zoom -----
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                zoom(&mut self.viewport_bbox, ZOOM_STEP);
+                zoom_aspect(
+                    &mut self.viewport_bbox,
+                    ZOOM_STEP,
+                    self.last_viewport_w,
+                    self.last_viewport_h,
+                );
                 true
             }
             KeyCode::Char('-') | KeyCode::Char('_') => {
-                zoom(&mut self.viewport_bbox, 1.0 / ZOOM_STEP);
+                zoom_aspect(
+                    &mut self.viewport_bbox,
+                    1.0 / ZOOM_STEP,
+                    self.last_viewport_w,
+                    self.last_viewport_h,
+                );
                 true
             }
             // ----- refresh -----
             KeyCode::Char('r') => {
                 self.data_fresh = false;
                 let _ = app.tx.try_send(Action::CityCtrlRefresh);
+                true
+            }
+            // ----- units toggle (mirror the View → Units menu) -----
+            // `u` on the City screen flips Metric ↔ Imperial and
+            // updates the persisted pref so the choice survives
+            // a restart. Same key as the global "toggle units"
+            // shortcut; the main loop's screen-key routing means
+            // it only fires when the City screen has focus.
+            KeyCode::Char('u') => {
+                let next = match app.units {
+                    Units::Metric => Units::Imperial,
+                    Units::Imperial => Units::Metric,
+                };
+                app.units = next;
+                crate::prefs::Prefs::save_units(next);
                 true
             }
             // ----- city picker -----
@@ -344,7 +389,7 @@ impl Screen for CityScreen {
 fn render_map_pane(
     f: &mut Frame,
     area: Rect,
-    screen: &CityScreen,
+    screen: &mut CityScreen,
     app: &App,
     theme: &Theme,
     focus: bool,
@@ -361,7 +406,7 @@ fn render_map_pane(
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let Some(vp) = screen.viewport(inner) else {
+    let Some(vp) = screen.viewport_mut(inner) else {
         // Pane too small for braille. Show a one-line hint.
         let hint = Paragraph::new(Line::from(Span::styled(
             "  pane too small — resize",
@@ -518,12 +563,12 @@ fn render_weather_pane(
         ]));
         let wind = match w.wind_dir_deg {
             Some(deg) => format!(
-                "{:.0} {} @ {:.0} kph",
+                "{:.0} {} @ {}",
                 deg,
                 compass_point(deg),
-                w.wind_kph
+                format_wind(w.wind_kph, app.units)
             ),
-            None => format!("{:.0} kph", w.wind_kph),
+            None => format_wind(w.wind_kph, app.units),
         };
         lines.push(Line::from(vec![
             Span::styled("  wind        ", theme.dim()),
@@ -621,6 +666,17 @@ fn format_temp(w: &Weather, units: Units) -> (String, String) {
     }
 }
 
+/// Format wind speed in the user's chosen units. Open-Meteo returns
+/// kph by default; mph = kph × 0.621371. We render `kph` for metric
+/// users and `mph` for imperial — never both, since the weather pane
+/// is narrow.
+fn format_wind(kph: f32, units: Units) -> String {
+    match units {
+        Units::Metric => format!("{:.0} kph", kph),
+        Units::Imperial => format!("{:.0} mph", kph * 0.621_371),
+    }
+}
+
 /// Convert a meteorological wind direction (degrees, 0=N, 90=E) to a
 /// 16-point compass label. Used in the weather pane so the user sees
 /// "315° NW" instead of an unrotated number.
@@ -683,16 +739,31 @@ fn pan(bbox: &mut [f64; 4], dy_frac: f64, dx_frac: f64) {
 /// centre. Clamps to `[MIN_BBOX_SPAN, MAX_BBOX_SPAN]` so the user
 /// can't zoom past "the whole planet" or "one pixel".
 fn zoom(bbox: &mut [f64; 4], factor: f64) {
+    zoom_aspect(bbox, factor, 1, 1)
+}
+
+/// Aspect-aware zoom. `width_dots / height_dots` is the on-screen
+/// aspect (cells×2 by cells×4); `cos(center_lat)` is the mercator
+/// ground-aspect correction. Solving for the lon span that matches
+/// the requested lat span:
+///   lon_span = lat_span × (w/h) × cos(center_lat)
+fn zoom_aspect(bbox: &mut [f64; 4], factor: f64, width_dots: u16, height_dots: u16) {
     let [min_lat, min_lon, max_lat, max_lon] = *bbox;
-    let lat_span = (max_lat - min_lat) * factor;
-    let lon_span = (max_lon - min_lon) * factor;
-    let lat_span = lat_span.clamp(MIN_BBOX_SPAN, MAX_BBOX_SPAN);
-    let lon_span = lon_span.clamp(MIN_BBOX_SPAN, MAX_BBOX_SPAN);
-    let c_lat = (min_lat + max_lat) / 2.0;
+    let lat_span = ((max_lat - min_lat) * factor).clamp(MIN_BBOX_SPAN, MAX_BBOX_SPAN);
+    let c_lat_rad = ((min_lat + max_lat) / 2.0).to_radians();
+    let aspect = if height_dots > 0 {
+        width_dots as f64 / height_dots as f64
+    } else {
+        1.0
+    };
+    let lat_correction = c_lat_rad.cos().clamp(0.01, 1.0);
+    let lon_span =
+        (lat_span * aspect * lat_correction).clamp(MIN_BBOX_SPAN, MAX_BBOX_SPAN);
     let c_lon = (min_lon + max_lon) / 2.0;
-    bbox[0] = c_lat - lat_span / 2.0;
+    let c_lat_deg = c_lat_rad.to_degrees();
+    bbox[0] = c_lat_deg - lat_span / 2.0;
     bbox[1] = c_lon - lon_span / 2.0;
-    bbox[2] = c_lat + lat_span / 2.0;
+    bbox[2] = c_lat_deg + lat_span / 2.0;
     bbox[3] = c_lon + lon_span / 2.0;
 }
 
@@ -773,9 +844,18 @@ mod tests {
     fn zoom_in_shrinks_bbox_around_centre() {
         let mut b = [47.5, -122.4, 47.7, -122.2];
         zoom(&mut b, ZOOM_STEP); // 0.8x
-        // lat_span: 0.2 → 0.16, lon_span: 0.2 → 0.16.
+        // lat_span: 0.2 → 0.16. lon_span is aspect-corrected:
+        // aspect = 1.0 (default 1×1 dots), lat_correction =
+        // cos(47.6°) ≈ 0.674, so lon_span = 0.16 × 1.0 × 0.674 ≈
+        // 0.1079.
+        let expected_lon_span = 0.16 * (47.6_f64.to_radians().cos());
         assert!(approx_eq(b[2] - b[0], 0.16));
-        assert!(approx_eq(b[3] - b[1], 0.16));
+        assert!(
+            approx_eq(b[3] - b[1], expected_lon_span),
+            "got {} expected ~{}",
+            b[3] - b[1],
+            expected_lon_span
+        );
         // Centre preserved.
         let c_lat = (b[0] + b[2]) / 2.0;
         let c_lon = (b[1] + b[3]) / 2.0;
@@ -787,9 +867,10 @@ mod tests {
     fn zoom_out_grows_bbox_around_centre() {
         let mut b = [47.6, -122.3, 47.62, -122.28];
         zoom(&mut b, 1.0 / ZOOM_STEP); // 1.25x
-        // lat_span: 0.02 → 0.025, lon_span: 0.02 → 0.025.
+        // lat_span: 0.02 → 0.025. lon_span is aspect-corrected.
+        let expected_lon_span = 0.025 * (47.61_f64.to_radians().cos());
         assert!(approx_eq(b[2] - b[0], 0.025));
-        assert!(approx_eq(b[3] - b[1], 0.025));
+        assert!(approx_eq(b[3] - b[1], expected_lon_span));
     }
 
     #[test]

@@ -161,6 +161,12 @@ impl Viewport {
     /// Project a single `(lat, lon)` point into dot-grid coordinates.
     /// Out-of-bounds points get negative or ≥-dimension values, which
     /// `set_dot` clips silently — no need to filter pre-draw.
+    ///
+    /// Mercator-style correction: longitude is scaled by `cos(center_lat)`
+    /// so a square mile of Earth maps to a square of dots regardless of
+    /// latitude. Without this, mid-latitude cities look vertically
+    /// stretched (a 1° lon × 1° lat bbox near NYC is ~80km × 111km on
+    /// the ground, so dot-grid aspect goes ~1.4:1 instead of 1:1).
     pub fn project(&self, lat: f64, lon: f64) -> (i32, i32) {
         let [min_lat, min_lon, max_lat, max_lon] = self.bbox;
         let lat_span = max_lat - min_lat;
@@ -168,7 +174,14 @@ impl Viewport {
         if lat_span <= 0.0 || lon_span <= 0.0 {
             return (0, 0);
         }
-        let nx = (lon - min_lon) / lon_span;
+        // Aspect correction. Scale lon by `1/cos(center_lat)` so the
+        // dot-grid is isotropic at this latitude. At the equator this
+        // is 1.0 (no correction); at 60° it's 2.0; at the poles it's
+        // undefined, but `clamp` keeps it sane if the user zooms into
+        // a polar region.
+        let center_lat = 0.5 * (min_lat + max_lat).to_radians();
+        let lat_correction = center_lat.cos().clamp(0.01, 1.0);
+        let nx = (lon - min_lon) / (lon_span * lat_correction);
         let ny = (lat - min_lat) / lat_span;
         // Map ny ∈ [0,1] → y ∈ [0, height_dots], inverted (lat goes
         // up visually but +y goes down on a terminal grid).

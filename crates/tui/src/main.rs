@@ -383,7 +383,7 @@ async fn run_app(
 }
 
 fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &Theme) {
-    let (header, sidebar, content) = ui::chunks(f.area());
+    let (header, menu_bar, tab_strip, content, status) = ui::chunks(f.area());
     ui::draw_header(f, header, app, theme);
     // Region indicator chip: the right ~36 cols of the header. Mirrors
     // the sidebar focus gutter and the status-bar label so the focused
@@ -398,14 +398,29 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
         header.height,
     );
     ui::draw_region_chip(f, chip, app, theme);
-    ui::draw_sidebar(f, sidebar, app, theme);
-    ui::draw_status(f, content, app, theme);
-    // content height = full content area minus status bar at bottom
+    // Phase 1 — menu bar (1 row). Always rendered.
+    ui::menu_bar::draw(f, menu_bar, app, theme);
+    // Phase 1 — tab strip (1 row). Always rendered; falls back to a
+    // collapsed indicator on narrow terminals.
+    ui::tab_strip::draw(f, tab_strip, app, Some(app.current), theme);
+    ui::draw_status(f, status, app, theme);
+    // Content area is the remaining space. The optional sidebar rail
+    // (toggled on/off) sits in the leftmost cells of this band so we
+    // don't need a separate Layout split for it.
+    let rail_w: u16 = if app.sidebar_rail {
+        24.min(content.width.saturating_sub(20))
+    } else {
+        0
+    };
+    if app.sidebar_rail {
+        let rail = ratatui::layout::Rect::new(content.x, content.y, rail_w, content.height);
+        ui::draw_sidebar(f, rail, app, theme);
+    }
     let content_inner = rect(
-        content.x,
+        content.x + rail_w,
         content.y,
-        content.width,
-        content.height.saturating_sub(2),
+        content.width.saturating_sub(rail_w),
+        content.height,
     );
     // WM-driven render: walks the split tree, paints each pane into its
     // rect. The screen's `render` already draws its own border, so we
@@ -497,8 +512,29 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
                     ("anytime", ""),
                     ("?", "this help"),
                     (":", "command palette"),
+                    ("f10 / alt+f", "open menu bar"),
+                    ("←/→", "cycle tabs"),
+                    ("tab", "next screen"),
+                    ("shift-tab", "previous screen"),
+                    ("esc", "close menu / modal"),
                     ("r", "refresh current screen"),
                     ("q", "quit"),
+                    ("menu · file", ""),
+                    ("refresh all", "scan wifi/bluetooth/reload"),
+                    ("command palette…", "open command palette"),
+                    ("quit", "exit the tui"),
+                    ("menu · view", ""),
+                    ("units: metric", "°C, km/h"),
+                    ("units: imperial", "°F, mph"),
+                    ("toggle traffic overlay", "city map traffic"),
+                    ("toggle weather panel", "city weather pane"),
+                    ("menu · tools", ""),
+                    ("rescan wi-fi", "trigger wifi scan"),
+                    ("rescan bluetooth", "trigger bluetooth scan"),
+                    ("toggle web server", "start/stop http"),
+                    ("menu · help", ""),
+                    ("show help (?)", "this overlay"),
+                    ("toast log (T)", "view all toasts"),
                 ],
                 theme,
             );
@@ -1227,6 +1263,68 @@ async fn handle_key(
         }
     }
 
+    // Phase 1 — menu bar absorbs all keys while a dropdown is open.
+    // Esc closes, arrows move, Enter fires. Routed here (before the
+    // global-keys block) so the menu always wins over screen handlers.
+    if app.menu.is_open() {
+        use crate::ui::menu_bar::{MenuId, MENUS};
+        match key.code {
+            Esc => {
+                app.menu.close();
+            }
+            Left => {
+                // Move to the previous menu's last item, or wrap.
+                let cur = app.menu.open.unwrap_or(MenuId::File);
+                let order = [MenuId::File, MenuId::View, MenuId::Tools, MenuId::Help];
+                let idx = order.iter().position(|m| *m == cur).unwrap_or(0);
+                let prev = if idx == 0 { order[order.len() - 1] } else { order[idx - 1] };
+                let menu = MENUS.iter().find(|m| m.id == prev).unwrap();
+                app.menu.open(prev);
+                app.menu.cursor = menu.items.len().saturating_sub(1);
+            }
+            Right => {
+                let cur = app.menu.open.unwrap_or(MenuId::File);
+                let order = [MenuId::File, MenuId::View, MenuId::Tools, MenuId::Help];
+                let idx = order.iter().position(|m| *m == cur).unwrap_or(0);
+                let next = order[(idx + 1) % order.len()];
+                app.menu.open(next);
+                app.menu.cursor = 0;
+            }
+            Up | Char('k') => {
+                let menu = MENUS.iter().find(|m| Some(m.id) == app.menu.open).unwrap();
+                let n = menu.items.len();
+                if n == 0 {
+                    return false;
+                }
+                app.menu.cursor = if app.menu.cursor == 0 { n - 1 } else { app.menu.cursor - 1 };
+            }
+            Down | Char('j') => {
+                let menu = MENUS.iter().find(|m| Some(m.id) == app.menu.open).unwrap();
+                let n = menu.items.len();
+                if n == 0 {
+                    return false;
+                }
+                app.menu.cursor = (app.menu.cursor + 1) % n;
+            }
+            Enter => {
+                let menu_id = app.menu.open.unwrap_or(MenuId::File);
+                let menu = MENUS.iter().find(|m| m.id == menu_id).unwrap();
+                if let Some(item) = menu.items.get(app.menu.cursor) {
+                    let item_copy = *item;
+                    app.menu.close();
+                    crate::ui::menu_bar::dispatch(&item_copy, app, tx).await;
+                } else {
+                    app.menu.close();
+                }
+            }
+            _ => {
+                // Ignore other keys while menu is open — the menu owns
+                // the focus surface until it closes.
+            }
+        }
+        return false;
+    }
+
     // Global keys.
     match key.code {
         Char('q') | Char('Q') => {
@@ -1251,6 +1349,33 @@ async fn handle_key(
             app.modal = Modal::CommandPalette;
             app.palette_buf.clear();
             app.palette_idx = 0;
+        }
+        // Phase 1 — menu bar keys. F10 (canonical) and Alt+F (herdr
+        // style) open the menu bar with the File menu focused. While
+        // a menu is open, all keys route into the menu (Esc closes,
+        // arrows move, Enter fires) — see the early-return below.
+        F(10) | Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            if app.menu.is_open() {
+                app.menu.close();
+            } else {
+                app.menu.open(crate::ui::menu_bar::MenuId::File);
+            }
+            return false;
+        }
+        // Phase 1 — tab strip arrow keys. From the Sidebar, Left (and h)
+        // cycles the tab cursor backwards. Right is NOT bound here
+        // because it has a Sidebar→ContentLeft region-step semantics
+        // downstream. From the content panes, Left/Right keep their
+        // region-step semantics (ContentLeft → Sidebar, ContentLeft
+        // ↔ ContentRight) so D-pad navigation doesn't regress. The
+        // cycle is dispatched via the action channel so the WM pane
+        // kind updates in lockstep.
+        Left | Char('h')
+            if !app.menu.is_open() && app.region == Region::Sidebar =>
+        {
+            let id = crate::ui::tab_strip::cycle(&*app, false);
+            let _ = tx.send(crate::ui::tab_strip::commit(&*app, id)).await;
+            return false;
         }
         // Sidebar navigation. Only active while the sidebar owns the
         // region focus; otherwise these keys belong to the focused pane.
@@ -2585,11 +2710,11 @@ mod tests {
         //   start = Sidebar
         //   → →        ContentLeft → ContentRight
         //   ←          ContentRight → ContentLeft
-        //   ← ←        ContentLeft → Sidebar → Sidebar (already there)
-        //   final       Sidebar
-        // This pins the whole region lifecycle. If anyone regresses
-        // either the Sidebar→ContentLeft jump on `→` or the
-        // ContentLeft→Sidebar jump on `←`, this test breaks.
+        //   ←          ContentLeft → Sidebar
+        // The new tab-strip semantics make Left from Sidebar cycle
+        // the tab cursor (Phase 1 menu/tab UI), not stay in place.
+        // We assert the original three-region walk still works and
+        // that the post-walk current screen is unchanged.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
         app.set_region(Region::Sidebar);
@@ -2607,8 +2732,6 @@ mod tests {
             assert!(matches!(app.region, Region::ContentLeft), "← from ContentRight → ContentLeft (got {:?})", app.region);
             handle_key(&mut screens, &mut app, &tx2, left()).await;
             assert!(matches!(app.region, Region::Sidebar), "← from ContentLeft → Sidebar (got {:?})", app.region);
-            handle_key(&mut screens, &mut app, &tx2, left()).await;
-            assert!(matches!(app.region, Region::Sidebar), "← at Sidebar stays at Sidebar (got {:?})", app.region);
         });
         assert_eq!(app.current, ScreenId::Network, "Region walk must not change the active screen");
     }

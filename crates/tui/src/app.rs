@@ -713,6 +713,17 @@ pub struct App {
     pub region: Region,
     pub palette_buf: String,
     pub palette_idx: usize,
+    /// Menu bar dropdown state. `App.menu.open == None` ⇒ closed (the
+    /// default after boot). When set, the dropdown is rendered above
+    /// the content and `cursor` is the highlighted item index.
+    /// Owned here (not on the renderer) so the key handler in main.rs
+    /// can drive cursor moves without borrowing the Frame.
+    pub menu: crate::ui::menu_bar::MenuState,
+    /// Whether the sidebar rail is visible. Defaults to false (Phase
+    /// 1 — herdr-style tab navigation is primary). Toggle with `
+    /// (backtick) or Ctrl-B. When false, the tab strip is the only
+    /// screen switcher and `Region::Sidebar` is unreachable.
+    pub sidebar_rail: bool,
     pub toasts: Vec<Toast>,
     /// Module 7 — persistent history of every toast ever shown, capped at
     /// `TOAST_HISTORY_CAP`. Unlike `toasts` (which `cleanup_toasts` ages out
@@ -1007,11 +1018,22 @@ impl App {
     /// `Prefs::default()` and logs a warning — a broken prefs file
     /// must never block the TUI from launching.
     pub fn new(tx: mpsc::Sender<Action>, rx: mpsc::Receiver<Action>) -> Self {
+        Self::with_current(tx, rx, crate::app::screen::ScreenId::System)
+    }
+
+    /// Like [`App::new`] but pins the initial current screen. Used by
+    /// tests that need to drive `cycle` from a known starting point
+    /// without going through the main loop's `Action::Goto` path.
+    pub fn with_current(
+        tx: mpsc::Sender<Action>,
+        rx: mpsc::Receiver<Action>,
+        current: crate::app::screen::ScreenId,
+    ) -> Self {
         let prefs = crate::prefs::Prefs::load();
         Self {
             live: Arc::new(Live::default()),
-            current: ScreenId::System,
-            manager: crate::wm::manager::Manager::new(ScreenId::System),
+            current,
+            manager: crate::wm::manager::Manager::new(current),
             modal: Modal::None,
             sidebar_focused: true,
             sidebar_idx: 0,
@@ -1026,6 +1048,11 @@ impl App {
             region: Region::Sidebar,
             palette_buf: String::new(),
             palette_idx: 0,
+            // Phase 1 — menu bar dropdown state. Closed at boot.
+            menu: crate::ui::menu_bar::MenuState::default(),
+            // Phase 1 — sidebar rail hidden by default; the tab strip
+            // is the primary screen switcher (herdr-style).
+            sidebar_rail: false,
             toasts: Vec::new(),
             // Module 7.1 — toast history ring. Empty until the first
             // `push_toast` call; cap enforced by `push_toast` itself so

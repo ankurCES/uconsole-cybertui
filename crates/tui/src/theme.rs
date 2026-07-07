@@ -336,6 +336,7 @@ pub struct Glyphs {
     pub signal_mid: &'static str,
     pub signal_low: &'static str,
     pub signal_none: &'static str,
+    pub sep: &'static str,
 }
 
 pub const GLYPHS_NERD: Glyphs = Glyphs {
@@ -354,6 +355,7 @@ pub const GLYPHS_NERD: Glyphs = Glyphs {
     signal_mid: "▰▰▰▱",
     signal_low: "▰▱▱▱",
     signal_none: "▱▱▱▱",
+    sep: "·",
 };
 
 pub const GLYPHS_ASCII: Glyphs = Glyphs {
@@ -372,6 +374,7 @@ pub const GLYPHS_ASCII: Glyphs = Glyphs {
     signal_mid: "|||.",
     signal_low: "||..",
     signal_none: "|...",
+    sep: "|",
 };
 
 pub fn glyphs() -> &'static Glyphs {

@@ -189,6 +189,16 @@ impl Prefs {
             }
         }
     }
+
+    /// Toggle units and persist. Called from the City screen's `u`
+    /// handler so the user's unit preference survives a restart.
+    /// The caller updates `app.units` directly; this writes the new
+    /// value to disk.
+    pub fn save_units(units: Units) {
+        let mut p = Self::load();
+        p.units = units;
+        p.save();
+    }
 }
 
 #[cfg(test)]

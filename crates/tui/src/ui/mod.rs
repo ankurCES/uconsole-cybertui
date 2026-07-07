@@ -5,7 +5,9 @@
 //! default, plus Gruvbox, Nord, and a legacy alias for the existing
 //! dark theme). See `palette.rs` for the struct definition and named
 //! lookups; the renderer will consume a `Palette` from `Settings`.
+pub mod menu_bar;
 pub mod palette;
+pub mod tab_strip;
 
 // Module 5.4 — sparkline for the header chip. Maps each sample to one of
 // eight block glyphs `▁▂▃▄▅▆▇█`, scaled by the per-interface max so a
@@ -636,20 +638,37 @@ pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(list, rect);
 }
 
-pub fn chunks(area: Rect) -> (Rect, Rect, Rect) {
+pub fn chunks(area: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
+    // Phase 1 — five-row chrome:
+    //   0  header           (2 rows, live values)
+    //   1  menu_bar         (1 row,  File · View · Tools · Help)
+    //   2  tab_strip        (1 row,  one tab per visible screen)
+    //   3  body             (flex,  sidebar rail + content)
+    //   4  status           (2 rows, region hints + clock)
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(2),
+            Constraint::Length(1),
+            Constraint::Length(1),
             Constraint::Min(10),
             Constraint::Length(2),
         ])
         .split(area);
+    let sidebar_w: u16 = if area.width >= 60 { 24 } else { 0 };
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(24), Constraint::Min(20)])
-        .split(outer[1]);
-    (outer[0], body[0], body[1])
+        .constraints([Constraint::Length(sidebar_w), Constraint::Min(20)])
+        .split(outer[3]);
+    (
+        outer[0],
+        outer[1],
+        outer[2],
+        body[1],
+        outer[4],
+    )
+    // The sidebar rail rect (`body[0]`) is computed but unused here —
+    // main.rs renders the sidebar directly from app.sidebar_visible.
 }
 
 #[cfg(test)]
