@@ -54,6 +54,11 @@ chrono.workspace = true
 humantime.workspace = true
 rand.workspace = true
 once_cell.workspace = true
+# Prefs persistence under $XDG_CONFIG_HOME / cyberdeck/prefs.json.
+# Already in the workspace dependency table; pulled in here so the
+# tui crate can resolve `dirs::config_dir()` without growing the
+# root Cargo.toml.
+dirs.workspace = true
 async-trait = "0.1"
 
 # Both a library (src/lib.rs) and a binary (src/main.rs) share this
@@ -76,3 +81,7 @@ path = "src/main.rs"
 # handshake response and the first inbound packet).
 wiremock = "0.6"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# Round-trip prefs through a real fs path in `prefs::tests`. The
+# `Prefs::save_to` helper does atomic-rename writes so we need a
+# real (temp) directory rather than a mock fs.
+tempfile = "3"

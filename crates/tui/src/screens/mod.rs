@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod bluetooth;
+pub mod city;
 pub mod display;
 pub mod editor;
 pub mod files;

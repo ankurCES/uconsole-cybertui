@@ -72,6 +72,25 @@ pub enum Action {
     /// re-render on the next frame. Empty Vec on missing nmcli / non-NM
     /// box (the call site never returns `Err`).
     SavedConnectionsRefreshed(Vec<cyberdeck_core::net::SavedConnection>),
+    /// Step 9 — user pressed `r` on the City screen. The dispatcher
+    /// reacts by re-firing the ip-api → Open-Meteo pipeline out of band
+    /// (the 10-minute City refiller continues to run independently).
+    /// Results land in `Action::CityResolved` / `Action::CityWeatherRefreshed`
+    /// which the City screen applies to its live state. The screen
+    /// only enqueues this Action; the actual HTTP work lives in the
+    /// dispatcher's spawned task so the UI thread never blocks.
+    CityCtrlRefresh,
+    /// Step 9 — IP-geolocated location resolved (from the 10-min
+    /// refiller or a `CityCtrlRefresh` tap). Dispatcher applies to
+    /// `App::live.city_loc` so the City screen reads a stable snapshot
+    /// on every render instead of holding its own copy. `slug` is the
+    /// bundled-slug fallback the City screen uses for road data.
+    CityResolved(crate::screens::city::geo::CityLocation),
+    /// Step 9 — Open-Meteo weather snapshot returned. Dispatcher
+    /// applies to `App::live.city_weather`; the City screen reads it
+    /// each render. Failures don't emit an Action — the previous
+    /// snapshot stays on screen.
+    CityWeatherRefreshed(crate::screens::city::weather::Weather),
 }
 
 #[derive(Debug, Clone)]

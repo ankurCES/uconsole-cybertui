@@ -10,10 +10,10 @@ pub mod commands;
 pub mod output;
 
 use crate::commands::{
-    audio::AudioCmd, bluetooth::BluetoothCmd, completion::CompletionCmd, config_cmd::ConfigCmd,
-    daemon::DaemonCmd, display::DisplayCmd, logs::LogsCmd, net::NetCmd, packages::PackagesCmd,
-    power::PowerCmd, process::ProcessCmd, services::ServicesCmd, storage::StorageCmd,
-    system::SystemCmd, update::UpdateCmd, workspace::WorkspaceCmd, wm::WmCmd,
+    audio::AudioCmd, bluetooth::BluetoothCmd, city::CityCmd, completion::CompletionCmd,
+    config_cmd::ConfigCmd, daemon::DaemonCmd, display::DisplayCmd, logs::LogsCmd, net::NetCmd,
+    packages::PackagesCmd, power::PowerCmd, process::ProcessCmd, services::ServicesCmd,
+    storage::StorageCmd, system::SystemCmd, update::UpdateCmd, workspace::WorkspaceCmd, wm::WmCmd,
 };
 use crate::output::OutputMode;
 
@@ -102,6 +102,10 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: UpdateCmd,
     },
+    City {
+        #[command(subcommand)]
+        cmd: CityCmd,
+    },
 }
 
 pub fn run() -> Result<i32> {
@@ -125,6 +129,7 @@ pub fn run() -> Result<i32> {
         Cmd::Completion { cmd } => commands::completion::run(cmd, mode),
         Cmd::Config { cmd } => commands::config_cmd::run(cmd, mode),
         Cmd::Update { cmd } => commands::update::run(cmd, mode),
+        Cmd::City { cmd } => commands::city::run(cmd, mode),
     }
 }
 

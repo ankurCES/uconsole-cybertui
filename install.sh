@@ -77,6 +77,20 @@ INSTALL_PREFIX="${INSTALL_PREFIX:-/usr/local}"
 BIND_ADDR="${BIND_ADDR:-0.0.0.0:7878}"
 REPO_DIR="${REPO_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 TOKEN_FILE="${TOKEN_FILE:-/etc/cyberdeck/token}"
+# Redirect cargo's build artifacts off tmpfs. When invoked via the curl|bash
+# entry point, $REPO_DIR lives in $SCRATCH on tmpfs (often size-capped at
+# 1-2 GiB); writing ratatui's rmeta there hits ENOSPC long before linking.
+# Cargo honours $CARGO_TARGET_DIR, so we set it to a persistent cache on /
+# unless the caller overrides it. The directory is created lazily by cargo
+# (mkdir -p on first write), so no mkdir call here.
+CYBERDECK_TARGET_DIR="${CYBERDECK_TARGET_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/cyberdeck/target}"
+export CARGO_TARGET_DIR="$CYBERDECK_TARGET_DIR"
+# Cargo writes the release binaries into $CARGO_TARGET_DIR/release (not
+# $REPO_DIR/target/release as it did before the tmpfs redirect). Every
+# post-build [[ -x ]] check and `install -m` below must read from
+# $BUILD_DIR so we don't die with "Expected ... — build first" when the
+# build succeeded but landed in the redirected cache.
+BUILD_DIR="$CARGO_TARGET_DIR/release"
 SERVICE_NAME="cyberdeck-web"
 RADAR_SERVICE_NAME="wifi-radar"
 TUI_BIN="cyberdeck-tui"
@@ -418,13 +432,14 @@ if [[ $DO_UNINSTALL -eq 1 ]]; then
     if [[ $EUID -ne 0 ]]; then
         log "Re-executing with sudo for uninstall"
         exec sudo -E REPO_DIR="$REPO_DIR" \
-                   INSTALL_PREFIX="$INSTALL_PREFIX" \
-                   RADAR_TAGS_PATH="$RADAR_TAGS_PATH" \
-                   SERVICE_USER="$SERVICE_USER" \
-                   TOKEN_FILE="$TOKEN_FILE" \
-                   SERVICE_NAME="$SERVICE_NAME" \
-                   RADAR_SERVICE_NAME="$RADAR_SERVICE_NAME" \
-                   "$0" --uninstall
+               CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
+               INSTALL_PREFIX="$INSTALL_PREFIX" \
+               RADAR_TAGS_PATH="$RADAR_TAGS_PATH" \
+               SERVICE_USER="$SERVICE_USER" \
+               TOKEN_FILE="$TOKEN_FILE" \
+               SERVICE_NAME="$SERVICE_NAME" \
+               RADAR_SERVICE_NAME="$RADAR_SERVICE_NAME" \
+               "$0" --uninstall
     fi
     systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
     rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
@@ -493,20 +508,20 @@ if [[ $INSTALL_ONLY -eq 0 ]] && [[ $NEED_BUILD -eq 1 || $NEED_WEB_BUILD -eq 1 ||
 fi
 
 if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]]; then
-    [[ -x "$REPO_DIR/target/release/${WEB_BIN}" ]] \
-        || die "Expected $REPO_DIR/target/release/${WEB_BIN} — build first."
+    [[ -x "$BUILD_DIR/${WEB_BIN}" ]] \
+        || die "Expected $BUILD_DIR/${WEB_BIN} — build first."
 fi
 
 if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]]; then
-    [[ -x "$REPO_DIR/target/release/${RADAR_BIN}" ]] \
-        || die "Expected $REPO_DIR/target/release/${RADAR_BIN} — build first."
+    [[ -x "$BUILD_DIR/${RADAR_BIN}" ]] \
+        || die "Expected $BUILD_DIR/${RADAR_BIN} — build first."
 fi
 
 if [[ $PRESET_BUILD -eq 1 ]]; then
     log "Build complete."
-    log "  ${WEB_BIN}: $REPO_DIR/target/release/${WEB_BIN}"
-    log "  ${TUI_BIN}: $REPO_DIR/target/release/${TUI_BIN}"
-    log "  ${RADAR_BIN}: $REPO_DIR/target/release/${RADAR_BIN}"
+    log "  ${WEB_BIN}: $BUILD_DIR/${WEB_BIN}"
+    log "  ${TUI_BIN}: $BUILD_DIR/${TUI_BIN}"
+    log "  ${RADAR_BIN}: $BUILD_DIR/${RADAR_BIN}"
     exit 0
 fi
 
@@ -518,6 +533,7 @@ NEED_SUDO_STEPS=0
 if [[ $NEED_SUDO_STEPS -eq 1 ]] && [[ $EUID -ne 0 ]]; then
     log "Re-executing with sudo for system install steps"
     exec sudo -E REPO_DIR="$REPO_DIR" \
+               CARGO_TARGET_DIR="$CARGO_TARGET_DIR" \
                INSTALL_PREFIX="$INSTALL_PREFIX" \
                BIND_ADDR="$BIND_ADDR" \
                RADAR_BIND_ADDR="$RADAR_BIND_ADDR" \
@@ -538,27 +554,29 @@ fi
 
 # ---------- 5. install binaries ----------
 if [[ $PRESET_TUI -eq 1 || $PRESET_FULL -eq 1 ]]; then
-    [[ -x "$REPO_DIR/target/release/${TUI_BIN}" ]] \
-        || die "Expected $REPO_DIR/target/release/${TUI_BIN} — build first."
+    [[ -x "$BUILD_DIR/${TUI_BIN}" ]] \
+        || die "Expected $BUILD_DIR/${TUI_BIN} — build first."
     log "Installing ${TUI_BIN} to ${INSTALL_PREFIX}/bin/${TUI_BIN}"
     install -m 0755 \
-        "$REPO_DIR/target/release/${TUI_BIN}" \
+        "$BUILD_DIR/${TUI_BIN}" \
         "${INSTALL_PREFIX}/bin/${TUI_BIN}"
 fi
 
 if [[ $PRESET_WEB -eq 1 || $PRESET_FULL -eq 1 ]]; then
+    [[ -x "$BUILD_DIR/${WEB_BIN}" ]] \
+        || die "Expected $BUILD_DIR/${WEB_BIN} — build first."
     log "Installing ${WEB_BIN} to ${INSTALL_PREFIX}/bin/${WEB_BIN}"
     install -m 0755 \
-        "$REPO_DIR/target/release/${WEB_BIN}" \
+        "$BUILD_DIR/${WEB_BIN}" \
         "${INSTALL_PREFIX}/bin/${WEB_BIN}"
 fi
 
 if [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 ]]; then
-    [[ -x "$REPO_DIR/target/release/${RADAR_BIN}" ]] \
-        || die "Expected $REPO_DIR/target/release/${RADAR_BIN} — build first."
+    [[ -x "$BUILD_DIR/${RADAR_BIN}" ]] \
+        || die "Expected $BUILD_DIR/${RADAR_BIN} — build first."
     log "Installing ${RADAR_BIN} to ${INSTALL_PREFIX}/bin/${RADAR_BIN}"
     install -m 0755 \
-        "$REPO_DIR/target/release/${RADAR_BIN}" \
+        "$BUILD_DIR/${RADAR_BIN}" \
         "${INSTALL_PREFIX}/bin/${RADAR_BIN}"
 fi
 

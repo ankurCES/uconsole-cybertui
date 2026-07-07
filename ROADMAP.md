@@ -127,3 +127,38 @@ Known issues (filed for a follow-up plan):
 - Last-used shell + cwd persistence (config file or env).
 - Optional: per-pane scrollback for terminals.
 - Optional: pane presets (`:layout 2v`, `:layout 1+2`).
+
+## Phase 6 — City screen (done)
+
+New `screens::city` module + 14th sidebar entry. Two-pane layout
+(`[Percentage(60), Percentage(40)] Horizontal`, audit-pinned): braille
+road map (Unicode `U+2800` + 8-dot bit offset via `BrailleGrid` +
+Bresenham) on the left, weather + traffic legend on the right; `w`
+toggles the weather panel off so the map fills the content width.
+
+Data sources: IP geolocation via `ip-api.com` HTTP (free tier, no key),
+Open-Meteo current + 12h precipitation (HTTPS, no key), synthetic
+traffic overlay as a pure function of `(road, hour, weekday)` —
+motorway/trunk can `Gridlock` in commute peaks, `footway` never
+exceeds `Light`, weekend ≠ weekday. Roads come from a bundled
+`<slug>.json` per city (`crates/tui/data/cities/seattle.json` first);
+other slugs fall back to seattle until their fixtures land.
+
+Keymap (9 keys, all consumed in `CityScreen::on_key`): `h/j/k/l` pan,
+`+/-` zoom, `r` refresh, `c` cycle cities, `t` traffic overlay, `w`
+weather panel. City picker + overlay + weather panel toggles persist
+via `Prefs` so the user's choices survive relaunch.
+
+CLI parity via `cyberdeck city <subcommand>` (`Locate` / `Weather` /
+`Roads` / `Bundled`), sharing the same data path as the TUI. The
+async arms (`locate`, `weather`) lazy-build a current-thread tokio
+runtime; the data arms (`roads`, `bundled`) stay synchronous.
+
+Background refiller runs on a 600s cadence via `App::spawn_refreshers`
+and writes through `App::live.{city_loc, city_weather}`, so the render
+path is a pure read of in-memory snapshots. Detailed design + tests +
+known issues live at [`docs/wiki/Phase-6-City.md`](./docs/wiki/Phase-6-City.md).
+
+Test counts: 45 unit tests under `screens::city` + 4 dispatcher
+integration tests under `app::tests::city_*` + 6 CLI dispatch tests
+under `cli_dispatch::city_*`. All green.

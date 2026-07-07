@@ -10,6 +10,7 @@
 //! binary just uses them.
 
 pub mod app;
+pub mod prefs;
 pub mod screens;
 pub mod theme;
 pub mod ui;

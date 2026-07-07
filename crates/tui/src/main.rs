@@ -289,6 +289,10 @@ async fn run_app(
         Box::new(screens::lora::LoraScreen::new(Box::new(
             screens::lora::FakeTransport::new(),
         ))),
+        // City screen: braille road network (left) + weather/wind (right).
+        // Step 3 stub — Step 8 swaps the placeholder render for the real
+        // braille renderer + geo/weather clients wired in Steps 5-7.
+        Box::new(screens::city::CityScreen::new()),
     ];
 
     let mut redraw = true;
@@ -297,11 +301,16 @@ async fn run_app(
 
     loop {
         if redraw {
-            let theme = Theme::by_name(match app.theme_name {
-                app::screen::ThemeNameReexport::Dark => theme::ThemeName::Dark,
-                app::screen::ThemeNameReexport::Light => theme::ThemeName::Light,
-                app::screen::ThemeNameReexport::HighContrast => theme::ThemeName::HighContrast,
-            });
+            // `app.theme_name` is the same enum as `theme::ThemeName`
+            // (just re-exported into the `app::screen` module path as
+            // `ThemeNameReexport`), so `Theme::by_name` accepts it
+            // directly. This used to be a 3-arm match over the
+            // original 3-variant enum; the 10-variant expansion in
+            // Step 1 made that match non-exhaustive, so we route
+            // through `by_name` here. Future theme additions won't
+            // require touching this call site again — they only need
+            // a new variant in `ThemeName` + an entry in `by_name`.
+            let theme = Theme::by_name(app.theme_name);
             terminal
                 .draw(|f| draw(f, app, &mut screens, &theme))
                 .context("terminal draw")?;
@@ -1929,28 +1938,18 @@ async fn handle_action(
             // we can name the post-toggle state (e.g. "theme: light").
             let confirm: Option<String> = match key {
                 Theme => {
-                    app.theme_name = match app.theme_name {
-                        app::screen::ThemeNameReexport::Dark => {
-                            app::screen::ThemeNameReexport::Light
-                        }
-                        app::screen::ThemeNameReexport::Light => {
-                            app::screen::ThemeNameReexport::HighContrast
-                        }
-                        app::screen::ThemeNameReexport::HighContrast => {
-                            app::screen::ThemeNameReexport::Dark
-                        }
-                    };
-                    Some(format!(
-                    "theme: {}",
-                    match app.theme_name {
-                        app::screen::ThemeNameReexport::Dark => "dark",
-                        app::screen::ThemeNameReexport::Light => "light",
-                        app::screen::ThemeNameReexport::HighContrast => "contrast",
-                    }
-                ))
+                    // Cycle through all built-in themes (Dark, Light,
+                    // HighContrast, Cyberpunk, VsCodeDark, VsCodeLight,
+                    // CatppuccinMocha, Nord, GruvboxDark, SolarizedDark)
+                    // instead of the old 3-state toggle. `next()` wraps
+                    // around so the user can always get back to Dark.
+                    app.theme_name = app.theme_name.next();
+                    app.save_prefs();
+                    Some(format!("theme: {}", app.theme_name.as_str()))
                 }
                 Mouse => {
                     app.mouse = !app.mouse;
+                    app.save_prefs();
                     Some(format!(
                         "mouse capture: {}",
                         if app.mouse { "on" } else { "off" }
@@ -1958,6 +1957,7 @@ async fn handle_action(
                 }
                 NerdFont => {
                     app.nerd_font = !app.nerd_font;
+                    app.save_prefs();
                     Some(format!(
                         "nerd font glyphs: {}",
                         if app.nerd_font { "on" } else { "off" }
@@ -1980,6 +1980,40 @@ async fn handle_action(
                     };
                     let _ = sender.send((tx.clone(), Action::Run(act))).await;
                     Some(format!("web server: {will_be}"))
+                }
+                Units => {
+                    // Cycle Metric ↔ Imperial. The render-side string
+                    // conversion lives on `App::units` (see Settings
+                    // screen) so this stays a one-liner. We reach
+                    // `Units` through the lib re-export because `main`
+                    // is the binary crate; `crate::prefs::Units` from
+                    // here would fail to resolve.
+                    app.units = match app.units {
+                        cyberdeck_tui::prefs::Units::Metric => cyberdeck_tui::prefs::Units::Imperial,
+                        cyberdeck_tui::prefs::Units::Imperial => cyberdeck_tui::prefs::Units::Metric,
+                    };
+                    app.save_prefs();
+                    let label = match app.units {
+                        cyberdeck_tui::prefs::Units::Metric => "metric (°C, km/h)",
+                        cyberdeck_tui::prefs::Units::Imperial => "imperial (°F, mph)",
+                    };
+                    Some(format!("units: {label}"))
+                }
+                TrafficOverlay => {
+                    app.traffic_overlay = !app.traffic_overlay;
+                    app.save_prefs();
+                    Some(format!(
+                        "traffic overlay: {}",
+                        if app.traffic_overlay { "on" } else { "off" }
+                    ))
+                }
+                WeatherPanel => {
+                    app.show_weather_panel = !app.show_weather_panel;
+                    app.save_prefs();
+                    Some(format!(
+                        "weather panel: {}",
+                        if app.show_weather_panel { "on" } else { "off" }
+                    ))
                 }
             };
             if let Some(msg) = confirm {
@@ -2095,6 +2129,53 @@ async fn handle_action(
             // render path reads `app.saved_connections` on every frame
             // and the right pane redraws automatically.
             app.saved_connections = conns;
+        }
+        // Step 9 — City action arms. The refiller (or a `r` keypress)
+        // populates `app.live.city_loc` + `app.live.city_weather`
+        // through these arms; the City screen reads them on every
+        // render. Both are write-through-RwLock so future spawned
+        // tasks can update without re-borrowing `App`.
+        Action::CityResolved(loc) => {
+            // IP-geolocated location arrived. Stamp the live snapshot
+            // so the next render shows the real city name. We DON'T
+            // push this back into `app.tx` — the City screen's
+            // 9-key dispatcher reads `app.live.city_loc` directly, so
+            // re-emitting would loop.
+            let mut g = app.live.city_loc.write().await;
+            *g = Some(loc);
+        }
+        Action::CityWeatherRefreshed(w) => {
+            // Open-Meteo snapshot arrived. Same shape as CityResolved:
+            // write through the lock, drop the guard, let the next
+            // frame pick it up.
+            let mut g = app.live.city_weather.write().await;
+            *g = Some(w);
+        }
+        Action::CityCtrlRefresh => {
+            // User pressed `r` on the City screen. Fire-and-forget:
+            // spawn one short-lived task that runs the same geo →
+            // weather pipeline the 10-min refiller runs. We don't
+            // wait on it; the result lands back through
+            // `CityResolved` / `CityWeatherRefreshed`. If a previous
+            // tap is still in flight, the new one races — that's
+            // fine, last write wins on the RwLock.
+            //
+            // The `tx` we capture here is `app.tx.clone()` from the
+            // dispatcher's caller; the spawned task owns it and
+            // drops it when the futures complete (channel closes →
+            // main-loop receiver notices on its next poll and exits).
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                use crate::screens::city;
+                if let Ok(loc) = city::geo::locate().await {
+                    if tx.send(Action::CityResolved(loc.clone())).await.is_err() {
+                        return;
+                    }
+                    if let Ok(w) = city::weather::fetch(&loc).await {
+                        let _ = tx.send(Action::CityWeatherRefreshed(w)).await;
+                    }
+                }
+            });
         }
     }
     false
@@ -2225,6 +2306,7 @@ mod tests {
             Box::new(screens::files::FilesScreen),
             Box::new(screens::logs::LogsScreen),
             Box::new(screens::settings::SettingsScreen),
+            Box::new(screens::city::CityScreen::new()),
         ]
     }
 

@@ -11,6 +11,11 @@ path = "src/main.rs"
 [dependencies]
 cyberdeck-core = { path = "../core" }
 cyberdeck-daemon = { path = "../daemon" }
+# `cyberdeck-tui` exposes the bundled road loader + geo/weather
+# clients so the `city` verb can share one data path with the TUI
+# instead of re-implementing the HTTP clients. The TUI crate has no
+# runtime dependency on the CLI, so this is one-way (CLI → TUI).
+cyberdeck-tui = { path = "../tui" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

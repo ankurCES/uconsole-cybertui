@@ -809,25 +809,31 @@ mod status_region_vocabulary {
     fn sidebar_narrow_renders_with_offset_and_clamps_overflow() {
         // Render the narrow sidebar with sidebar_offset=10 against an
         // 8-row area. The visible window is height-2 (top/bottom borders)
-        // = 6 rows. With 15 screens total, max_off = 15-6 = 9. The
-        // implementation must clamp sidebar_offset down to that ceiling
-        // BEFORE handing the value to ListState, so ratatui can't scroll
-        // the bottom rows past the bottom edge (where they'd be
-        // selectable-but-invisible on a narrow-but-tall terminal).
+        // = 6 rows. With N screens total (ScreenId::ALL.len()), max_off
+        // = N-6. The implementation must clamp sidebar_offset down to
+        // that ceiling BEFORE handing the value to ListState, so
+        // ratatui can't scroll the bottom rows past the bottom edge
+        // (where they'd be selectable-but-invisible on a narrow-but-
+        // tall terminal). Count is derived from ScreenId::ALL rather
+        // than hard-coded so adding a screen in the future doesn't
+        // silently break this assertion.
         let backend = TestBackend::new(24, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut app = fresh_app();
         app.region = Region::Sidebar;
         app.sidebar_idx = 12;
-        app.sidebar_offset = 10; // > max_off(9), must be clamped
+        let total = ScreenId::ALL.len();
+        let visible = 6; // area.height(8) - borders(2)
+        let max_off = total - visible;
+        app.sidebar_offset = max_off + 1; // > max_off, must be clamped
         let theme = Theme::by_name(ThemeName::Dark);
         let area = ratatui::layout::Rect::new(0, 0, 24, 8);
         terminal
             .draw(|f| draw_sidebar_narrow(f, area, &mut app, &theme, true))
             .unwrap();
         assert_eq!(
-            app.sidebar_offset, 9,
-            "sidebar_offset must be clamped to total-visible (15-6=9)"
+            app.sidebar_offset, max_off,
+            "sidebar_offset must be clamped to total-visible ({total}-{visible}={max_off})"
         );
     }
 

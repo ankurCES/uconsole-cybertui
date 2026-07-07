@@ -132,3 +132,97 @@ fn bluetooth_subcommand_help_lists_list_and_status() {
         .stdout(predicate::str::contains("list"))
         .stdout(predicate::str::contains("status"));
 }
+
+// -------------------------------------------------------------------------
+// Step 10 — `cyberdeck city` verb. Pins the four new subcommands
+// (`locate`, `weather`, `roads`, `bundled`) and the `--json`
+// shape for each. `locate` + `weather` hit real HTTP endpoints
+// (ip-api / Open-Meteo) and may fail in a sandboxed test env, so we
+// only assert on the pure-data arms (`roads` + `bundled`) here —
+// the HTTP-backed arms are covered by the wiremock unit tests
+// inside `cyberdeck-tui` (Steps 5+8).
+// -------------------------------------------------------------------------
+
+#[test]
+fn help_lists_city_subcommand() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("city"));
+}
+
+#[test]
+fn city_bundled_lists_known_slugs() {
+    // Pure-data arm — no network. The bundled seattle.json is the
+    // only city with a populated JSON file at this commit; the others
+    // are placeholders that fall back to seattle via
+    // `load_bundled_or_default`. The BUNDLED list itself always
+    // contains them.
+    cmd()
+        .args(["--json", "city", "bundled"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"seattle\""))
+        .stdout(predicate::str::contains("\"london\""))
+        .stdout(predicate::str::contains("\"tokyo\""));
+}
+
+#[test]
+fn city_roads_default_slug_is_seattle() {
+    // No slug arg → defaults to `seattle` per the `#[arg(default_value)]`.
+    // The response always surfaces a `slug_used` so callers can detect
+    // fallbacks. We assert on the data-shape (road_count > 0, bbox
+    // present) rather than exact JSON, since the bundled seattle
+    // fixture is small but stable.
+    cmd()
+        .args(["--json", "city", "roads"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"slug_used\":\"seattle\""))
+        .stdout(predicate::str::contains("\"road_count\":"))
+        .stdout(predicate::str::contains("\"bbox\":"));
+}
+
+#[test]
+fn city_roads_unknown_slug_falls_back_to_seattle() {
+    // `atlantis` isn't bundled — the loader should fall back to
+    // `seattle` and surface that in `slug_used`. This matches the
+    // TUI's `CityRoads::load_bundled_or_default` behaviour exactly.
+    cmd()
+        .args(["--json", "city", "roads", "atlantis"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"slug_requested\":\"atlantis\""))
+        .stdout(predicate::str::contains("\"slug_used\":\"seattle\""));
+}
+
+#[test]
+fn city_help_lists_all_four_subcommands() {
+    // Drill into the verb and check clap generated the four expected
+    // children — `locate`, `weather`, `roads`, `bundled`.
+    cmd()
+        .args(["city", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("locate"))
+        .stdout(predicate::str::contains("weather"))
+        .stdout(predicate::str::contains("roads"))
+        .stdout(predicate::str::contains("bundled"));
+}
+
+#[test]
+fn city_weather_requires_lat_and_lon() {
+    // The weather subcommand takes two required `--lat` / `--lon`
+    // flags. Missing either → clap rejects. We assert on
+    // `failure()` + an error message that mentions one of the flags.
+    cmd()
+        .args(["--json", "city", "weather"])
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("--lat")
+                .or(predicate::str::contains("lat"))
+                .or(predicate::str::contains("required")),
+        );
+}

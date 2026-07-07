@@ -4,6 +4,7 @@
 
 pub mod audio;
 pub mod bluetooth;
+pub mod city;
 pub mod completion;
 pub mod config_cmd;
 pub mod daemon;
