@@ -2175,7 +2175,21 @@ async fn handle_action(
             // Tab/Shift-Tab widget navigation with hidden-widget
             // skipping: `Screen::is_hidden(&app) -> bool` defaults to
             // false so every screen is reachable unless it opts out.
-            app.current = ScreenId::cycle(&*screens, app, app.current, forward);
+            //
+            // BUG FIX: previously only `app.current` was updated, leaving
+            // the WM pane's `WindowKind` stuck on the old screen — so the
+            // right side kept rendering whatever was last painted while
+            // the tab strip / sidebar highlight visibly moved. Routing
+            // through `switch_screen` (the same helper `1`..`0` / Enter /
+            // Goto use) keeps `app.current` and the WM pane's kind in
+            // lockstep, so the next frame actually repaints the new
+            // screen. Side-effects (Network auto-scan, Bluetooth scan,
+            // LoRa IP modal) follow for free.
+            let next = ScreenId::cycle(&*screens, app, app.current, forward);
+            // Compute the matching sidebar row so the sidebar cursor
+            // tracks the cycled screen — mirrors the digit-key path.
+            let sidebar_row = ScreenId::ALL.iter().position(|s| *s == next).unwrap_or(0);
+            switch_screen(app, next, sidebar_row);
         }
         Action::Quit => return true,
         Action::Toast(kind, msg) => app.push_toast(kind, msg),
@@ -3090,6 +3104,77 @@ mod tests {
         assert_eq!(w.kind, crate::wm::window::WindowKind::Builtin(ScreenId::Network));
         // No terminal state was allocated.
         assert!(!w.is_terminal());
+    }
+
+    /// Regression test for the "Tab cycles the menu but the view doesn't
+    /// change" bug. Previously, `Action::CycleScreen(forward)` updated
+    /// only `app.current` — the WM pane's `WindowKind` stayed pinned to
+    /// the old screen, so the right side kept painting the previous
+    /// screen while the tab strip / sidebar highlight visibly moved.
+    ///
+    /// Routing Tab through the same `switch_screen` helper that the
+    /// digit-key path uses (`1`..`0`) keeps `app.current` AND the WM
+    /// pane's `WindowKind` in lockstep. This test pins that contract:
+    /// after the CycleScreen action handler runs, both `app.current`
+    /// and the pane's WindowKind have moved together.
+    #[test]
+    fn tab_cycle_updates_wm_pane_kind_not_just_current() {
+        let mut app = fresh_app_with_sidebar_focus();
+        app.set_region(Region::ContentLeft);
+        // Drain any startup actions and ensure the WM pane kind starts
+        // matching `app.current` (= System) so the test isn't false-
+        // positive if the manager is initialized in a different state.
+        let initial_kind = app
+            .manager
+            .window(app.manager.focused())
+            .expect("focused pane")
+            .kind;
+        assert_eq!(
+            initial_kind,
+            crate::wm::window::WindowKind::Builtin(ScreenId::System)
+        );
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        // The key handler enqueues Action::CycleScreen(true) on the
+        // channel; the action handler is what actually mutates app.
+        // We drive both: send Tab via `handle_key`, then drain the
+        // resulting action through `handle_action` and assert the
+        // combined effect — same as the live event loop does.
+        run(async {
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            )
+            .await;
+            // The Tab handler enqueues via tx.send(...).await — we
+            // can't observe the action without a matching receiver,
+            // so call the handler directly with the action it would
+            // have emitted. This is the exact code path the live loop
+            // runs.
+            handle_action(
+                &mut screens,
+                &mut app,
+                &tx,
+                Action::CycleScreen(true),
+            )
+            .await;
+        });
+        // Pin the contract: `current` advanced AND the WM pane kind
+        // moved to match — that's the line the bug used to break.
+        assert_ne!(app.current, ScreenId::System, "Tab must advance current");
+        let kind = app
+            .manager
+            .window(app.manager.focused())
+            .expect("focused pane")
+            .kind;
+        assert_eq!(
+            kind,
+            crate::wm::window::WindowKind::Builtin(app.current),
+            "WM pane's WindowKind must follow app.current after Tab \
+             (regression: was left on the previous screen)"
+        );
     }
 
     // -- Phase 5 modal tests -----------------------------------------
