@@ -23,6 +23,15 @@ pub enum Action {
     Toast(crate::app::toast::ToastKind, String),
     /// Toggle a binary setting.
     Toggle(crate::app::screen::SettingsKey),
+    /// User keymap sub-mode commands. The Settings → Keys screen
+    /// drives the user through `BeginCapture(NavAction)` to arm a
+    /// single binding, then sends a stream of `CaptureKey(KeyEvent)`
+    /// actions from the dispatcher until the user presses a real
+    /// key (the next non-modifier `KeyEvent` becomes the binding).
+    /// `Clear` removes a binding, `ResetAll` wipes every override
+    /// (and is followed by a confirm modal by the caller), `ExitMode`
+    /// returns to the regular Settings list.
+    KeymapCmd(crate::keymap::KeymapCmd),
     /// Start a specific long-running action and report back via Toast.
     Run(RunAction),
     /// Confirm or cancel the active modal.

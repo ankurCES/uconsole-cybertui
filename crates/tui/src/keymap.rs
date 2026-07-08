@@ -75,6 +75,19 @@ impl NavAction {
     }
 }
 
+/// Settings → Keys sub-mode commands. See `app::action::Action::KeymapCmd`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeymapCmd {
+    BeginCapture(NavAction),
+    /// Captured key from the dispatcher. The action is "the user
+    /// just pressed `key`; if it doesn't conflict, store it as the
+    /// binding for the action currently being captured."
+    CaptureKey,
+    Clear(NavAction),
+    ResetAll,
+    ExitMode,
+}
+
 /// User-editable keymap. Empty by default (= identity: every action
 /// uses its built-in `KeyEvent`). Each entry maps a `NavAction` to a
 /// specific `KeyEvent` the user pressed.

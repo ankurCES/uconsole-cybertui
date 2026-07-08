@@ -2380,6 +2380,45 @@ async fn handle_action(
                 app.push_toast(ToastKind::Info, msg);
             }
         }
+        Action::KeymapCmd(cmd) => {
+            use crate::keymap::KeymapCmd as K;
+            match cmd {
+                K::BeginCapture(action) => {
+                    // Mark the sub-mode as capturing for `action`. The next
+                    // keypress that reaches `handle_key` while this flag is
+                    // set is consumed and turned into a `KeymapCmd::CaptureKey`
+                    // by the dispatcher.
+                    app.keymap_capture = Some(action);
+                    // Clear the menu so the row stays visible.
+                    app.menu.close();
+                }
+                K::CaptureKey => {
+                    // No-op: the actual capture happened in handle_key
+                    // (which intercepted the key, set the binding, and
+                    // returned false). Reaching here means the user
+                    // pressed something we already handled — ignore.
+                }
+                K::Clear(action) => {
+                    // `app.keymap.bindings` is `pub(crate)`, but the binary
+                    // crate's `main.rs` is treated as a separate compilation
+                    // unit for visibility purposes, so we route through the
+                    // library's `unbind` method instead.
+                    app.keymap.unbind(action);
+                    app.save_prefs();
+                    app.push_toast(ToastKind::Info,
+                        format!("cleared binding for {}", action.label()));
+                }
+                K::ResetAll => {
+                    app.keymap = crate::keymap::Keymap::default();
+                    app.save_prefs();
+                    app.push_toast(ToastKind::Info, "keymap reset to defaults".to_string());
+                }
+                K::ExitMode => {
+                    app.keymap_capture = None;
+                    app.keymap_editing = false;
+                }
+            }
+        }
         Action::Run(act) => {
             // Phase 2 — Editor Save As / Reload are pure local I/O,
             // so they don't go through `spawn_action` (which fans out

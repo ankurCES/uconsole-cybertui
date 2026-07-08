@@ -35,7 +35,7 @@ use ratatui::text::Line;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::interval;
 
-use crate::keymap::Keymap;
+use crate::keymap::{Keymap, NavAction};
 
 pub use action::Action;
 pub use screen::ScreenId;
@@ -858,6 +858,15 @@ pub struct App {
     /// built-in bindings". Mutated by the `Action::KeymapCmd` arm of the
     /// dispatcher; persisted via `App::save_prefs`.
     pub keymap: Keymap,
+    /// True while the user is in the Settings → Keys sub-mode. The
+    /// Settings screen renders a different layout when this is set and
+    /// routes keypresses into `Action::KeymapCmd` instead of the normal
+    /// dispatch.
+    pub keymap_editing: bool,
+    /// The action currently being captured, if any. The dispatcher's
+    /// `handle_key` consumes the next non-modifier event and writes
+    /// it into `app.keymap.bindings[action]`, then clears this.
+    pub keymap_capture: Option<NavAction>,
     /// Last-known city the user picked via the City screen's `c` modal
     /// (or `None` if they haven't overridden the IP-geolocated default).
     pub city_override: Option<String>,
@@ -1150,6 +1159,8 @@ impl App {
             traffic_overlay: prefs.traffic_overlay,
             show_weather_panel: prefs.show_weather_panel,
             keymap: prefs.keymap,
+            keymap_editing: false,
+            keymap_capture: None,
             city_override: prefs.city,
             show_help: false,
             running: true,
