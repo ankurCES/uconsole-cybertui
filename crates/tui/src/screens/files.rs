@@ -64,6 +64,25 @@ impl Screen for FilesScreen {
                 }
                 true
             }
+            KeyCode::Esc => {
+                // "Innermost wins" — Files claims Esc to go up a folder, the
+                // same as Char('h') / Left. Claiming the key stops the launcher
+                // from getting Esc.
+                //
+                // At the filesystem root there's no parent, so we return
+                // false — handle_key has no fall-through "back to launcher"
+                // for content regions today, so the key is effectively a no-op
+                // (which matches the user expectation: from a content region,
+                // Esc either goes back inside the screen or stays put).
+                if let Some(parent) = app.files_cwd.parent() {
+                    app.files_cwd = parent.to_path_buf();
+                    app.files_selected = 0;
+                    refresh(app);
+                    true            // claim — launcher doesn't get it
+                } else {
+                    false           // fall through — at root, no further back is possible
+                }
+            }
             KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
                 if let Some(entry) = app.files_entries.get(app.files_selected).cloned() {
                     if entry.is_dir {

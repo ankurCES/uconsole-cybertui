@@ -4194,6 +4194,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn esc_in_files_goes_up_a_folder() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Files;
+        app.set_region(Region::ContentLeft);
+        // The catch-all in handle_key routes Esc to whichever screen the
+        // focused WM pane is currently displaying; mirror `switch_screen`
+        // so the Builtin kind points at FilesScreen.
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Files,
+            ));
+        // Pre-build a tempdir two levels deep so files_cwd has a parent.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        app.files_cwd = nested.clone();
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(
+            app.files_cwd,
+            nested.parent().unwrap().to_path_buf(),
+            "Esc should go up one folder"
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "screen claimed Esc; region should stay in content"
+        );
+    }
+
+    #[tokio::test]
+    async fn esc_at_filesystem_root_falls_through_to_launcher() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Files;
+        app.set_region(Region::ContentLeft);
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Files,
+            ));
+        app.files_cwd = std::path::PathBuf::from("/");
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        // No parent — Files returned false. The launcher does NOT take
+        // Esc from content regions (catch-all _ => in handle_key just
+        // returns false), so region stays where it is. This documents
+        // the contract: at filesystem root, Esc is a no-op.
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "at filesystem root, Esc should not move focus away from Files"
+        );
+        assert_eq!(
+            app.files_cwd,
+            std::path::PathBuf::from("/"),
+            "cwd should be unchanged when Esc is a no-op"
+        );
+    }
+
+    #[tokio::test]
     async fn toast_log_down_advances_offset_clamped_to_history_len() {
         let mut app = fresh_app_sidebar();
         app.modal = Modal::ToastLog;
