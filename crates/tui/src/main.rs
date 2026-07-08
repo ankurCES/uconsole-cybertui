@@ -1649,6 +1649,21 @@ async fn handle_key(
             app.set_region(Region::ContentLeft);
             return false;
         }
+        // `B` is the dedicated "back to launcher" shortcut. Esc from a
+        // content region can be claimed by the focused sub-screen
+        // (Files = go up a folder, etc.), so users need an explicit,
+        // unambiguous way to leave content for the launcher. From the
+        // launcher itself, B is a no-op.
+        Char('b') | Char('B')
+            if matches!(app.region, Region::ContentLeft | Region::ContentRight) =>
+        {
+            app.set_region(Region::Sidebar);
+            return false;
+        }
+        Char('b') | Char('B') if app.region == Region::Sidebar => {
+            // Already at the launcher — no-op.
+            return false;
+        }
         // Numeric jump (1..=9, then 0 ⇒ index 9) — pin to the launcher's
         // visible cursor as well so it lines up with the arrow keys.
         Char(c) if app.region == Region::Sidebar && matches!(c, '0'..='9') && !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -4270,6 +4285,46 @@ mod tests {
             std::path::PathBuf::from("/"),
             "cwd should be unchanged when Esc is a no-op"
         );
+    }
+
+    #[tokio::test]
+    async fn b_in_content_moves_to_launcher() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.set_region(Region::ContentLeft);
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(
+            app.region,
+            Region::Sidebar,
+            "B from ContentLeft should move focus to launcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn b_in_sidebar_is_noop() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.set_region(Region::Sidebar);
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(app.region, Region::Sidebar, "B in sidebar is a no-op");
     }
 
     #[tokio::test]
