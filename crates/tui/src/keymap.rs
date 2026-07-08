@@ -1,5 +1,11 @@
 //! User-editable keymap: maps physical `KeyEvent`s onto canonical
 //! `NavAction`s the rest of the TUI binds against.
+//!
+//! NOTE: this is distinct from `wm::keymap`, which is the
+//! hardware-button shim that rewrites X/Y/A/B → Up/Down/Enter/Esc
+//! on the uconsole. The two layers stack: the hardware shim runs
+//! first (in `main::handle_key`), then this user map is applied.
+//! See `wm::keymap` for the env-var-selected profile system.
 
 use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -71,18 +77,28 @@ impl NavAction {
 
 /// User-editable keymap. Empty by default (= identity: every action
 /// uses its built-in `KeyEvent`). Each entry maps a `NavAction` to a
-/// specific `KeyEvent` the user pressed. Stored in `prefs.json` as a
-/// `{"up": {"code": "Up", "modifiers": []}, ...}` object; missing
-/// fields are read as "use default".
+/// specific `KeyEvent` the user pressed.
+///
+/// On-disk shape (via `#[serde(flatten)]` on the inner `HashMap`):
+/// ```json
+/// {
+///   "up":   { "code": "Up",                 "modifiers": "",        "kind": "Press", "state": "" },
+///   "down": { "code": { "Char": "j" },      "modifiers": "",        "kind": "Press", "state": "" }
+/// }
+/// ```
+/// Crossterm uses external tagging for `KeyCode` (bare strings for
+/// unit variants, `{"Char": "r"}` for tuple variants) and a
+/// bitflags-string for `KeyModifiers` (`"CONTROL"`, `""`, etc.).
+/// Round-trip is lossless; the shape is intentionally verbose so
+/// hand-edits are obvious in `git diff`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Keymap {
     #[serde(flatten)]
-    pub bindings: HashMap<NavAction, KeyEvent>,
+    pub(crate) bindings: HashMap<NavAction, KeyEvent>,
 }
 
-/// Serialise a `KeyEvent` as the short string the Settings UI shows
-/// (e.g. "↑", "Ctrl+R", "Enter"). Also used when reading from
-/// `prefs.json`: missing fields are silently dropped.
+/// Render a `KeyEvent` as the short string the Settings UI shows
+/// (e.g. "↑", "Ctrl+r", "Enter").
 pub fn key_event_label(k: KeyEvent) -> String {
     let mut s = String::new();
     if k.modifiers.contains(KeyModifiers::CONTROL) { s.push_str("Ctrl+"); }
@@ -109,16 +125,62 @@ fn key_code_label(c: KeyCode) -> String {
     }
 }
 
-/// Apply the user map. Returns the *canonical* `NavAction` the key
-/// maps to, or `None` if the key is not remapped by the user (in which
-/// case the caller should pass the original `KeyEvent` through to the
-/// existing dispatch). The function is pure and side-effect-free.
+/// Returns the `NavAction` the key is mapped to under the user map,
+/// or `None` if no user binding exists. The caller is expected to
+/// translate a `Some(action)` into a `KeyEvent` matching the action's
+/// built-in default (Up/Down/Enter/Char('q')/etc.) so the rest of the
+/// TUI keeps matching against the same `KeyCode` it's always matched
+/// against. The function is pure and side-effect-free.
 pub fn resolve_keymap(key: KeyEvent, map: &Keymap) -> Option<NavAction> {
     // Reverse lookup: which NavAction has bound `key`?
     map.bindings
         .iter()
         .find(|(_, v)| **v == key)
         .map(|(k, _)| *k)
+}
+
+impl Keymap {
+    /// Bind `action` to `key`. Overwrites any previous binding for
+    /// `action`. Does *not* enforce conflict-freeness (a single key
+    /// bound to two actions) — that lives at the call site (the
+    /// `Action::KeymapCmd` dispatcher arm) so the user gets a toast
+    /// instead of a silent overwrite.
+    pub fn bind(&mut self, action: NavAction, key: KeyEvent) {
+        self.bindings.insert(action, key);
+    }
+
+    /// Drop the binding for `action`, if any. No-op when unbound.
+    pub fn unbind(&mut self, action: NavAction) {
+        self.bindings.remove(&action);
+    }
+
+    /// The current binding for `action`, if any.
+    pub fn get(&self, action: NavAction) -> Option<KeyEvent> {
+        self.bindings.get(&action).copied()
+    }
+
+    /// True if `key` is already bound to some action in this map.
+    /// Used for conflict detection at capture time.
+    pub fn is_key_taken(&self, key: KeyEvent) -> bool {
+        self.bindings.values().any(|v| *v == key)
+    }
+
+    /// Iterator over `(action, key)` pairs in the map. Order is
+    /// unspecified (HashMap iteration).
+    pub fn iter(&self) -> impl Iterator<Item = (NavAction, KeyEvent)> + '_ {
+        self.bindings.iter().map(|(k, v)| (*k, *v))
+    }
+
+    /// Number of active bindings.
+    pub fn len(&self) -> usize {
+        self.bindings.len()
+    }
+
+    /// True when no user overrides are set (= the TUI uses every
+    /// action's built-in default).
+    pub fn is_empty(&self) -> bool {
+        self.bindings.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -171,13 +233,54 @@ mod tests {
     fn all_nav_action_variants_have_labels() {
         // Pin the set: every variant must be listed in `ALL` *and* have
         // a label. This is what keeps the Settings screen from blanking
-        // out when we add a new action in the future.
-        for a in [NavAction::Up, NavAction::Down, NavAction::Left, NavAction::Right,
-                  NavAction::Enter, NavAction::Esc, NavAction::Tab, NavAction::BackTab,
-                  NavAction::NextScreen, NavAction::PrevScreen, NavAction::Refresh,
-                  NavAction::Help, NavAction::Palette, NavAction::Quit] {
-            assert!(!NavAction::ALL.contains(&a) || !a.label().is_empty(),
-                    "{a:?} missing label or not in ALL");
+        // out when we add a new action in the future. We iterate
+        // explicitly over every variant so a future variant that isn't
+        // added to `ALL` still fails this test.
+        let all = [
+            NavAction::Up, NavAction::Down, NavAction::Left, NavAction::Right,
+            NavAction::Enter, NavAction::Esc, NavAction::Tab, NavAction::BackTab,
+            NavAction::NextScreen, NavAction::PrevScreen, NavAction::Refresh,
+            NavAction::Help, NavAction::Palette, NavAction::Quit,
+        ];
+        // 1. `ALL` must contain every variant we know about.
+        for a in all {
+            assert!(NavAction::ALL.contains(&a), "{a:?} missing from NavAction::ALL");
+            assert!(!a.label().is_empty(), "{a:?} has empty label");
         }
+        // 2. `ALL` must not contain duplicates (the `Set` is also the
+        // canonical display order — duplicates would render twice).
+        let mut sorted = NavAction::ALL.to_vec();
+        sorted.sort_by_key(|n| format!("{:?}", n));
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(sorted.len(), before, "NavAction::ALL contains duplicates");
+    }
+
+    #[test]
+    fn accessors_round_trip() {
+        let mut map = Keymap::default();
+        assert!(map.is_empty());
+        assert_eq!(map.len(), 0);
+
+        map.bind(NavAction::Down, k(KeyCode::Char('j')));
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(NavAction::Down), Some(k(KeyCode::Char('j'))));
+        assert!(!map.is_empty());
+        assert!(map.is_key_taken(k(KeyCode::Char('j'))));
+        assert!(!map.is_key_taken(k(KeyCode::Char('k'))));
+
+        // Overwrite.
+        map.bind(NavAction::Down, k(KeyCode::Char('s')));
+        assert_eq!(map.get(NavAction::Down), Some(k(KeyCode::Char('s'))));
+        assert_eq!(map.len(), 1, "overwrite must not grow the map");
+
+        // iter visits the binding.
+        let collected: Vec<_> = map.iter().collect();
+        assert_eq!(collected, vec![(NavAction::Down, k(KeyCode::Char('s')))]);
+
+        // unbind.
+        map.unbind(NavAction::Down);
+        assert!(map.is_empty());
+        assert_eq!(map.get(NavAction::Down), None);
     }
 }
