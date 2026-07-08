@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::keymap::Keymap;
 use crate::theme::ThemeName;
 
 /// Imperial vs Metric for weather display. Stored as a kebab-case string
@@ -89,6 +90,12 @@ pub struct Prefs {
     /// screen. Toggled with `w`.
     #[serde(default = "default_true")]
     pub show_weather_panel: bool,
+
+    /// User-editable key remapping (Settings → Keys). `Keymap::default()`
+    /// is empty (= identity: every action uses its built-in binding).
+    /// Older prefs files without this field load as empty.
+    #[serde(default)]
+    pub keymap: Keymap,
 }
 
 fn default_true() -> bool {
@@ -107,6 +114,7 @@ impl Default for Prefs {
             units: Units::Metric,
             traffic_overlay: true,
             show_weather_panel: true,
+            keymap: Keymap::default(),
         }
     }
 }
@@ -209,6 +217,7 @@ mod tests {
 
     #[test]
     fn round_trip_preserves_all_fields() {
+        use crate::keymap::Keymap;
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("prefs.json");
 
@@ -222,6 +231,7 @@ mod tests {
             units: Units::Imperial,
             traffic_overlay: false,
             show_weather_panel: false,
+            keymap: Keymap::default(),
         };
         original.save_to(&path).expect("save");
         let loaded = Prefs::load_from(&path);
@@ -234,6 +244,48 @@ mod tests {
         assert_eq!(loaded.units, original.units);
         assert_eq!(loaded.traffic_overlay, original.traffic_overlay);
         assert_eq!(loaded.show_weather_panel, original.show_weather_panel);
+        assert_eq!(loaded.keymap, original.keymap);
+    }
+
+    #[test]
+    fn round_trip_preserves_keymap_bindings() {
+        use crate::keymap::{Keymap, NavAction};
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("prefs.json");
+        let mut km = Keymap::default();
+        km.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        km.bind(NavAction::Up,   KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+        let original = Prefs {
+            theme: ThemeName::Dark,
+            mouse: false,
+            nerd_font: true,
+            web_server_on_start: false,
+            web_bind: None,
+            city: None,
+            units: Units::Metric,
+            traffic_overlay: true,
+            show_weather_panel: true,
+            keymap: km,
+        };
+        original.save_to(&path).expect("save");
+        let loaded = Prefs::load_from(&path);
+        assert_eq!(loaded.keymap.get(NavAction::Down),
+                   Some(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)));
+        assert_eq!(loaded.keymap.get(NavAction::Up),
+                   Some(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn partial_file_fills_default_keymap() {
+        // An older prefs file (pre-keymap) has no `keymap` field. It must
+        // load as an empty Keymap — not fail the whole parse.
+        use crate::keymap::Keymap;
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("prefs.json");
+        fs::write(&path, r#"{ "theme": "dark" }"#).unwrap();
+        let loaded = Prefs::load_from(&path);
+        assert!(loaded.keymap.is_empty(), "missing keymap field should default to empty");
     }
 
     #[test]

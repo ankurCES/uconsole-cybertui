@@ -16,7 +16,7 @@
 // up the full ratatui event loop. We re-export them here for the
 // binary so the rest of `main.rs` doesn't have to change.
 #[allow(unused_imports)]
-use cyberdeck_tui::{app, screens, theme, ui, util, wm};
+use cyberdeck_tui::{app, keymap, screens, theme, ui, util, wm};
 #[cfg(feature = "web")]
 #[allow(unused_imports)]
 use cyberdeck_tui::web_bridge;
@@ -1075,6 +1075,16 @@ async fn commit_launcher(app: &mut App) -> bool {
     false
 }
 
+/// True for any key event that represents a "real" key the user
+/// intended to bind (i.e. anything other than a bare modifier press,
+/// which on some terminals arrives as `KeyCode::Modifier(_)` while the
+/// user is still composing a chord). The capture loop in `handle_key`
+/// uses this to keep waiting on modifier-only events instead of
+/// silently storing "Shift" as a binding.
+fn is_captureable(k: &KeyEvent) -> bool {
+    !matches!(k.code, KeyCode::Modifier(_))
+}
+
 async fn handle_key(
     screens: &mut [Box<dyn Screen>],
     app: &mut App,
@@ -1082,6 +1092,48 @@ async fn handle_key(
     key: KeyEvent,
 ) -> bool {
     use KeyCode::*;
+
+    // User keymap capture loop. When the user enters capture mode on
+    // the Settings → Keys screen, the next non-modifier event is
+    // consumed here: stored as a binding, persisted, and the capture
+    // target is cleared. The event is *not* propagated to any other
+    // handler (modal/global/screen). Runs before the hardware shim so
+    // the user can bind any physical key, including one the shim would
+    // rewrite (e.g. uconsole X/Y/A/B → Up/Down/Enter/Esc).
+    if let Some(action) = app.keymap_capture {
+        if is_captureable(&key) {
+            // Conflict check: a single physical key can be bound to
+            // at most one NavAction. Reject duplicates with a toast
+            // and keep capture armed so the user can try again.
+            // `bindings` is `pub(crate)` and the binary crate is a
+            // separate compilation unit, so we scan via the public
+            // `iter()` accessor (see the matching comment on
+            // `Action::KeymapCmd(K::Clear)`).
+            let conflict = app.keymap.iter().find(|(_, v)| *v == key).map(|(k, _)| k);
+            if let Some(other) = conflict {
+                app.push_toast(ToastKind::Warn,
+                    format!("{:?} already bound to {} — pick a different key", key, other.label()));
+            } else {
+                app.keymap.bind(action, key);
+                app.save_prefs();
+                app.push_toast(ToastKind::Info,
+                    format!("{} → {}", action.label(), keymap::key_event_label(key)));
+                app.keymap_capture = None;
+            }
+            return false; // consumed
+        }
+        // Modifier-only press (Ctrl, Shift, Alt) — ignore and keep
+        // waiting for a real key.
+        if matches!(key.code, KeyCode::Modifier(_)) {
+            return false;
+        }
+        // Real key but the user wants to abort the capture (Esc).
+        if matches!(key.code, KeyCode::Esc) {
+            app.keymap_capture = None;
+            app.push_toast(ToastKind::Info, "capture cancelled".to_string());
+            return false;
+        }
+    }
 
     // Hardware-button remap. Runs first so the rest of the handler
     // (modal dispatch, global keys, screen on_key) sees a normal
@@ -1093,6 +1145,30 @@ async fn handle_key(
         // specific keys (e.g. a tablet profile that ignores the
         // volume buttons). Today every profile returns `Some`.
         None => return false,
+    };
+
+    // User keymap: if the user has rebound the pressed key to a
+    // canonical NavAction, rewrite the KeyCode to the built-in
+    // default *for that action* (Up/Down/Enter/etc.) so the rest of
+    // the handler — modal dispatch, global keys, screen on_key —
+    // keeps matching against the same KeyCode it's always matched
+    // against. Modifiers are preserved. See `keymap.rs`.
+    let key = match crate::keymap::resolve_keymap(key, &app.keymap) {
+        Some(crate::keymap::NavAction::Up)        => KeyEvent::new(KeyCode::Up,        key.modifiers),
+        Some(crate::keymap::NavAction::Down)      => KeyEvent::new(KeyCode::Down,      key.modifiers),
+        Some(crate::keymap::NavAction::Left)      => KeyEvent::new(KeyCode::Left,      key.modifiers),
+        Some(crate::keymap::NavAction::Right)     => KeyEvent::new(KeyCode::Right,     key.modifiers),
+        Some(crate::keymap::NavAction::Enter)     => KeyEvent::new(KeyCode::Enter,     key.modifiers),
+        Some(crate::keymap::NavAction::Esc)       => KeyEvent::new(KeyCode::Esc,       key.modifiers),
+        Some(crate::keymap::NavAction::Tab)       => KeyEvent::new(KeyCode::Tab,       key.modifiers),
+        Some(crate::keymap::NavAction::BackTab)   => KeyEvent::new(KeyCode::BackTab,   key.modifiers),
+        Some(crate::keymap::NavAction::NextScreen)=> KeyEvent::new(KeyCode::Tab,       key.modifiers),
+        Some(crate::keymap::NavAction::PrevScreen)=> KeyEvent::new(KeyCode::BackTab,   key.modifiers),
+        Some(crate::keymap::NavAction::Refresh)   => KeyEvent::new(KeyCode::Char('r'), key.modifiers),
+        Some(crate::keymap::NavAction::Help)      => KeyEvent::new(KeyCode::Char('?'), key.modifiers),
+        Some(crate::keymap::NavAction::Palette)   => KeyEvent::new(KeyCode::Char(':'), key.modifiers),
+        Some(crate::keymap::NavAction::Quit)      => KeyEvent::new(KeyCode::Char('q'), key.modifiers),
+        None => key,
     };
 
     // Modal handling first.
@@ -1800,6 +1876,16 @@ async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind
             app.discard_editor();
             return;
         }
+        // Resetting the user keymap is a pure in-memory reset + prefs
+        // write on App, same shape as Discard above. Mirrors that
+        // arm's early-return pattern.
+        ConfirmKind::KeymapReset => {
+            let _ = arg;
+            app.keymap = crate::keymap::Keymap::default();
+            app.save_prefs();
+            app.push_toast(ToastKind::Info, "keymap reset to defaults".to_string());
+            return;
+        }
     };
     let _ = tx.send(Action::Run(act)).await;
 }
@@ -2351,9 +2437,66 @@ async fn handle_action(
                         if app.show_weather_panel { "on" } else { "off" }
                     ))
                 }
+                Keymap => {
+                    // Enter the user-keymap editing sub-mode. We don't
+                    // toggle the flag here — this is a *mode-entry* action,
+                    // not a boolean flip. The sub-mode itself clears the
+                    // flag on exit (Esc / q) so the user lands back on
+                    // the normal Settings list. The menu close mirrors
+                    // what the keymap capture arm does, so the sub-mode
+                    // doesn't draw a stale dropdown over the Keys table.
+                    app.keymap_editing = true;
+                    app.menu.close();
+                    Some("keys: editing".to_string())
+                }
             };
             if let Some(msg) = confirm {
                 app.push_toast(ToastKind::Info, msg);
+            }
+        }
+        Action::KeymapCmd(cmd) => {
+            use crate::keymap::KeymapCmd as K;
+            match cmd {
+                K::BeginCapture(action) => {
+                    // Mark the sub-mode as capturing for `action`. The next
+                    // keypress that reaches `handle_key` while this flag is
+                    // set is consumed and turned into a `KeymapCmd::CaptureKey`
+                    // by the dispatcher.
+                    app.keymap_capture = Some(action);
+                    // Clear the menu so the row stays visible.
+                    app.menu.close();
+                }
+                K::CaptureKey => {
+                    // No-op: the actual capture happened in handle_key
+                    // (which intercepted the key, set the binding, and
+                    // returned false). Reaching here means the user
+                    // pressed something we already handled — ignore.
+                }
+                K::Clear(action) => {
+                    // `app.keymap.bindings` is `pub(crate)`, but the binary
+                    // crate's `main.rs` is treated as a separate compilation
+                    // unit for visibility purposes, so we route through the
+                    // library's `unbind` method instead.
+                    app.keymap.unbind(action);
+                    app.save_prefs();
+                    app.push_toast(ToastKind::Info,
+                        format!("cleared binding for {}", action.label()));
+                }
+                K::ResetAll => {
+                    // Don't wipe unilaterally — confirm first. The actual
+                    // `Keymap::default()` swap lives in `run_confirm`'s
+                    // `ConfirmKind::KeymapReset` arm so the user gets
+                    // the same confirm-modal UX as Reboot/Shutdown/etc.
+                    app.modal = Modal::Confirm {
+                        message: "Reset all key bindings to defaults?".to_string(),
+                        kind: crate::app::ConfirmKind::KeymapReset,
+                        arg: String::new(),
+                    };
+                }
+                K::ExitMode => {
+                    app.keymap_capture = None;
+                    app.keymap_editing = false;
+                }
             }
         }
         Action::Run(act) => {
@@ -3247,6 +3390,78 @@ mod tests {
             app.launcher_offset, 5,
             "number-key commit advances cursor one tile"
         );
+    }
+
+    #[tokio::test]
+    async fn keymap_remap_routes_user_key_to_canonical() {
+        use crate::keymap::NavAction;
+        // make_app() is the existing test helper in this mod; it returns
+        // (tx, rx, app) and routes the dispatcher's actions through `tx`.
+        let (_tx, _rx, mut app) = make_app();
+        // Move focus to the sidebar so the Down arm in handle_key actually
+        // runs (it gates on `app.region == Region::Sidebar`).
+        app.set_region(crate::app::Region::Sidebar);
+        let initial = app.launcher_offset;
+        // User rebinds "go down" from KeyCode::Down to Char('s'). The rest
+        // of the TUI keeps matching against KeyCode::Down — we rewrite
+        // the keycode in handle_key so the user gets the same effect.
+        app.keymap.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        let _ = handle_key(&mut [], &mut app, &tokio::sync::mpsc::channel::<Action>(1).0,
+                           KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        // Side-effect assertion: pressing 's' should have moved the
+        // sidebar launcher cursor down (Down | Char('j') handler). We
+        // check `app.launcher_offset` because that's the field every
+        // existing sidebar-navigation test already asserts on.
+        assert_eq!(app.launcher_offset, initial + 1,
+                   "user-bound key 's' must move cursor down via the Down arm");
+    }
+
+    #[tokio::test]
+    async fn keymap_capture_stores_binding_and_persists() {
+        use crate::keymap::NavAction;
+        use crossterm::event::KeyCode;
+        use std::path::PathBuf;
+        // Point prefs at a temp file BEFORE App::new so the prefs loader
+        // (and the subsequent save_prefs call) writes into the sandbox
+        // instead of clobbering the developer's real prefs.
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
+        let mut app = crate::app::App::new(tx, rx);
+        app.keymap_capture = Some(NavAction::Down);
+        let _ = handle_key(&mut [], &mut app,
+            &tokio::sync::mpsc::channel::<Action>(1).0,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+
+        assert_eq!(app.keymap.get(NavAction::Down),
+                   Some(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
+        assert!(app.keymap_capture.is_none(), "capture must clear after success");
+
+        // Verify the binding landed on disk.
+        let prefs_path: PathBuf = dir.path().join("cyberdeck").join("prefs.json");
+        let raw = std::fs::read_to_string(&prefs_path).expect("prefs.json written");
+        assert!(raw.contains("\"down\""), "down binding not in prefs: {raw}");
+        assert!(raw.contains("\"Char\""), "expected KeyCode::Char in prefs: {raw}");
+        assert!(raw.contains("\"s\""), "expected 's' in prefs: {raw}");
+    }
+
+    #[tokio::test]
+    async fn keymap_capture_rejects_conflict() {
+        use crate::keymap::NavAction;
+        let (_tx, _rx, mut app) = make_app();
+        // 'j' is already bound to Down — pressing it for Up should be rejected.
+        app.keymap.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.keymap_capture = Some(NavAction::Up);
+        let _ = handle_key(&mut [], &mut app,
+            &tokio::sync::mpsc::channel::<Action>(1).0,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        // Capture must still be armed (user needs another chance to pick).
+        assert_eq!(app.keymap_capture, Some(NavAction::Up),
+                   "conflict should keep capture armed");
+        // Up must NOT have been rebound to 'j'.
+        assert!(app.keymap.get(NavAction::Up).is_none(),
+                "conflict must not store a new binding");
     }
 
     #[test]
@@ -4304,5 +4519,87 @@ mod tests {
         }
         let _ = std::fs::remove_dir(&empty);
         assert_eq!(result, "");
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings → Keys sub-mode render polish (Task 10).
+    //
+    // These render tests exercise the sub-mode block at the same widths the
+    // plan called out (80 / 100 / 120 / 140 cols × 32 rows) and assert that
+    // the " Keys " title is painted. A regression that strips the title (or
+    // panics inside the renderer at a narrow width) trips these.
+    // -----------------------------------------------------------------------
+
+    fn render_settings_keymap_text(app: &mut App, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::by_name(crate::theme::ThemeName::Dark);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let mut screen = screens::settings::SettingsScreen;
+                screen.render(f, area, app, &theme, true);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut rows: Vec<String> = Vec::with_capacity(buffer.area.height as usize);
+        for y in 0..buffer.area.height {
+            let mut row = String::with_capacity(buffer.area.width as usize);
+            for x in 0..buffer.area.width {
+                row.push(buffer[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            rows.push(row);
+        }
+        rows.join("\n")
+    }
+
+    fn app_with_keymap_submode() -> App {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.current = ScreenId::Settings;
+        app.keymap_editing = true;
+        app
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_80x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 80, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_100x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 100, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title at 100 cols; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_120x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 120, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title at 120 cols; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_140x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 140, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title at 140 cols; got:\n{text}"
+        );
     }
 }

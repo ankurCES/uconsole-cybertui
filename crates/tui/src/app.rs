@@ -35,6 +35,8 @@ use ratatui::text::Line;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::interval;
 
+use crate::keymap::{Keymap, NavAction};
+
 pub use action::Action;
 pub use screen::ScreenId;
 pub use toast::{Toast, ToastKind};
@@ -155,6 +157,8 @@ pub enum ConfirmKind {
     /// human-readable string so the dialog can show "Discard
     /// unsaved changes to {path}?".
     Discard,
+    /// Reset all user keymap bindings to defaults.
+    KeymapReset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -851,6 +855,24 @@ pub struct App {
     /// Whether the City screen's right-hand weather panel is visible.
     /// Toggled with `w` on the City screen and surfaced in Settings.
     pub show_weather_panel: bool,
+    /// Active user keymap (Settings → Keys). Always populated from
+    /// `Prefs::keymap` at `App::new`; an empty map means "use the
+    /// built-in bindings". Mutated by the `Action::KeymapCmd` arm of the
+    /// dispatcher; persisted via `App::save_prefs`.
+    pub keymap: Keymap,
+    /// True while the user is in the Settings → Keys sub-mode. The
+    /// Settings screen renders a different layout when this is set and
+    /// routes keypresses into `Action::KeymapCmd` instead of the normal
+    /// dispatch.
+    pub keymap_editing: bool,
+    /// The action currently being captured, if any. The dispatcher's
+    /// `handle_key` consumes the next non-modifier event and writes
+    /// it into `app.keymap.bindings[action]`, then clears this.
+    pub keymap_capture: Option<NavAction>,
+    /// Cursor index in the Settings → Keys sub-mode list (0 = Up,
+    /// `NavAction::ALL.len() - 1` = Quit). Tracks the row the user
+    /// is currently inspecting / about to capture / clear.
+    pub keymap_selected: usize,
     /// Last-known city the user picked via the City screen's `c` modal
     /// (or `None` if they haven't overridden the IP-geolocated default).
     pub city_override: Option<String>,
@@ -1142,6 +1164,10 @@ impl App {
             units: prefs.units,
             traffic_overlay: prefs.traffic_overlay,
             show_weather_panel: prefs.show_weather_panel,
+            keymap: prefs.keymap,
+            keymap_editing: false,
+            keymap_capture: None,
+            keymap_selected: 0,
             city_override: prefs.city,
             show_help: false,
             running: true,
@@ -1338,6 +1364,7 @@ impl App {
             units: self.units,
             traffic_overlay: self.traffic_overlay,
             show_weather_panel: self.show_weather_panel,
+            keymap: self.keymap.clone(),
         };
         prefs.save();
     }
