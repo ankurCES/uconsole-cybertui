@@ -154,14 +154,112 @@ pub fn header_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     vec![Line::from(spans)]
 }
 
+/// Cyberdeck console header — single row of live status icons + clock.
+/// Replaces the previous 2-row header that crammed every value in.
+/// The icons are always glyphs so a glance reads as a console HUD, not
+/// a wall of text. Right side shows the clock.
 pub fn draw_header(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    let p = Paragraph::new(header_lines(app, theme))
-        .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg))
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM)
-                .border_style(theme.border(false)),
-        );
+    let g = glyphs();
+    let dark = Theme::by_name(crate::theme::ThemeName::Dark);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    // Brand mark on the far left.
+    spans.push(Span::styled(
+        " ▸ CYBERDECK ",
+        ratatui::style::Style::default()
+            .fg(theme.accent)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    ));
+    // Live status icons. Each glyph = "this is wired up and healthy";
+    // a dim placeholder = "no data yet".
+    if let Ok(ssid) = app.live.active_ssid.try_read() {
+        spans.push(Span::styled(
+            format!(" {} ", ssid.as_deref().unwrap_or("—")),
+            theme.fg,
+        ));
+    } else {
+        spans.push(Span::styled(format!(" {} — ", g.wifi), theme.dim));
+    }
+    if let Ok(ifaces) = app.live.interfaces.try_read() {
+        if let Some(primary) = ifaces.iter().find(|i| !i.ipv4.is_empty()) {
+            spans.push(Span::styled(
+                format!(" {} {} ", g.net, primary.ipv4.first().cloned().unwrap_or_default()),
+                theme.fg,
+            ));
+        } else {
+            spans.push(Span::styled(format!(" {} — ", g.net), theme.dim));
+        }
+    }
+    if let Ok(b) = app.live.battery.try_read() {
+        if let Some(bat) = b.as_ref() {
+            spans.push(Span::styled(
+                format!(" {} {}% ", g.bat, bat.capacity),
+                theme.fg,
+            ));
+        }
+    } else {
+        spans.push(Span::styled(format!(" {} — ", g.bat), theme.dim));
+    }
+    if let Ok(th) = app.live.thermals.try_read() {
+        if let Some(t) = th.first() {
+            spans.push(Span::styled(
+                format!(" {} {:.0}°C ", g.temp, t.temp_c),
+                theme.fg,
+            ));
+        }
+    }
+    // Sparkline chip — keeps the header lively with a 1-character of
+    // net-history info. The same Module 5.4 sparkline math; just
+    // single-glyph so it fits the 1-row header.
+    {
+        let iface = pick_active_iface_name(app);
+        let samples: Vec<u64> = app
+            .net_history
+            .get(&iface)
+            .map(|(rx_ring, _)| {
+                rx_ring
+                    .as_slice_chrono()
+                    .into_iter()
+                    .rev()
+                    .take(8)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ribbon = if samples.is_empty() {
+            "────────".to_string()
+        } else {
+            sparkline(&samples)
+        };
+        spans.push(Span::styled(
+            format!(" ↓{} ", ribbon),
+            ratatui::style::Style::default().fg(theme.accent),
+        ));
+    }
+    if let Ok(enabled) = app.live.web_enabled.try_read() {
+        if *enabled {
+            if let Ok(url) = app.live.web_url.try_read() {
+                if let Some(u) = url.as_ref() {
+                    spans.push(Span::styled(
+                        format!(" web:{u} "),
+                        ratatui::style::Style::default().fg(dark.accent_2),
+                    ));
+                }
+            }
+        }
+    }
+    // Clock on the far right.
+    spans.push(Span::styled("  ", theme.dim));
+    spans.push(Span::styled(
+        app.clock.format("%H:%M:%S").to_string(),
+        ratatui::style::Style::default()
+            .fg(theme.accent)
+            .add_modifier(ratatui::style::Modifier::BOLD),
+    ));
+    let line = Line::from(spans);
+    let p = Paragraph::new(line)
+        .style(ratatui::style::Style::default().fg(theme.fg).bg(theme.bg));
     f.render_widget(p, area);
 }
 
@@ -607,9 +705,226 @@ pub fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(p, area);
 }
 
-pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    if app.toasts.is_empty() {
+/// Cyberdeck launcher — a 4×4 (or 2×8 on narrow terminals) grid of/// Cyberdeck launcher — a 4×4 (or 2×8 on narrow terminals) grid of
+/// the visible screens. Replaces the previous list-rail sidebar.
+/// Each tile shows the screen's glyph + number + label. The
+/// currently selected tile gets an accent border; the screen
+/// the user is *inside* (when focus is in `Region::Content`) also
+/// gets a fill. The launcher is the hub: B/Esc returns to it
+/// from any screen.
+pub fn draw_launcher(
+    f: &mut Frame,
+    area: Rect,
+    app: &mut App,
+    screens: &[Box<dyn crate::app::screen::Screen>],
+    theme: &Theme,
+) {
+    use crate::app::screen::ScreenId;
+    let cols: u16 = if area.width >= 64 { 4 } else { 2 };
+    // Build a stable, hidden-skipping list of (abs_idx, id, glyph, label).
+    // `abs_idx` is the position in ScreenId::ALL — important so launching
+    // from the tile selects the right screen, not the Nth visible one.
+    let entries: Vec<(usize, ScreenId, &'static str, &'static str)> =
+        ScreenId::ALL
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, id)| {
+                let slot = screens.get(idx);
+                if let Some(s) = slot {
+                    if s.is_hidden(app) {
+                        return None;
+                    }
+                } else if *id == ScreenId::Editor {
+                    // Editor has no registry slot; filter explicitly.
+                    return None;
+                }
+                Some((idx, *id, id.glyph(), id.label()))
+            })
+            .collect();
+    if entries.is_empty() {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(theme.border(false))
+            .title(Span::styled(" launcher ", theme.title()));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled("(no screens visible)", theme.dim)))
+                .alignment(ratatui::layout::Alignment::Center),
+            inner,
+        );
         return;
+    }
+    if app.launcher_offset >= entries.len() {
+        app.launcher_offset = entries.len() - 1;
+    }
+    let selected = app.launcher_offset;
+    let rows: u16 = (entries.len() as u16 + cols - 1) / cols;
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(
+                " ◤ launcher — ",
+                ratatui::style::Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} screens · focus here to navigate", entries.len()),
+                theme.dim,
+            ),
+            Span::styled(" ◟ ", theme.dim),
+        ]))
+        .style(ratatui::style::Style::default().bg(theme.bg).fg(theme.fg)),
+        area,
+    );
+    // Leave 1 row top + 1 row bottom for the chrome strips.
+    let tile_area = Rect::new(
+        area.x,
+        area.y + 1,
+        area.width,
+        area.height.saturating_sub(2),
+    );
+    if rows == 0 || tile_area.height == 0 {
+        return;
+    }
+    let tile_w = (tile_area.width / cols).max(8);
+    let tile_h = (tile_area.height / rows.max(1)).max(3);
+    for (i, (abs_idx, sid, glyph, title)) in entries.iter().enumerate() {
+        let row = i as u16 / cols;
+        let col = i as u16 % cols;
+        let x = tile_area.x + col * tile_w;
+        let y = tile_area.y + row * tile_h;
+        if y + tile_h > tile_area.y + tile_area.height {
+            break;
+        }
+        let cell = Rect::new(x, y, tile_w, tile_h);
+        let is_cursor = i == selected;
+        let is_current = *sid == app.current && app.region != Region::Sidebar;
+        let tile_bg = if is_cursor { theme.selection_bg } else { theme.bg };
+        let border = if is_cursor {
+            ratatui::style::Style::default()
+                .fg(theme.accent)
+                .add_modifier(ratatui::style::Modifier::BOLD)
+        } else if is_current {
+            ratatui::style::Style::default().fg(theme.accent)
+        } else {
+            theme.border(false)
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(border)
+            .style(ratatui::style::Style::default().bg(tile_bg));
+        let inner = block.inner(cell);
+        f.render_widget(block, cell);
+        let glyph_str = if is_cursor {
+            format!("[{}]", glyph)
+        } else {
+            format!(" {} ", glyph)
+        };
+        let mut label = title.to_string();
+        if label.len() as u16 > inner.width.saturating_sub(2) {
+            label = label
+                .chars()
+                .take(inner.width.saturating_sub(2) as usize)
+                .collect::<String>();
+            label.push('…');
+        }
+        let num = format!("#{:02}", abs_idx + 1);
+        let top_span = if is_cursor || is_current {
+            Span::styled(
+                glyph_str,
+                ratatui::style::Style::default()
+                    .fg(theme.fg)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )
+        } else {
+            Span::styled(glyph_str, theme.fg)
+        };
+        let label_span = if is_current {
+            Span::styled(
+                label,
+                ratatui::style::Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            )
+        } else {
+            Span::styled(label, theme.fg)
+        };
+        let dim_num = Span::styled(num, theme.dim);
+        let lines = if inner.height >= 2 {
+            vec![
+                Line::from(vec![top_span, Span::raw(" "), dim_num])
+                    .alignment(ratatui::layout::Alignment::Center),
+                Line::from(label_span).alignment(ratatui::layout::Alignment::Center),
+            ]
+        } else {
+            vec![Line::from(top_span).alignment(ratatui::layout::Alignment::Center)]
+        };
+        if inner.width > 0 && inner.height > 0 {
+            f.render_widget(
+                Paragraph::new(lines)
+                    .style(ratatui::style::Style::default().bg(tile_bg).fg(theme.fg)),
+                inner,
+            );
+        }
+    }
+    let hint_y = area.y + area.height.saturating_sub(1);
+    let hint_area = Rect::new(area.x, hint_y, area.width, 1);
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" ", theme.dim),
+            Span::styled("↑↓←→", theme.fg),
+            Span::styled(" move  ", theme.dim),
+            Span::styled("A / ↵", theme.fg),
+            Span::styled(" open  ", theme.dim),
+            Span::styled("B / ⎋", theme.fg),
+            Span::styled(" focus  ", theme.dim),
+            Span::styled("Y", theme.fg),
+            Span::styled(" help", theme.dim),
+        ])),
+        hint_area,
+    );
+}
+
+
+/// Button-legend strip — single row at the very bottom of the screen.
+/// Shows the canonical X / Y / A / B button labels. Reads the focused
+/// region so the hint is contextual.
+pub fn draw_button_legend(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    let focused = app.region;
+    let (xb, xa, yr, ya, sb, sa): (&str, &str, &str, &str, &str, &str) = match focused {
+        Region::Sidebar => (
+            "navigate", "[↑↓←→]",
+            "help", "[Y]",
+            "settings", "[Tab]",
+        ),
+        Region::ContentLeft | Region::ContentRight => {
+            let screen_hint = app.current_button_hint.as_deref().unwrap_or("");
+            if !screen_hint.is_empty() {
+                ("select", "[A]", "primary", "[B]", "menu", screen_hint)
+            } else {
+                ("select", "[A]", "back", "[B]", "menu", "[Tab]")
+            }
+        }
+    };
+    let line = Line::from(vec![
+        Span::styled(format!(" ◀ {xb} "), theme.dim),
+        Span::styled(xa, ratatui::style::Style::default().fg(theme.accent).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::styled(format!("   △ {yr} "), theme.dim),
+        Span::styled(ya, ratatui::style::Style::default().fg(theme.accent).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::styled(format!("   ○ {sb} "), theme.dim),
+        Span::styled(sa, ratatui::style::Style::default().fg(theme.accent).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::styled("   ◍ start ", theme.dim),
+        Span::styled("[?]", ratatui::style::Style::default().fg(theme.dim).add_modifier(ratatui::style::Modifier::BOLD)),
+    ]);
+    let p = Paragraph::new(line)
+        .alignment(ratatui::layout::Alignment::Center)
+        .style(ratatui::style::Style::default().bg(theme.bg).fg(theme.fg));
+    f.render_widget(p, area);
+}
+
+pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
+    if app.toasts.is_empty() {        return;
     }
     let w = (area.width as i32 - 4).max(8) as u16;
     let h = app.toasts.len() as u16;
@@ -638,37 +953,23 @@ pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     f.render_widget(list, rect);
 }
 
-pub fn chunks(area: Rect) -> (Rect, Rect, Rect, Rect, Rect) {
-    // Phase 1 — five-row chrome:
-    //   0  header           (2 rows, live values)
-    //   1  menu_bar         (1 row,  File · View · Tools · Help)
-    //   2  tab_strip        (1 row,  one tab per visible screen)
-    //   3  body             (flex,  sidebar rail + content)
-    //   4  status           (2 rows, region hints + clock)
+// Fix #2a — Cyberdeck console layout. Three rows:
+//   * header   (1 row) — live status icons + clock
+//   * body     (flex)  — the launcher grid OR the focused screen
+//   * legend   (1 row) — on-screen button legend (X/Y/A/B + Start/Select)
+// The previous five-row chrome (header/menu_bar/tab_strip/body/status)
+// consumed ~6 rows on a 32-row terminal and made the screen list feel
+// cramped. The new layout gives the body 30+ rows on the same terminal.
+pub fn chunks(area: Rect) -> (Rect, Rect, Rect) {
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
             Constraint::Length(1),
+            Constraint::Min(8),
             Constraint::Length(1),
-            Constraint::Min(10),
-            Constraint::Length(2),
         ])
         .split(area);
-    let sidebar_w: u16 = if area.width >= 60 { 24 } else { 0 };
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(sidebar_w), Constraint::Min(20)])
-        .split(outer[3]);
-    (
-        outer[0],
-        outer[1],
-        outer[2],
-        body[1],
-        outer[4],
-    )
-    // The sidebar rail rect (`body[0]`) is computed but unused here —
-    // main.rs renders the sidebar directly from app.sidebar_visible.
+    (outer[0], outer[1], outer[2])
 }
 
 #[cfg(test)]

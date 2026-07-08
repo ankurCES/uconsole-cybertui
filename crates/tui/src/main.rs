@@ -321,18 +321,34 @@ async fn run_app(
             .checked_sub(last_tick.elapsed())
             .unwrap_or_else(|| Duration::from_millis(0));
 
+        // Fix #1b — coalesce. We drain EVERY queued action before
+        // returning to the outer loop so a burst (e.g. 5 network
+        // samples + a tick + a wifi scan result landing in the same
+        // millisecond) produces ONE redraw, not six. The previous
+        // code did one recv → one redraw per action; on a noisy box
+        // this is the visible "clunky" the user reported.
         tokio::select! {
             // Drain queued actions.
             maybe = app.rx.recv() => {
                 match maybe {
                     Some(action) => {
-                        if handle_action(&mut screens, app, tx, action.clone()).await {
+                        if handle_action(&mut screens, app, tx, action).await {
                             return Ok(());
                         }
-                        redraw = true;
                     }
                     None => return Ok(()),
                 }
+                // Drain anything else already queued. We use
+                // `try_recv` so we never block here — the goal is to
+                // flatten a burst (5 network samples + a tick + a
+                // wifi scan result landing in the same millisecond)
+                // into one frame. Any single drain ends in one redraw.
+                while let Ok(action) = app.rx.try_recv() {
+                    if handle_action(&mut screens, app, tx, action).await {
+                        return Ok(());
+                    }
+                }
+                redraw = true;
             }
             // Poll for terminal input.
             _ = tokio::time::sleep(timeout) => {
@@ -424,62 +440,29 @@ async fn run_app(
 }
 
 fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &Theme) {
-    let (header, menu_bar, tab_strip, content, status) = ui::chunks(f.area());
+    // Fix #2a — Cyberdeck console layout. 3 rows: header / body / legend.
+    let (header, body, legend) = ui::chunks(f.area());
+    // The header is now just live status icons + clock on a single row.
     ui::draw_header(f, header, app, theme);
-    // Region indicator chip: the right ~36 cols of the header. Mirrors
-    // the sidebar focus gutter and the status-bar label so the focused
-    // region is unmistakable from any glance — header, sidebar, status
-    // bar all tell the same story. On a 5" D-pad display this chip is
-    // the single most-glanced indicator of *where* focus is.
-    let chip_w = header.width.min(36);
-    let chip = ratatui::layout::Rect::new(
-        header.x + header.width.saturating_sub(chip_w),
-        header.y,
-        chip_w,
-        header.height,
-    );
-    ui::draw_region_chip(f, chip, app, theme);
-    // Phase 1 — menu bar (1 row). Always rendered.
-    ui::menu_bar::draw(f, menu_bar, app, theme);
-    // Phase 1 — tab strip (1 row). Always rendered; falls back to a
-    // collapsed indicator on narrow terminals.
-    ui::tab_strip::draw(f, tab_strip, app, Some(app.current), theme);
-    // Phase 2 — cache the tab-strip rect so `handle_mouse` can resolve
-    // a click against the same geometry the renderer just used. Set
-    // every frame so any layout shift (resize, sidebar toggle) is
-    // picked up automatically.
-    app.tab_strip_rect = Some(tab_strip);
-    // Phase 2 — clear the city-map rect by default. The City
-    // screen's render fn re-populates it on the same frame; this
-    // branch keeps a stale rect from the previous tab from firing
-    // click-to-pan against the new screen's geometry.
-    if app.current != ScreenId::City {
-        app.city_map_rect = None;
-    }
-    ui::draw_status(f, status, app, theme);
-    // Content area is the remaining space. The optional sidebar rail
-    // (toggled on/off) sits in the leftmost cells of this band so we
-    // don't need a separate Layout split for it.
-    let rail_w: u16 = if app.sidebar_rail {
-        24.min(content.width.saturating_sub(20))
+    // The body hosts the launcher when focus is on it; otherwise it
+    // renders the focused screen. The launcher stays available via B/Esc.
+    if app.region == Region::Sidebar {
+        ui::draw_launcher(f, body, app, &screens[..], theme);
     } else {
-        0
-    };
-    if app.sidebar_rail {
-        let rail = ratatui::layout::Rect::new(content.x, content.y, rail_w, content.height);
-        ui::draw_sidebar(f, rail, app, theme);
+        // The WM render walks the focused pane and paints it. Screens
+        // still own their own borders — same contract as before.
+        wm::render::render(f, body, app, screens, theme);
+        // City-map rect stale-guard — keep the previous behaviour.
+        if app.current != ScreenId::City {
+            app.city_map_rect = None;
+        }
     }
-    let content_inner = rect(
-        content.x + rail_w,
-        content.y,
-        content.width.saturating_sub(rail_w),
-        content.height,
-    );
-    // WM-driven render: walks the split tree, paints each pane into its
-    // rect. The screen's `render` already draws its own border, so we
-    // don't draw into `content_inner` directly here.
-    wm::render::render(f, content_inner, app, screens, theme);
+    // On-screen button legend (always visible). Reads the focused
+    // region so the legend tells the user what X/Y/A/B do *here*.
+    ui::draw_button_legend(f, legend, app, theme);
+    // Toasts float above everything.
     ui::draw_toasts(f, f.area(), app, theme);
+    // Modal overlay last so it sits on top.
     draw_modal(f, f.area(), app, theme);
 }
 
@@ -2385,12 +2368,15 @@ async fn handle_action(
             let _ = value;
         }
         Action::LogPushed(line) => {
-            // The 1Hz refiller (Module 2.2) feeds this arm with journalctl
-            // output from the last 2s; successive ticks overlap, so dedupe
-            // by line text before appending. Cap at 1000 — the UI renders
-            // only the last few hundred anyway, and a tighter cap here
-            // means new entries push old ones out faster.
+            // Single-line path — used by the manual `r` refresh task
+            // and the dispatcher falls through to the batched helper.
             app::dedupe_logs_into(&mut app.logs, vec![line], 1000);
+        }
+        Action::LogLines(lines) => {
+            // Fix #1c — single dedupe + append per refiller pass
+            // (instead of one per line). Cuts redraw frequency on a
+            // busy box from N/sec to 1/sec.
+            app::dedupe_logs_into(&mut app.logs, lines, 1000);
         }
         Action::Refresh(id) => {
             // Trivial: re-render. The background task already produces data.

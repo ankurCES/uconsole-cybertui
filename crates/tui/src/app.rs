@@ -325,27 +325,40 @@ impl Live {
     pub fn spawn_refreshers(self: &Arc<Self>, tx: mpsc::Sender<Action>) {
         // Clone the sender up-front so multiple spawned tasks can each
         // hold their own handle. Tokio's `mpsc::Sender` is `Clone`.
+        // Fix #1a — run all five 1Hz refreshers concurrently with
+        // `tokio::join!`. Previously the calls were sequential so the
+        // total latency of one tick was `sum(calls)` instead of
+        // `max(calls)`. On a busy box the slowest call (`net::interfaces`
+        // or `sys::info`) was the floor — multiple calls back-to-back
+        // could easily stall the dispatcher 200-500ms, which is what the
+        // user was seeing as "clunky" / "laggy".
         let tx_tick = tx.clone();
         let me = self.clone();
         tokio::spawn(async move {
             let mut t = interval(Duration::from_secs(1));
+            // Skip rather than burst-fire on a missed tick — prevents the
+            // refiller from monopolising the channel on a wedged box.
+            t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 t.tick().await;
-                if let Ok(info) = cyberdeck_core::sys::info().await {
-                    *me.info.write().await = info;
-                }
-                if let Ok(b) = cyberdeck_core::power::battery().await {
-                    *me.battery.write().await = Some(b);
-                }
-                if let Ok(th) = cyberdeck_core::sys::thermals().await {
-                    *me.thermals.write().await = th;
-                }
-                if let Ok(ifaces) = cyberdeck_core::net::interfaces().await {
-                    *me.interfaces.write().await = ifaces;
-                }
-                if let Ok(ssid) = cyberdeck_core::net::wifi_active_ssid().await {
-                    *me.active_ssid.write().await = ssid;
-                }
+                // Issue all five concurrently. Each write is on a
+                // different RwLock field so they don't contend.
+                let info_fut = cyberdeck_core::sys::info();
+                let batt_fut = cyberdeck_core::power::battery();
+                let therm_fut = cyberdeck_core::sys::thermals();
+                let iface_fut = cyberdeck_core::net::interfaces();
+                let ssid_fut = cyberdeck_core::net::wifi_active_ssid();
+                let (info, batt, therm, ifaces, ssid) =
+                    tokio::join!(info_fut, batt_fut, therm_fut, iface_fut, ssid_fut);
+                if let Ok(v) = info   { *me.info.write().await      = v; }
+                if let Ok(v) = batt   { *me.battery.write().await   = Some(v); }
+                if let Ok(v) = therm  { *me.thermals.write().await  = v; }
+                if let Ok(v) = ifaces { *me.interfaces.write().await = v; }
+                if let Ok(v) = ssid   { *me.active_ssid.write().await = v; }
+                // The single `Tick` is what the main loop uses to know
+                // "something changed, redraw". We coalesce everything
+                // into one redraw per pass — no need to send a tick
+                // per field.
                 let _ = tx_tick.send(Action::Tick).await;
             }
         });
@@ -384,18 +397,26 @@ impl Live {
                         continue;
                     }
                 };
+                // Fix #1c — collect every entry from this pass into a
+                // single `LogLines` action. The dispatcher dedupes +
+                // appends in one shot and the renderer sees one redraw
+                // per refiller pass, not one per log line.
+                let mut batch: Vec<crate::app::LogLine> = Vec::with_capacity(entries.len());
                 for (ts, message) in entries {
                     if message.is_empty() {
                         continue;
                     }
-                    let line = LogLine {
+                    batch.push(crate::app::LogLine {
                         ts: ts.with_timezone(&Local),
                         message,
-                    };
-                    if tx_logs.send(Action::LogPushed(line)).await.is_err() {
-                        // Receiver dropped — app is shutting down.
-                        break;
-                    }
+                    });
+                }
+                if batch.is_empty() {
+                    continue;
+                }
+                if tx_logs.send(Action::LogLines(batch)).await.is_err() {
+                    // Receiver dropped — app is shutting down.
+                    break;
                 }
             }
         });
@@ -695,7 +716,16 @@ pub struct App {
     /// the handler. Single source of truth for the visible-row count;
     /// never recomputed in handlers.
     pub sidebar_visible: usize,
-    /// Which region of the TUI currently holds key focus. The redesign
+    /// Launcher grid cursor (0-based index into the visible screens).
+    /// Distinct from `current` so the user can navigate before committing
+    /// with Enter / A. The renderer re-clamps on every frame because the
+    /// visible-screens list can shrink if a screen becomes hidden.
+    pub launcher_offset: usize,
+    /// Set by the currently-focused screen to advertise a free-form
+    /// bottom-legend label (e.g. "[Tab] - next tab"). The button
+    /// strip in `ui::draw_button_legend` picks this up when region is
+    /// Content; falls back to a static "[Tab]" hint when empty.
+    pub current_button_hint: Option<String>,    /// Which region of the TUI currently holds key focus. The redesign
     /// replaces the previous single-`bool` model with three explicit
     /// regions so D-pad navigation is deterministic:
     ///
@@ -1068,9 +1098,12 @@ impl App {
             // window yet" and is the safe default (clamp collapses the
             // offset to 0 instead of leaking it).
             sidebar_visible: 0,
-            // Default region on launch is the sidebar — that's the natural
-            // D-pad start (user sees the screen list and moves with ↑/↓).
-            // `switch_screen` flips to `ContentLeft` when a screen commits.
+            // Default cursor on the launcher's first visible screen.
+            // Clamped down on every render in case screens become hidden.
+            launcher_offset: 0,
+            // No screen-provided hint until a screen sets it; the legend
+            // strip falls back to "[Tab]" when this is None.
+            current_button_hint: None,
             region: Region::Sidebar,
             palette_buf: String::new(),
             palette_idx: 0,
