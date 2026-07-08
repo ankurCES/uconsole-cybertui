@@ -566,7 +566,8 @@ fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &The
                     ("→/l", "step right (multi-pane)"),
                     ("tab", "next screen"),
                     ("shift-tab", "previous screen"),
-                    ("esc", "leave to sidebar"),
+                    ("esc", "back (sub-screen · or leave to launcher)"),
+                    ("b",   "back to launcher"),
                     ("anytime", ""),
                     ("?", "this help"),
                     (":", "command palette"),
@@ -1647,6 +1648,21 @@ async fn handle_key(
             // (not to a freshly-chosen one). This mirrors the
             // B-button "leave the menu" affordance on a console layout.
             app.set_region(Region::ContentLeft);
+            return false;
+        }
+        // `B` is the dedicated "back to launcher" shortcut. Esc from a
+        // content region can be claimed by the focused sub-screen
+        // (Files = go up a folder, etc.), so users need an explicit,
+        // unambiguous way to leave content for the launcher. From the
+        // launcher itself, B is a no-op.
+        Char('b') | Char('B')
+            if matches!(app.region, Region::ContentLeft | Region::ContentRight) =>
+        {
+            app.set_region(Region::Sidebar);
+            return false;
+        }
+        Char('b') | Char('B') if app.region == Region::Sidebar => {
+            // Already at the launcher — no-op.
             return false;
         }
         // Numeric jump (1..=9, then 0 ⇒ index 9) — pin to the launcher's
@@ -4191,6 +4207,264 @@ mod tests {
         )
         .await;
         assert!(matches!(app.modal, Modal::None));
+    }
+
+    #[tokio::test]
+    async fn esc_in_files_goes_up_a_folder() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Files;
+        app.set_region(Region::ContentLeft);
+        // The catch-all in handle_key routes Esc to whichever screen the
+        // focused WM pane is currently displaying; mirror `switch_screen`
+        // so the Builtin kind points at FilesScreen.
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Files,
+            ));
+        // Pre-build a tempdir two levels deep so files_cwd has a parent.
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a").join("b");
+        std::fs::create_dir_all(&nested).unwrap();
+        app.files_cwd = nested.clone();
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(
+            app.files_cwd,
+            nested.parent().unwrap().to_path_buf(),
+            "Esc should go up one folder"
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "screen claimed Esc; region should stay in content"
+        );
+    }
+
+    #[tokio::test]
+    async fn esc_at_filesystem_root_falls_through_to_launcher() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Files;
+        app.set_region(Region::ContentLeft);
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Files,
+            ));
+        app.files_cwd = std::path::PathBuf::from("/");
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        // No parent — Files returned false. The launcher does NOT take
+        // Esc from content regions (catch-all _ => in handle_key just
+        // returns false), so region stays where it is. This documents
+        // the contract: at filesystem root, Esc is a no-op.
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "at filesystem root, Esc should not move focus away from Files"
+        );
+        assert_eq!(
+            app.files_cwd,
+            std::path::PathBuf::from("/"),
+            "cwd should be unchanged when Esc is a no-op"
+        );
+    }
+
+    /// Task 6 — Logs screen claims `Esc` to dismiss the active filter.
+    /// When `app.logs_filter` is non-empty, the screen clears it and
+    /// returns `true` from `on_key`, so the launcher does NOT take Esc.
+    /// The catch-all in `handle_key` routes `Esc` to whichever screen the
+    /// focused WM pane is currently displaying; mirror `switch_screen`
+    /// so the Builtin kind points at LogsScreen.
+    #[tokio::test]
+    async fn esc_in_logs_clears_active_filter() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Logs;
+        app.set_region(Region::ContentLeft);
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Logs,
+            ));
+        // An active filter is just a non-empty `logs_filter`.
+        app.logs_filter = "error".to_string();
+        assert!(
+            !app.logs_filter.is_empty(),
+            "precondition: filter is active"
+        );
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert!(
+            app.logs_filter.is_empty(),
+            "Esc should clear the active filter, got {:?}",
+            app.logs_filter
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "screen claimed Esc; region should stay in content"
+        );
+    }
+
+    /// Task 6 — Logs screen does NOT claim `Esc` when no filter is
+    /// active, so the launcher can still take it. The catch-all in
+    /// `handle_key` only forwards the key once; if Logs returns
+    /// `false`, nothing else handles Esc from a content region and
+    /// the region stays put (Esc is a no-op at the launcher, matching
+    /// the `esc_at_filesystem_root_falls_through_to_launcher` contract).
+    #[tokio::test]
+    async fn esc_in_logs_with_no_filter_is_noop() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Logs;
+        app.set_region(Region::ContentLeft);
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Logs,
+            ));
+        assert!(
+            app.logs_filter.is_empty(),
+            "precondition: no filter is set"
+        );
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert!(
+            app.logs_filter.is_empty(),
+            "Esc with no active filter must not mutate the filter"
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "no filter active means Logs returns false; region stays put"
+        );
+    }
+
+    #[tokio::test]
+    async fn b_in_content_moves_to_launcher() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.set_region(Region::ContentLeft);
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(
+            app.region,
+            Region::Sidebar,
+            "B from ContentLeft should move focus to launcher"
+        );
+    }
+
+    #[tokio::test]
+    async fn b_in_sidebar_is_noop() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.set_region(Region::Sidebar);
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(app.region, Region::Sidebar, "B in sidebar is a no-op");
+    }
+
+    /// Module 4 — the editor (a hidden builtin, reachable only from
+    /// Files via `e`) must claim `Esc` for itself and return focus to
+    /// Files. The catch-all in `handle_key` only reaches the screen's
+    /// `on_key` when the focused pane's `WindowKind` matches a screen
+    /// in the `screens` vec; for the editor test we slice in just an
+    /// `EditorScreen` so the catch-all dispatches `Esc` to it.
+    #[tokio::test]
+    async fn esc_in_editor_closes_editor() {
+        use crate::screens::editor::EditorScreen;
+        use crate::wm::window::WindowKind;
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Editor;
+        app.set_region(Region::ContentLeft);
+        let _ = app.manager.set_pane_kind(WindowKind::Builtin(
+            crate::app::ScreenId::Editor,
+        ));
+        // Clean editor (default state — no file loaded) so Esc takes
+        // the "focus back to Files" branch, not the Discard-confirm
+        // branch.
+        app.editor_dirty = false;
+        assert_eq!(
+            app.manager.focused_pane_kind(),
+            Some(WindowKind::Builtin(crate::app::ScreenId::Editor)),
+            "precondition: focused pane is the editor"
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        handle_key(
+            &mut [Box::new(EditorScreen)],
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(
+            app.manager.focused_pane_kind(),
+            Some(WindowKind::Builtin(crate::app::ScreenId::Files)),
+            "Esc on a clean editor must focus the Files pane"
+        );
+        assert!(
+            matches!(app.modal, Modal::None),
+            "Esc on a clean editor must not open any modal, got {:?}",
+            app.modal
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "region should stay in content (screen claimed Esc)"
+        );
     }
 
     #[tokio::test]
