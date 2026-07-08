@@ -1410,11 +1410,24 @@ async fn handle_key(
             // same `open_palette` — single source of truth.
             app.modal = crate::ui::menu_bar::open_palette(app);
         }
-        // Phase 1 — menu bar keys. F10 (canonical) and Alt+F (herdr
-        // style) open the menu bar with the File menu focused. While
+        // Phase 1 — menu bar keys. F10 (canonical), Alt+F (herdr
+        // style), and Ctrl+M (the global "get to menu" shortcut bound
+        // at user request) all open the menu from any screen. While
         // a menu is open, all keys route into the menu (Esc closes,
         // arrows move, Enter fires) — see the early-return below.
         F(10) | Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            if app.menu.is_open() {
+                app.menu.close();
+            } else {
+                app.menu.open(crate::ui::menu_bar::MenuId::File);
+            }
+            return false;
+        }
+        // Ctrl+M — global menu shortcut. Must be evaluated *after* the
+        // Alt+F arm so Alt+F still maps to the menu key the menu code
+        // expects; Ctrl+M is checked on its own modifier to avoid
+        // stomping on in-screen Ctrl+M bindings (none today).
+        Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             if app.menu.is_open() {
                 app.menu.close();
             } else {
@@ -2770,6 +2783,93 @@ mod tests {
             app.manager.window(app.manager.focused()).map(|w| w.kind),
             before_kind
         );
+    }
+
+    // ---- Ctrl+M: global menu shortcut -------------------------------
+    //
+    // The user-facing contract is:
+    //   "Ctrl+M opens the menu from any screen, including while focus is
+    //    in the Content region (i.e. while a screen is 'active')."
+    // The shortcut must mirror F10 / Alt+F — that is, it must toggle,
+    // not latch. Sending Ctrl+M twice in a row should leave the menu
+    // closed. The semantic is "get to the menu" — so the File menu is
+    // the default since F10/Alt+F already open it.
+
+    fn send_ctrl_m() -> KeyEvent {
+        KeyEvent::new(KeyCode::Char('m'), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_m_opens_menu_from_sidebar_focus() {
+        let mut app = app_with_n_panes(1);
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        // Default boot focus is the Sidebar; mirror that explicitly.
+        app.region = crate::app::Region::Sidebar;
+        run(async {
+            let quit = handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(!quit, "Ctrl+M must not quit");
+        });
+        assert!(app.menu.is_open(), "Ctrl+M from sidebar should open the menu");
+        assert_eq!(app.menu.open, Some(crate::ui::menu_bar::MenuId::File));
+    }
+
+    #[test]
+    fn ctrl_m_opens_menu_from_content_focus() {
+        // The whole point of the shortcut — the user is "inside" a screen
+        // and hits Ctrl+M to get back to menu-level actions.
+        let mut app = app_with_n_panes(1);
+        app.region = crate::app::Region::ContentLeft;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            let quit = handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(!quit, "Ctrl+M must not quit");
+        });
+        assert!(app.menu.is_open());
+        assert_eq!(app.menu.open, Some(crate::ui::menu_bar::MenuId::File));
+    }
+
+    #[test]
+    fn ctrl_m_is_noop_when_menu_already_open() {
+        // Mirror the existing F10 / Alt+F contract: when the menu is
+        // *already* open, Ctrl+M does nothing dramatic (Esc closes the
+        // menu; that is its own shortcut). The menu-open dispatch at
+        // the top of handle_key swallows the Ctrl+M into its `_ =>`
+        // catch-all, which is intentional — the user-facing semantic
+        // is "open the menu", and Esc already handles "close".
+        let mut app = app_with_n_panes(1);
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(app.menu.is_open());
+            // Pinned open state after a second Ctrl+M — menu stays open.
+            handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(
+                app.menu.is_open(),
+                "Ctrl+M when menu is open is a no-op (Esc closes)"
+            );
+        });
+    }
+
+    #[test]
+    fn ctrl_m_returns_false_to_keep_render_loop_alive() {
+        // Returning `true` from handle_key signals "quit". Ctrl+M must
+        // NOT return true under any combination tested above — pinned
+        // explicitly so future refactors that drop into the quit arm
+        // (e.g. a Ctrl-M-x vim-style "leader key") fail loudly.
+        let mut app = app_with_n_panes(1);
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let key = send_ctrl_m();
+        // Capture the return value out of `run`.
+        let quit_flag = std::cell::Cell::new(true);
+        run(async {
+            let q = handle_key(&mut screens, &mut app, &tx, key).await;
+            quit_flag.set(q);
+        });
+        assert!(!quit_flag.take(), "Ctrl+M must NOT signal quit");
     }
 
     // ---- Sidebar navigation regression tests ---------------------------

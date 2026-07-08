@@ -916,6 +916,7 @@ pub fn draw_button_legend(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
         Span::styled(sa, ratatui::style::Style::default().fg(theme.accent).add_modifier(ratatui::style::Modifier::BOLD)),
         Span::styled("   ◍ start ", theme.dim),
         Span::styled("[?]", ratatui::style::Style::default().fg(theme.dim).add_modifier(ratatui::style::Modifier::BOLD)),
+        Span::styled("   ⌃M menu ", theme.dim),
     ]);
     let p = Paragraph::new(line)
         .alignment(ratatui::layout::Alignment::Center)
@@ -924,7 +925,8 @@ pub fn draw_button_legend(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 }
 
 pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
-    if app.toasts.is_empty() {        return;
+    if app.toasts.is_empty() {
+        return;
     }
     let w = (area.width as i32 - 4).max(8) as u16;
     let h = app.toasts.len() as u16;
