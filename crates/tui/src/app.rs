@@ -1338,6 +1338,7 @@ impl App {
             units: self.units,
             traffic_overlay: self.traffic_overlay,
             show_weather_panel: self.show_weather_panel,
+            keymap: crate::keymap::Keymap::default(),
         };
         prefs.save();
     }
