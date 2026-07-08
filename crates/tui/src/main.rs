@@ -2375,6 +2375,18 @@ async fn handle_action(
                         if app.show_weather_panel { "on" } else { "off" }
                     ))
                 }
+                Keymap => {
+                    // Enter the user-keymap editing sub-mode. We don't
+                    // toggle the flag here — this is a *mode-entry* action,
+                    // not a boolean flip. The sub-mode itself clears the
+                    // flag on exit (Esc / q) so the user lands back on
+                    // the normal Settings list. The menu close mirrors
+                    // what the keymap capture arm does, so the sub-mode
+                    // doesn't draw a stale dropdown over the Keys table.
+                    app.keymap_editing = true;
+                    app.menu.close();
+                    Some("keys: editing".to_string())
+                }
             };
             if let Some(msg) = confirm {
                 app.push_toast(ToastKind::Info, msg);

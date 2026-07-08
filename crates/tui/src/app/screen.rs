@@ -172,6 +172,10 @@ pub enum SettingsKey {
     /// Step 2 — City screen weather panel visibility. Toggled with
     /// `w` (when not on Settings). Persisted in prefs.
     WeatherPanel,
+    /// User-editable keymap (Settings → Keys). Toggling enters the
+    /// sub-mode rendered by `screens::settings::render` when
+    /// `app.keymap_editing == true`.
+    Keymap,
 }
 
 /// A trait every screen implements. Screens are stateless functions of App

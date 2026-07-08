@@ -25,10 +25,11 @@ impl Screen for SettingsScreen {
         // Up/Down/j/k move the row highlight so the user can see which
         // key each row corresponds to before pressing the action letter.
         // Row count grew from 4 → 8 when City preferences (units, traffic,
-        // weather, city override) landed in Step 2. City override has
+        // weather, city override) landed in Step 2, then to 9 with the
+        // user-editable keymap (Keys) sub-screen. City override has
         // no direct key — it's edited via the City screen's `c` modal
         // and surfaced here read-only.
-        let total: usize = 8;
+        let total: usize = 9;
         match key.code {
             KeyCode::Char('j') | KeyCode::Down => {
                 app.settings_selected = (app.settings_selected + 1) % total;
@@ -62,6 +63,7 @@ impl Screen for SettingsScreen {
                     4 => SettingsKey::Units,
                     5 => SettingsKey::TrafficOverlay,
                     6 => SettingsKey::WeatherPanel,
+                    7 => SettingsKey::Keymap,
                     _ => return false,
                 };
                 let _ = app.tx.try_send(Action::Toggle(key));
@@ -107,6 +109,14 @@ impl Screen for SettingsScreen {
                 let _ = app.tx.try_send(Action::Toggle(SettingsKey::TrafficOverlay));
                 return true;
             }
+            KeyCode::Char('K') => {
+                // Shift-K: enter the user-keymap editing sub-mode.
+                // The render-side checks `app.keymap_editing` and
+                // shows the Keys table; `Esc` / `q` (handled in the
+                // sub-mode) flips the flag back off.
+                let _ = app.tx.try_send(Action::Toggle(SettingsKey::Keymap));
+                return true;
+            }
             _ => return false,
         }
     }
@@ -147,6 +157,11 @@ impl Screen for SettingsScreen {
             row("traffic overlay", bool_str(app.traffic_overlay), "T", theme),
             row("weather panel", bool_str(app.show_weather_panel), "w", theme),
             row("city", city_str, "—", theme),
+            row("keys",
+                &format!("{} override{}",
+                         app.keymap.bindings.len(),
+                         if app.keymap.bindings.len() == 1 { "" } else { "s" }),
+                "K", theme),
         ];
         if app.settings_selected >= items.len() {
             app.settings_selected = items.len() - 1;
