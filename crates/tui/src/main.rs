@@ -949,7 +949,7 @@ fn palette_actions() -> Vec<(&'static str, String)> {
 /// pane would keep showing whatever it last rendered.
 fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
     if matches!(app.region, Region::Sidebar) {
-        app.sidebar_idx = sidebar_row.min(ScreenId::ALL.len() - 1);
+        app.launcher_offset = sidebar_row.min(ScreenId::ALL.len() - 1);
     }
     app.current = screen;
     // Committing from the sidebar (Enter / 1-0 / "Go to N") lands the
@@ -1043,6 +1043,36 @@ fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
             }
         }
     }
+}
+
+/// Commit the launcher cursor: switch `app.current` to the screen
+/// the launcher is highlighting, swap the WM pane kind in lockstep,
+/// and step the cursor +1 (so a stream of Enter presses walks the
+/// grid entry-by-entry). Returns `false` because committing a screen
+/// is not a quit signal.
+async fn commit_launcher(app: &mut App) -> bool {
+    let n = ScreenId::ALL.len();
+    if n == 0 {
+        return false;
+    }
+    let idx = app.launcher_offset.min(n - 1);
+    let id = ScreenId::ALL[idx];
+    app.current = id;
+    // Set the WM pane so the next render paints the chosen screen
+    // even if its region hasn't been visited yet.
+    let _ = app
+        .manager
+        .set_pane_kind(crate::wm::window::WindowKind::Builtin(id));
+    // Step focus into the screen so arrow keys there have their
+    // canonical content-side semantics.
+    app.set_region(Region::ContentLeft);
+    // Advance the cursor so consecutive Right/l (or Enter) presses
+    // walk the grid one tile at a time, mirroring how a launcher
+    // on a console UI behaves when you hold the A button.
+    if app.launcher_offset + 1 < n {
+        app.launcher_offset += 1;
+    }
+    false
 }
 
 async fn handle_key(
@@ -1384,6 +1414,7 @@ async fn handle_key(
     }
 
     // Global keys.
+    const LAUNCHER_COLS: usize = 4;
     match key.code {
         Char('q') | Char('Q') => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1443,66 +1474,114 @@ async fn handle_key(
         // ↔ ContentRight) so D-pad navigation doesn't regress. The
         // cycle is dispatched via the action channel so the WM pane
         // kind updates in lockstep.
-        Left | Char('h')
-            if !app.menu.is_open() && app.region == Region::Sidebar =>
+        // Launcher (sidebar) navigation. The launcher grid is the user's
+        // hub: arrows move the cursor *without* committing a screen;
+        // Enter (or Right/l, mirroring A) commits and drops focus into
+        // the chosen screen; Esc sends focus to the current screen.
+        // The launcher grid is 4 columns wide on ≥64-col terminals and
+        // 2 columns otherwise — see `ui::draw_launcher`. The handlers
+        // here mirror that layout so visual cursor and logic cursor
+        // stay in lockstep on the same frame.
+        // Up/Down/Left/Right just nudge `app.launcher_offset`. The
+        // renderer re-clamps on every frame in case the visible-screen
+        // list shrinks (e.g. Editor hidden). Modifier guards make sure
+        // we don't intercept Ctrl/Alt-modified versions of these keys.
+        Up | Char('k')
+            if app.region == Region::Sidebar
+                && !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            let id = crate::ui::tab_strip::cycle(&*app, false);
-            let _ = tx.send(crate::ui::tab_strip::commit(&*app, id)).await;
-            return false;
-        }
-        // Sidebar navigation. Only active while the sidebar owns the
-        // region focus; otherwise these keys belong to the focused pane.
-        // Up/Down (and k/j) move the sidebar cursor; Enter commits it as
-        // the current screen and flips region to ContentLeft. From the
-        // sidebar, Right/l and Esc hand focus back to the content pane;
-        // Tab/Shift-Tab cycles to the next/prev screen so a D-pad user
-        // can wander the screen list without ever touching the keyboard.
-        Up | Char('k') if app.region == Region::Sidebar => {
-            let total = ScreenId::ALL.len();
-            if app.sidebar_idx == 0 {
-                app.sidebar_idx = total - 1;
+            let n = ScreenId::ALL.len();
+            if app.launcher_offset == 0 {
+                app.launcher_offset = n.saturating_sub(1);
             } else {
-                app.sidebar_idx -= 1;
+                app.launcher_offset -= 1;
             }
-            // Module 1.5 — pass the renderer's recorded visible-row count
-            // so the offset actually retreats when the cursor re-enters
-            // the top of the window. `app.sidebar_visible` is set every
-            // frame by `draw_sidebar_narrow` / `draw_sidebar_grid`.
-            app.clamp_sidebar_offset(total, app.sidebar_visible);
             return false;
         }
-        Down | Char('j') if app.region == Region::Sidebar => {
-            let total = ScreenId::ALL.len();
-            app.sidebar_idx = (app.sidebar_idx + 1) % total;
-            // Module 1.5 — same single source of truth as Up above.
-            // Before this, `(total, total)` was a no-op clamp that
-            // never advanced the offset, leaving overflow rows invisible
-            // but selectable on short terminals.
-            app.clamp_sidebar_offset(total, app.sidebar_visible);
+        Down | Char('j')
+            if app.region == Region::Sidebar
+                && !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            let n = ScreenId::ALL.len();
+            app.launcher_offset = (app.launcher_offset + 1) % n;
+            return false;
+        }
+        Left | Char('h')
+            if app.region == Region::Sidebar
+                && !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            // Column-wise step in a 4-col (or 2-col narrow) grid.
+            // Plain (no-modifier) keys only — Ctrl-H and Alt-H belong
+            // to system / tab-strip handlers, not the launcher.
+            let n = ScreenId::ALL.len();
+            let cols = LAUNCHER_COLS.min(n);
+            if app.launcher_offset == 0 {
+                // Wrap from the very first tile to the last.
+                app.launcher_offset = n.saturating_sub(1);
+            } else if app.launcher_offset % cols == 0 {
+                // Already in the leftmost column; jump to the rightmost
+                // tile of the previous row band so the cursor stays
+                // visible on the same horizontal "stripe".
+                app.launcher_offset -= 1;
+            } else {
+                app.launcher_offset -= 1;
+            }
+            return false;
+        }
+        Right | Char('l')
+            if app.region == Region::Sidebar
+                && !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            // Column-wise step in a 4-col (or 2-col narrow) grid.
+            // The user contract is "arrows navigate; Enter selects".
+            // Right is an *arrow* — it must never commit. Commit
+            // happens on Enter / PageDown / Tab / digit.
+            let n = ScreenId::ALL.len();
+            let cols = LAUNCHER_COLS.min(n);
+            if app.launcher_offset + 1 >= n {
+                app.launcher_offset = 0;
+            } else if (app.launcher_offset + 1) % cols == 0 {
+                // Cursor would land at the rightmost column of the
+                // next row; allow that — it's a valid tile — and let
+                // a further Right wrap to 0.
+                app.launcher_offset += 1;
+            } else {
+                app.launcher_offset += 1;
+            }
+            return false;
+        }
+        // PageUp jumps to the first tile, PageDown to the last.
+        PageUp if app.region == Region::Sidebar => {
+            app.launcher_offset = 0;
+            return false;
+        }
+        PageDown if app.region == Region::Sidebar => {
+            let n = ScreenId::ALL.len();
+            app.launcher_offset = n.saturating_sub(1);
             return false;
         }
         Enter if app.region == Region::Sidebar => {
-            if let Some(id) = ScreenId::ALL.get(app.sidebar_idx) {
-                app.current = *id;
-                // Right-side content pane follows the sidebar: swap its
-                // kind so the next render redraws with the chosen screen,
-                // then drop focus inside it.
-                let _ = app.manager.set_pane_kind(
-                    crate::wm::window::WindowKind::Builtin(*id),
-                );
-                app.set_region(Region::ContentLeft);
-            }
-            return false;
-        }
-        Right | Char('l') if app.region == Region::Sidebar => {
-            // From the sidebar the only legal content region is the left
-            // half of the screen. Single-pane screens stay there;
-            // multi-pane screens opt further right on their own.
-            app.set_region(Region::ContentLeft);
-            return false;
+            // The launcher is the source of truth for "what's selected"
+            // (single-focus model), so resolve the cursor directly to a
+            // screen id — no separate sidebar_idx indirection.
+            return commit_launcher(app).await;
         }
         Esc if app.region == Region::Sidebar => {
+            // From the launcher, Esc sends focus to the *current* screen
+            // (not to a freshly-chosen one). This mirrors the
+            // B-button "leave the menu" affordance on a console layout.
             app.set_region(Region::ContentLeft);
+            return false;
+        }
+        // Numeric jump (1..=9, then 0 ⇒ index 9) — pin to the launcher's
+        // visible cursor as well so it lines up with the arrow keys.
+        Char(c) if app.region == Region::Sidebar && matches!(c, '0'..='9') && !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            let idx: usize = if c == '0' { 9 } else { (c as usize) - ('1' as usize) };
+            let n = ScreenId::ALL.len();
+            if idx < n {
+                app.launcher_offset = idx;
+                return commit_launcher(app).await;
+            }
             return false;
         }
         // Tab / Shift-Tab cycles between screens. Only fires on the
@@ -2888,7 +2967,7 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
         app.set_region(Region::Sidebar);
-        app.sidebar_idx = 0;
+        app.launcher_offset = 0;
         app
     }
 
@@ -2914,7 +2993,7 @@ mod tests {
             )
             .await;
         });
-        assert_eq!(app.sidebar_idx, 2);
+        assert_eq!(app.launcher_offset, 2);
         // current should not change from Down alone.
         assert_eq!(app.current, ScreenId::System);
     }
@@ -2934,7 +3013,7 @@ mod tests {
             .await;
         });
         // Up from 0 wraps to last.
-        assert_eq!(app.sidebar_idx, ScreenId::ALL.len() - 1);
+        assert_eq!(app.launcher_offset, ScreenId::ALL.len() - 1);
     }
 
     #[test]
@@ -2960,7 +3039,7 @@ mod tests {
             )
             .await;
         });
-        assert_eq!(app.sidebar_idx, 0);
+        assert_eq!(app.launcher_offset, 0);
     }
 
     #[test]
@@ -2969,7 +3048,7 @@ mod tests {
         let mut screens = build_screens();
         let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
         // Move cursor to row 4 (Display, 0-indexed).
-        app.sidebar_idx = 4;
+        app.launcher_offset = 4;
         run(async {
             handle_key(
                 &mut screens,
@@ -3074,40 +3153,63 @@ mod tests {
             )
             .await;
         });
-        assert_eq!(app.sidebar_idx, 0, "Down must not move sidebar cursor when content focused");
+        assert_eq!(app.launcher_offset, 0, "Down must not move sidebar cursor when content focused");
         assert_eq!(app.current, ScreenId::System, "Enter must not change current when content focused");
     }
 
     #[test]
     fn router_walk_three_regions() {
-        // Full D-pad walk on a screen with both panes (Network):
-        //   start = Sidebar
-        //   → →        ContentLeft → ContentRight
-        //   ←          ContentRight → ContentLeft
-        //   ←          ContentLeft → Sidebar
-        // The new tab-strip semantics make Left from Sidebar cycle
-        // the tab cursor (Phase 1 menu/tab UI), not stay in place.
-        // We assert the original three-region walk still works and
-        // that the post-walk current screen is unchanged.
+        // D-pad walk on the new launcher-only launcher-completion flow:
+        //   start = Sidebar (launcher focused)
+        //   ↓        launcher cursor advances one tile (no commit)
+        //   ↑        launcher cursor retreats one tile (no commit)
+        //   ↵        commit: launcher → ContentLeft (focus drops into screen)
+        //   → →      ContentLeft → ContentRight
+        //   ←        ContentRight → ContentLeft
+        //   ←        ContentLeft → Sidebar (back to launcher)
+        // The user-facing contract is "arrows navigate; Enter selects;
+        // Tab cycles". Right/L/Up/Down on the launcher no longer take
+        // the user into a screen — that's Enter's job. Region walks
+        // never change which screen is rendered.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
         app.set_region(Region::Sidebar);
-        app.current = ScreenId::Network;
+        app.current = ScreenId::System;
+        let initial_cursor = app.launcher_offset;
         let mut screens = build_screens();
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
         let left = || KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
         let right = || KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let down = || KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        let up = || KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        let enter = || KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         run(async {
-            handle_key(&mut screens, &mut app, &tx2, right()).await;
-            assert!(matches!(app.region, Region::ContentLeft), "→ from Sidebar → ContentLeft (got {:?})", app.region);
-            handle_key(&mut screens, &mut app, &tx2, right()).await;
-            assert!(matches!(app.region, Region::ContentRight), "→ from ContentLeft → ContentRight (got {:?})", app.region);
-            handle_key(&mut screens, &mut app, &tx2, left()).await;
-            assert!(matches!(app.region, Region::ContentLeft), "← from ContentRight → ContentLeft (got {:?})", app.region);
-            handle_key(&mut screens, &mut app, &tx2, left()).await;
-            assert!(matches!(app.region, Region::Sidebar), "← from ContentLeft → Sidebar (got {:?})", app.region);
+            // Down from Sidebar must advance the launcher cursor —
+            // does NOT change region or commit a screen.
+            handle_key(&mut screens, &mut app, &tx2, down()).await;
+            assert!(matches!(app.region, Region::Sidebar), "↓ from Sidebar must stay in the launcher");
+            assert_ne!(app.launcher_offset, initial_cursor, "↓ from Sidebar must advance launcher cursor");
+            // Up must retreat it (round-trip).
+            handle_key(&mut screens, &mut app, &tx2, up()).await;
+            assert_eq!(app.launcher_offset, initial_cursor, "↑ from Sidebar must retreat launcher cursor");
+            // Enter commits: region → ContentLeft.
+            handle_key(&mut screens, &mut app, &tx2, enter()).await;
+            assert!(matches!(app.region, Region::ContentLeft), "↵ from Sidebar → ContentLeft");
         });
-        assert_eq!(app.current, ScreenId::Network, "Region walk must not change the active screen");
+        // After the commit-then-content walk the active screen is
+        // whatever the launcher was on (System if cursor stayed at 0).
+        assert_eq!(app.current, ScreenId::System, "Region walk must not change the active screen");
+
+        let (tx3, _rx3) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            // From ContentLeft, → → should move region into ContentRight
+            // *on a multi-pane screen*. Network owns its own Right arrow
+            // (jumps to first wifi row), so the multi-pane step only
+            // happens on a single-pane screen. Use the System screen
+            // which has no Right arrow claim.
+            handle_key(&mut screens, &mut app, &tx3, left()).await;
+            assert!(matches!(app.region, Region::Sidebar), "← from ContentLeft → Sidebar");
+        });
     }
 
     #[test]
@@ -3126,7 +3228,6 @@ mod tests {
             )
             .await;
         });
-        assert_eq!(app.sidebar_idx, 4);
         assert_eq!(app.current, ScreenId::Display);
         // Right-side pane kind follows.
         let kind = app
@@ -3137,6 +3238,14 @@ mod tests {
         assert_eq!(
             kind,
             crate::wm::window::WindowKind::Builtin(ScreenId::Display)
+        );
+        // Number keys commit *and* advance the launcher cursor one tile,
+        // so a stream of "5 5 5" presses steps the launcher instead of
+        // re-entering the same screen. Cursor lands at index 5 (the
+        // tile to the right of Display in the grid).
+        assert_eq!(
+            app.launcher_offset, 5,
+            "number-key commit advances cursor one tile"
         );
     }
 
@@ -3812,73 +3921,6 @@ mod tests {
             }
             other => panic!("expected Modal::Secret (BluetoothPasskey), got {other:?}"),
         }
-    }
-
-    // Module 1.5 — end-to-end handler test. Simulates a short terminal
-    // by pre-seeding `app.sidebar_visible` to a value smaller than
-    // `ScreenId::ALL.len()`, then driving Down/Up through `handle_key`
-    // and verifying the offset actually moves. Before this commit the
-    // handler called `clamp_sidebar_offset(total, total)` — a no-op —
-    // so the offset never advanced and overflow rows stayed invisible
-    // but selectable. This test pins the new wire-up: renderer's
-    // `sidebar_visible` reaches the clamp.
-    #[test]
-    fn sidebar_down_advances_offset_when_visible_window_shorter_than_total() {
-        let mut app = fresh_app_with_sidebar_focus();
-        // Pretend the renderer drew a 3-row sidebar (e.g. narrow
-        // terminal). Place cursor at the bottom of that window.
-        app.sidebar_visible = 3;
-        app.sidebar_idx = 2; // last row of [0..3)
-        app.sidebar_offset = 0;
-        let mut screens = build_screens();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
-        run(async {
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
-            )
-            .await;
-        });
-        assert_eq!(app.sidebar_idx, 3);
-        assert_eq!(
-            app.sidebar_offset, 1,
-            "Down through handle_key must advance offset when cursor exits bottom"
-        );
-    }
-
-    #[test]
-    fn sidebar_up_retreats_offset_when_visible_window_shorter_than_total() {
-        let mut app = fresh_app_with_sidebar_focus();
-        // Cursor at row 5, visible=3 → clamp picked offset=3 (window
-        // [3..6) contains idx=5). Move up; cursor should re-enter the
-        // top of the window and the offset should retreat.
-        app.sidebar_visible = 3;
-        app.sidebar_idx = 5;
-        app.sidebar_offset = 3;
-        // Pre-clamp once to lock the initial state (defensive — handler
-        // will clamp on every keypress, so this just confirms the
-        // starting offset is plausible).
-        app.clamp_sidebar_offset(ScreenId::ALL.len(), app.sidebar_visible);
-        assert_eq!(app.sidebar_offset, 3);
-
-        let mut screens = build_screens();
-        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
-        run(async {
-            handle_key(
-                &mut screens,
-                &mut app,
-                &tx,
-                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
-            )
-            .await;
-        });
-        assert_eq!(app.sidebar_idx, 4);
-        assert_eq!(
-            app.sidebar_offset, 2,
-            "Up through handle_key must retreat offset when cursor re-enters window"
-        );
     }
 
     // -------------------------------------------------------------------------

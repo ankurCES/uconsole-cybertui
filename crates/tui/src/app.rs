@@ -694,32 +694,11 @@ pub struct App {
     /// compatibility with the old render and test paths that read it
     /// directly; new code should prefer `app.region`.
     pub sidebar_focused: bool,
-    /// Cursor position in the sidebar list (0-based index into ScreenId::ALL).
+    /// Launcher grid cursor (0-based index into `ScreenId::ALL`).
     /// Distinct from `current` so the user can navigate before committing
-    /// with Enter. `current` is what's actually rendered in the content
-    /// pane; `sidebar_idx` is what's highlighted in the menu.
-    pub sidebar_idx: usize,
-    /// Scroll offset for the sidebar list — the index of the topmost
-    /// visible item. Kept in lockstep with `sidebar_idx` so that on
-    /// short terminals (where the sidebar can't fit all `ScreenId`s)
-    /// the highlighted entry is always inside the visible window.
-    /// A pure cursor move without adjusting this leaks items off the
-    /// top of the pane. See `crates/tui/src/ui/mod.rs::sidebar_clamps_offset_*`
-    /// for the clamp contract.
-    pub sidebar_offset: usize,
-    /// Visible row count for the sidebar — set by the renderer after
-    /// computing it from the layout area and read by the Up/Down handlers
-    /// so cursor (`sidebar_idx`) and offset (`sidebar_offset`) stay in
-    /// sync. Defaults to 0, which `clamp_sidebar_offset` treats as "no
-    /// window" and collapses `sidebar_offset` to 0 — this guarantees that
-    /// before the first frame renders, no spurious offset survives into
-    /// the handler. Single source of truth for the visible-row count;
-    /// never recomputed in handlers.
-    pub sidebar_visible: usize,
-    /// Launcher grid cursor (0-based index into the visible screens).
-    /// Distinct from `current` so the user can navigate before committing
-    /// with Enter / A. The renderer re-clamps on every frame because the
-    /// visible-screens list can shrink if a screen becomes hidden.
+    /// with Enter / Right / PageDown. The renderer re-clamps on every
+    /// frame because the visible-screens list can shrink if a screen
+    /// becomes hidden.
     pub launcher_offset: usize,
     /// Set by the currently-focused screen to advertise a free-form
     /// bottom-legend label (e.g. "[Tab] - next tab"). The button
@@ -1092,14 +1071,6 @@ impl App {
             manager: crate::wm::manager::Manager::new(current),
             modal: Modal::None,
             sidebar_focused: true,
-            sidebar_idx: 0,
-            sidebar_offset: 0,
-            // Renderer overwrites this on every frame; 0 means "no
-            // window yet" and is the safe default (clamp collapses the
-            // offset to 0 instead of leaking it).
-            sidebar_visible: 0,
-            // Default cursor on the launcher's first visible screen.
-            // Clamped down on every render in case screens become hidden.
             launcher_offset: 0,
             // No screen-provided hint until a screen sets it; the legend
             // strip falls back to "[Tab]" when this is None.
@@ -1271,24 +1242,6 @@ impl App {
         self.sidebar_focused = r == Region::Sidebar;
     }
 
-    /// Advance/retreat `sidebar_offset` so the cursor at `sidebar_idx`
-    /// is always visible inside a window of `visible` rows. Top-aligned:
-    /// shifts only when the cursor scrolls past the bottom edge of the
-    /// visible window. Called by the sidebar Up/Down handlers in main.rs.
-    pub fn clamp_sidebar_offset(&mut self, total: usize, visible: usize) {
-        if visible == 0 || total <= visible {
-            self.sidebar_offset = 0;
-            return;
-        }
-        let max_off = total - visible;
-        let desired = if self.sidebar_idx >= visible {
-            (self.sidebar_idx - visible + 1).min(max_off)
-        } else {
-            0
-        };
-        self.sidebar_offset = desired;
-    }
-
     /// Shortcut to open a `Modal::Input` with the given prompt and kind.
     pub fn open_input(&mut self, prompt: impl Into<String>, kind: InputKind) {
         self.modal = Modal::Input {
@@ -1433,23 +1386,12 @@ impl App {
     /// avoid the full mpsc + screens slice setup.
     #[doc(hidden)]
     pub fn handle_action_for_test(&mut self, action: Action) {
-        // Step 9 — City actions. Mirrors the dispatcher arms in
-        // `main.rs::handle_action` for the non-spawning cases.
-        // `CityCtrlRefresh` is excluded because it spawns an async
-        // task and would need a full tokio runtime + wiremock to
-        // exercise; the dispatcher's integration smoke covers it.
+        // Test-only dispatcher. Mirrors the relevant arms in
+        // `main.rs::handle_action` for non-spawning cases. Spawning
+        // actions (e.g. HTTP-backed refills) are exercised in the
+        // dispatcher's integration tests instead.
         match action {
             Action::ProcTreeRefreshed(procs) => self.apply_proc_tree(procs),
-            Action::CityResolved(loc) => {
-                if let Ok(mut g) = self.live.city_loc.try_write() {
-                    *g = Some(loc);
-                }
-            }
-            Action::CityWeatherRefreshed(w) => {
-                if let Ok(mut g) = self.live.city_weather.try_write() {
-                    *g = Some(w);
-                }
-            }
             _ => {}
         }
     }
@@ -1570,6 +1512,14 @@ impl App {
 mod tests {
     use super::*;
 
+    /// Build a fresh `App` against an mpsc pair. Stand-in for the
+    /// wrapper used in the integration tests; this one lives in the
+    /// crate-internal test mod so callers don't need extra plumbing.
+    fn fresh_app() -> App {
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        App::new(tx, rx)
+    }
+
     #[test]
     fn new_app_has_one_pane() {
         // A bit of a smoke test: the App's manager should be in a
@@ -1584,244 +1534,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Module 1.5 — `sidebar_visible` is the single source of truth for the
-    // sidebar's visible-row count, set by the renderer and read by the Up/Down
-    // handlers. These tests pin the contract of `clamp_sidebar_offset` against
-    // realistic `(total, visible, offset, idx)` tuples so the handler can
-    // trust `app.sidebar_visible` and the renderer can write to it without
-    // re-checking arithmetic on its own.
-    //
-    // Why pin these here: the previous handler called
-    // `clamp_sidebar_offset(total, total)` which is a no-op (offset already
-    // clamped at 0 when all rows fit). The bug was that on short terminals
-    // the offset never advanced, so overflow rows were invisible but
-    // selectable. The fix is for the renderer to record `visible` and the
-    // handler to pass it through; these tests lock the arithmetic so neither
-    // side can silently regress.
-    // -------------------------------------------------------------------------
-
-    fn fresh_app() -> App {
-        let (tx, rx) = mpsc::channel::<Action>(8);
-        App::new(tx, rx)
-    }
-
-    #[test]
-    fn sidebar_down_advances_offset_when_cursor_exits_visible_window() {
-        // total=15, visible=5, offset starts at 0, idx at 4 (last row of
-        // window [0..5)). After Down: idx=5, which exits the bottom of
-        // the window. `clamp_sidebar_offset` must advance offset to 1
-        // so the cursor stays visible.
-        let mut app = fresh_app();
-        app.sidebar_idx = 4;
-        app.sidebar_offset = 0;
-        app.sidebar_visible = 5;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        // Initial clamp at idx=4 (inside the window) — offset stays 0.
-        assert_eq!(app.sidebar_offset, 0);
-        // Simulate Down: idx += 1, then clamp with the renderer's
-        // recorded visible count.
-        app.sidebar_idx = (app.sidebar_idx + 1).min(14);
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(app.sidebar_idx, 5);
-        assert_eq!(
-            app.sidebar_offset, 1,
-            "offset must advance when cursor exits bottom"
-        );
-    }
-
-    // -------------------------------------------------------------------------
-    // Step 9 — City action arms integration smoke. Pins the contract
-    // between the dispatcher arms in `main.rs::handle_action` and
-    // `App::live.{city_loc, city_weather}` so a future refactor that
-    // drops the write-through would fail a unit test instead of
-    // silently leaving the City screen showing "(waiting for first
-    // fetch)" forever.
-    // -------------------------------------------------------------------------
-
-    fn city_loc() -> crate::screens::city::geo::CityLocation {
-        crate::screens::city::geo::CityLocation {
-            name: "Seattle".into(),
-            country: "United States".into(),
-            country_code: "US".into(),
-            region: "Washington".into(),
-            lat: 47.6062,
-            lon: -122.3321,
-            bbox: Some([47.5, -122.5, 47.7, -122.3]),
-            timezone: "America/Los_Angeles".into(),
-        }
-    }
-
-    fn city_weather() -> crate::screens::city::weather::Weather {
-        crate::screens::city::weather::Weather {
-            temp_c: 9.2,
-            feels_like_c: 7.4,
-            humidity_pct: 78,
-            wind_kph: 12.0,
-            wind_dir_deg: Some(315),
-            weather_code: 3,
-            next_12h_precip_pct: Some(vec![10, 20]),
-            fetched_at: chrono::Local::now(),
-        }
-    }
-
-    /// `Action::CityResolved` must write through to `app.live.city_loc`
-    /// — the City screen's render reads from this snapshot, not from a
-    /// `tx` round-trip. A refactor that drops the write would leave
-    /// the screen showing "(locating…)" forever.
-    #[test]
-    fn city_resolved_writes_through_to_live_snapshot() {
-        let mut app = fresh_app();
-        assert!(
-            app.live.city_loc.try_read().unwrap().is_none(),
-            "snapshot starts None"
-        );
-        let loc = city_loc();
-        app.handle_action_for_test(Action::CityResolved(loc.clone()));
-        let stored = app.live.city_loc.try_read().unwrap();
-        let stored = stored.as_ref().expect("snapshot populated after CityResolved");
-        assert_eq!(stored.name, "Seattle");
-        assert!((stored.lat - 47.6062).abs() < 1e-9);
-        assert_eq!(stored.timezone, "America/Los_Angeles");
-    }
-
-    /// `Action::CityWeatherRefreshed` must write through to
-    /// `app.live.city_weather`. Same shape as the location arm.
-    #[test]
-    fn city_weather_refreshed_writes_through_to_live_snapshot() {
-        let mut app = fresh_app();
-        assert!(app.live.city_weather.try_read().unwrap().is_none());
-        let w = city_weather();
-        app.handle_action_for_test(Action::CityWeatherRefreshed(w));
-        let stored = app.live.city_weather.try_read().unwrap();
-        let stored = stored.as_ref().expect("snapshot populated after CityWeatherRefreshed");
-        assert!((stored.temp_c - 9.2).abs() < 1e-3);
-        assert_eq!(stored.humidity_pct, 78);
-        assert_eq!(stored.weather_code, 3);
-        assert_eq!(stored.next_12h_precip_pct.as_deref(), Some(&[10u8, 20][..]));
-    }
-
-    /// A second `CityResolved` must overwrite the first snapshot —
-    /// this is what happens when the IP geolocator lands on a
-    /// different city than the initial bundled-seattle fallback.
-    #[test]
-    fn city_resolved_overwrites_previous_snapshot() {
-        let mut app = fresh_app();
-        app.handle_action_for_test(Action::CityResolved(city_loc()));
-        let mut tokyo = city_loc();
-        tokyo.name = "Tokyo".into();
-        tokyo.lat = 35.6762;
-        tokyo.lon = 139.6503;
-        tokyo.timezone = "Asia/Tokyo".into();
-        tokyo.bbox = Some([35.5, 139.5, 35.8, 139.8]);
-        app.handle_action_for_test(Action::CityResolved(tokyo));
-        let stored = app.live.city_loc.try_read().unwrap();
-        let stored = stored.as_ref().expect("snapshot populated");
-        assert_eq!(stored.name, "Tokyo");
-        assert_eq!(stored.timezone, "Asia/Tokyo");
-        assert!((stored.lat - 35.6762).abs() < 1e-9);
-    }
-
-    /// `CityCtrlRefresh` is the user-driven `r` keypress. We don't
-    /// exercise the actual HTTP path here (that's wiremock-backed in
-    /// the geo/weather unit tests); we just confirm the action
-    /// variant exists and `handle_action_for_test` correctly
-    /// ignores it (the real spawn lives in the dispatcher's
-    /// runtime arm, not this helper).
-    #[test]
-    fn city_ctrl_refresh_is_a_known_action_variant() {
-        // Compile-time pin: the variant must exist. If a future
-        // rename removes it, this match fails to compile.
-        let _variant = Action::CityCtrlRefresh;
-    }
-
-    #[test]
-    fn sidebar_up_advances_offset_when_cursor_still_below_window_top() {
-        // total=15, visible=5, offset=3, idx=10 is an INVALID pre-state
-        // (cursor 10 is outside window [3..8)). `clamp_sidebar_offset`
-        // must immediately correct offset to 6 so the cursor lives
-        // inside [6..11). After Up: idx=9; clamp must retreat offset
-        // to 5 (window [5..10) contains idx=9).
-        let mut app = fresh_app();
-        app.sidebar_idx = 10;
-        app.sidebar_offset = 3;
-        app.sidebar_visible = 5;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(
-            app.sidebar_offset, 6,
-            "clamp actively advances offset to keep idx visible"
-        );
-        app.sidebar_idx -= 1; // 9
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(
-            app.sidebar_offset, 5,
-            "offset retreats as cursor re-enters from above"
-        );
-    }
-
-    #[test]
-    fn sidebar_up_retreats_offset_when_cursor_re_enters_window_top() {
-        // total=15, visible=5.
-        // Start: idx=10 — outside any sensible window so clamp picks the
-        // minimum offset that keeps idx visible: desired=(10-5+1).min(10)=6.
-        // Window is [6..11), contains idx=10. ✓
-        // After Up: idx=9 → desired=5. Offset retreats 6→5.
-        // After Up: idx=8 → desired=4. Offset retreats 5→4.
-        // After Up: idx=4 → idx<visible so desired=0. Full collapse.
-        // This pins the retreat contract: each Up moves the offset closer
-        // to 0 as long as the cursor stays visible.
-        let mut app = fresh_app();
-        app.sidebar_idx = 10;
-        app.sidebar_offset = 0;
-        app.sidebar_visible = 5;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(app.sidebar_offset, 6, "minimum offset for idx=10");
-
-        app.sidebar_idx = 9;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(app.sidebar_offset, 5, "retreats as cursor moves up");
-
-        app.sidebar_idx = 8;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(app.sidebar_offset, 4, "continues retreating");
-
-        app.sidebar_idx = 4;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(
-            app.sidebar_offset, 0,
-            "collapses to 0 once idx drops below visible"
-        );
-    }
-
-    #[test]
-    fn sidebar_visible_defaults_to_zero_and_clamp_clamps_offset_to_zero() {
-        // Before the first frame renders, `sidebar_visible` is still 0.
-        // `clamp_sidebar_offset` treats 0 visible as "no window" and
-        // collapses `sidebar_offset` to 0 — guaranteeing the handler
-        // can't leak an old offset into the first render.
-        let mut app = fresh_app();
-        assert_eq!(app.sidebar_visible, 0, "default visible is 0");
-        app.sidebar_offset = 99;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(
-            app.sidebar_offset, 0,
-            "visible=0 collapses any prior offset to 0"
-        );
-    }
-
-    #[test]
-    fn sidebar_offset_clamps_to_total_minus_visible_when_cursor_at_end() {
-        // Boundary: cursor at the very last index, offset must saturate
-        // at total - visible (10 in this case), never overshoot.
-        let mut app = fresh_app();
-        app.sidebar_idx = 14; // last
-        app.sidebar_offset = 0;
-        app.sidebar_visible = 5;
-        app.clamp_sidebar_offset(15, app.sidebar_visible);
-        assert_eq!(
-            app.sidebar_offset, 10,
-            "offset saturates at total - visible"
-        );
-    }
 
     // -------------------------------------------------------------------------
     // Module 2.2 — `dedupe_logs_into` keeps the recent-logs buffer free of
