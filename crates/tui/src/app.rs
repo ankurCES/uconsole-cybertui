@@ -867,6 +867,10 @@ pub struct App {
     /// `handle_key` consumes the next non-modifier event and writes
     /// it into `app.keymap.bindings[action]`, then clears this.
     pub keymap_capture: Option<NavAction>,
+    /// Cursor index in the Settings → Keys sub-mode list (0 = Up,
+    /// `NavAction::ALL.len() - 1` = Quit). Tracks the row the user
+    /// is currently inspecting / about to capture / clear.
+    pub keymap_selected: usize,
     /// Last-known city the user picked via the City screen's `c` modal
     /// (or `None` if they haven't overridden the IP-geolocated default).
     pub city_override: Option<String>,
@@ -1161,6 +1165,7 @@ impl App {
             keymap: prefs.keymap,
             keymap_editing: false,
             keymap_capture: None,
+            keymap_selected: 0,
             city_override: prefs.city,
             show_help: false,
             running: true,
