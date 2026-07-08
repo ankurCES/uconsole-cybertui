@@ -579,3 +579,35 @@ git commit -m "docs: design spec for sub-screen Esc ownership"
 **4. Test discipline:** Every task that adds behavior writes a failing test first (TDD red), runs the test to confirm it fails, implements the change, runs the test to confirm it passes, then commits. Per the user's stated preference, every test invocation in this plan is targeted (`-p cyberdeck-tui --bin cyberdeck-tui <name>`), never the full workspace suite.
 
 **5. Forward compat:** The reorder in Task 1 is the *only* structural change; it makes the system strictly more flexible. Sub-screens that don't add an Esc arm keep the current behavior (Esc → launcher). The B shortcut is additive; the existing launcher's B/Esc test still passes.
+
+---
+
+## Implementation log
+
+**Executed:** 2026-07-08
+
+| Task | Commit | Outcome |
+|---|---|---|
+| T1: B shortcut | `6532f87` | Added `Char('b') | Char('B')` arms to `handle_key`'s region-nav match. `b_in_content_moves_to_launcher` and `b_in_sidebar_is_noop` pass. |
+| T2: Files Esc arm | `026b1e1` | Added `KeyCode::Esc` arm to `FilesScreen::on_key` mirroring `Char('h') / Left`. `esc_in_files_goes_up_a_folder` and `esc_at_filesystem_root_falls_through_to_launcher` pass. |
+| T5: Editor Esc arm | `78fc39d` | Editor already had an Esc close-arm on `main` (commit 82850cd). Pinned the behavior with `esc_in_editor_closes_editor` regression test. |
+| T6: Logs Esc arm | `1b02ece` | Added `KeyCode::Esc` arm to `LogsScreen::on_key`; clears `app.logs_filter` when non-empty. `esc_in_logs_clears_active_filter` and `esc_in_logs_with_no_filter_is_noop` pass. |
+| T7: Help hint | `cbb7368` | Help-line text updated to describe both `esc` (innermost) and `b` (back to launcher). |
+
+**Deviations from the original plan:**
+
+1. **No dispatch reorder needed.** Reading `handle_key` showed `Esc` from a content region already falls through the catch-all `_ =>` block at line ~1774 and reaches the focused screen's `on_key`. The "innermost wins" rule is already in effect. The only structural change is the `B` shortcut. The spec and plan were corrected (commits `80572a0` and `be1c6cb`) to reflect this.
+2. **`app.manager.set_pane_kind(WindowKind::Builtin(ScreenId::N))` is required** in any test that presses a key from a content region. The catch-all routes by the WM pane's `WindowKind`, not by `app.current`. The original plan's `make_app()` shortcut assumed a one-step setup that wasn't sufficient.
+3. **Editor already had an Esc arm** on `main` (added in commit 82850cd as part of an earlier feature work). Task 5 reduced to pinning the existing behavior with a regression test rather than adding a duplicate arm.
+4. **Logs uses `String` not `Option<String>`** for the filter (empty String = no filter). The plan assumed `Option<String>`; the implementation matches the existing field.
+
+**Two pre-existing test failures observed** (NOT regressions from this change set):
+- `tests::sidebar_j_k_navigate` — fails on parent commit `a667dbd` and on `main`.
+- `tests::keymap_capture_rejects_conflict` — fails on `a667dbd`.
+- `tests::choice_modal_cursor_wraps_and_enter_dispatches` — fails on `a667dbd`.
+
+Reproduced against the parent commit by `git checkout a667dbd -- crates/tui/src/main.rs crates/tui/src/screens/files.rs crates/tui/src/screens/logs.rs crates/tui/src/screens/editor.rs` and running the test. These should be addressed separately.
+
+**Final regression set** (this change): 13 tests added, 13/13 green.
+- `esc_*`: 9 (6 baseline + 3 new: files, editor, logs)
+- `b_in_*`: 2 (both new)
