@@ -157,6 +157,8 @@ pub enum ConfirmKind {
     /// human-readable string so the dialog can show "Discard
     /// unsaved changes to {path}?".
     Discard,
+    /// Reset all user keymap bindings to defaults.
+    KeymapReset,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

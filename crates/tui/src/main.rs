@@ -1876,6 +1876,16 @@ async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind
             app.discard_editor();
             return;
         }
+        // Resetting the user keymap is a pure in-memory reset + prefs
+        // write on App, same shape as Discard above. Mirrors that
+        // arm's early-return pattern.
+        ConfirmKind::KeymapReset => {
+            let _ = arg;
+            app.keymap = crate::keymap::Keymap::default();
+            app.save_prefs();
+            app.push_toast(ToastKind::Info, "keymap reset to defaults".to_string());
+            return;
+        }
     };
     let _ = tx.send(Action::Run(act)).await;
 }
@@ -2473,9 +2483,15 @@ async fn handle_action(
                         format!("cleared binding for {}", action.label()));
                 }
                 K::ResetAll => {
-                    app.keymap = crate::keymap::Keymap::default();
-                    app.save_prefs();
-                    app.push_toast(ToastKind::Info, "keymap reset to defaults".to_string());
+                    // Don't wipe unilaterally — confirm first. The actual
+                    // `Keymap::default()` swap lives in `run_confirm`'s
+                    // `ConfirmKind::KeymapReset` arm so the user gets
+                    // the same confirm-modal UX as Reboot/Shutdown/etc.
+                    app.modal = Modal::Confirm {
+                        message: "Reset all key bindings to defaults?".to_string(),
+                        kind: crate::app::ConfirmKind::KeymapReset,
+                        arg: String::new(),
+                    };
                 }
                 K::ExitMode => {
                     app.keymap_capture = None;
@@ -3428,6 +3444,24 @@ mod tests {
         assert!(raw.contains("\"down\""), "down binding not in prefs: {raw}");
         assert!(raw.contains("\"Char\""), "expected KeyCode::Char in prefs: {raw}");
         assert!(raw.contains("\"s\""), "expected 's' in prefs: {raw}");
+    }
+
+    #[tokio::test]
+    async fn keymap_capture_rejects_conflict() {
+        use crate::keymap::NavAction;
+        let (_tx, _rx, mut app) = make_app();
+        // 'j' is already bound to Down — pressing it for Up should be rejected.
+        app.keymap.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.keymap_capture = Some(NavAction::Up);
+        let _ = handle_key(&mut [], &mut app,
+            &tokio::sync::mpsc::channel::<Action>(1).0,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)).await;
+        // Capture must still be armed (user needs another chance to pick).
+        assert_eq!(app.keymap_capture, Some(NavAction::Up),
+                   "conflict should keep capture armed");
+        // Up must NOT have been rebound to 'j'.
+        assert!(app.keymap.get(NavAction::Up).is_none(),
+                "conflict must not store a new binding");
     }
 
     #[test]
