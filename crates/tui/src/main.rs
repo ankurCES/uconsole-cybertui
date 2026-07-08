@@ -4287,6 +4287,93 @@ mod tests {
         );
     }
 
+    /// Task 6 — Logs screen claims `Esc` to dismiss the active filter.
+    /// When `app.logs_filter` is non-empty, the screen clears it and
+    /// returns `true` from `on_key`, so the launcher does NOT take Esc.
+    /// The catch-all in `handle_key` routes `Esc` to whichever screen the
+    /// focused WM pane is currently displaying; mirror `switch_screen`
+    /// so the Builtin kind points at LogsScreen.
+    #[tokio::test]
+    async fn esc_in_logs_clears_active_filter() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Logs;
+        app.set_region(Region::ContentLeft);
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Logs,
+            ));
+        // An active filter is just a non-empty `logs_filter`.
+        app.logs_filter = "error".to_string();
+        assert!(
+            !app.logs_filter.is_empty(),
+            "precondition: filter is active"
+        );
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert!(
+            app.logs_filter.is_empty(),
+            "Esc should clear the active filter, got {:?}",
+            app.logs_filter
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "screen claimed Esc; region should stay in content"
+        );
+    }
+
+    /// Task 6 — Logs screen does NOT claim `Esc` when no filter is
+    /// active, so the launcher can still take it. The catch-all in
+    /// `handle_key` only forwards the key once; if Logs returns
+    /// `false`, nothing else handles Esc from a content region and
+    /// the region stays put (Esc is a no-op at the launcher, matching
+    /// the `esc_at_filesystem_root_falls_through_to_launcher` contract).
+    #[tokio::test]
+    async fn esc_in_logs_with_no_filter_is_noop() {
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Logs;
+        app.set_region(Region::ContentLeft);
+        let _ = app
+            .manager
+            .set_pane_kind(crate::wm::window::WindowKind::Builtin(
+                crate::app::ScreenId::Logs,
+            ));
+        assert!(
+            app.logs_filter.is_empty(),
+            "precondition: no filter is set"
+        );
+
+        handle_key(
+            &mut screens,
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert!(
+            app.logs_filter.is_empty(),
+            "Esc with no active filter must not mutate the filter"
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "no filter active means Logs returns false; region stays put"
+        );
+    }
+
     #[tokio::test]
     async fn b_in_content_moves_to_launcher() {
         let mut screens = build_screens();

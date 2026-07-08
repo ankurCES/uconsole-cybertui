@@ -23,6 +23,20 @@ impl Screen for LogsScreen {
 
     fn on_key(&mut self, key: KeyEvent, app: &mut App) -> bool {
         match key.code {
+            KeyCode::Esc => {
+                // "Innermost wins" — Logs claims Esc to dismiss the
+                // active filter (when one is set). If no filter is
+                // active, return `false` so the catch-all in
+                // `handle_key` doesn't claim the key — there is no
+                // launcher fall-through for content regions today, so
+                // Esc is effectively a no-op in that case.
+                if !app.logs_filter.is_empty() {
+                    app.logs_filter.clear();
+                    true
+                } else {
+                    false
+                }
+            }
             KeyCode::Char('c') => {
                 app.logs.clear();
                 app.logs_offset = 0;
