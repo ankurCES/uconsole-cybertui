@@ -22,86 +22,101 @@
 
 ---
 
-### Task 1: Reorder `handle_key` so the screen sees Esc first
+### Task 1: Add `B` shortcut for "back to launcher" (no reorder needed)
+
+**Background (corrected from initial plan):** Reading `handle_key` in `crates/tui/src/main.rs:1088-1802` shows that `Esc` from a content region already falls through to the focused screen's `on_key` via the catch-all `_ =>` block at line ~1774. The "innermost wins" rule is already the default behavior. The only structural change is adding the `B` shortcut (which currently has no handler at all in `handle_key`).
 
 **Files:**
-- Modify: `crates/tui/src/main.rs:1428-1651` (the section after the modals, around the menu-bar and region-nav blocks)
+- Modify: `crates/tui/src/main.rs` (the region-nav block in the big match — add a new arm for `Char('b') | Char('B')`)
+- Test: `crates/tui/src/main.rs` (add the B tests to `mod tests`)
 
 - [ ] **Step 1: Write the failing test**
 
-Add to the `mod tests` block of `crates/tui/src/main.rs` (find an existing render/handle_key test for the exact style; the existing `esc_from_sidebar_goes_to_content` test around line 3044 is a good model):
+Add to `mod tests` of `main.rs`. Look at the existing `b_from_sidebar_is_noop` style at the end of the test module for the `make_app` / `handle_key` idiom (e.g. `app_with_n_panes` near line 4148 or `make_app` if it exists — pick whichever the rest of the test file uses):
 
 ```rust
 #[tokio::test]
-async fn esc_in_content_dispatches_to_screen_on_key_first() {
-    use crate::screens::files::FilesScreen;
-    use crate::app::ScreenId;
-    use crate::app::Region;
-    // Wire the Files screen so screen.on_key sees the Esc.
-    let (_tx, _rx, mut app) = make_app();
-    app.current = ScreenId::Files;
+async fn b_in_content_moves_to_launcher() {
+    let mut screens = build_screens();
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+    let mut app = fresh_app_sidebar();
     app.set_region(Region::ContentLeft);
-    // Pre-set a non-root cwd so the Files screen has a parent to go to.
-    let dir = tempfile::tempdir().unwrap();
-    let nested = dir.path().join("a").join("b");
-    std::fs::create_dir_all(&nested).unwrap();
-    app.files_cwd = nested.clone();
 
-    let _ = handle_key(&mut [Box::new(FilesScreen)], &mut app, &tokio::sync::mpsc::channel::<Action>(1).0,
-                       KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)).await;
+    handle_key(&mut screens, &mut app, &tx,
+               KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)).await;
 
-    // After this change, the screen should claim Esc and go up a folder.
-    // The exact assertion depends on what the screen's Esc arm does; we
-    // assert here that the launcher did NOT take it (region unchanged).
-    assert_eq!(app.region, Region::ContentLeft,
-               "screen should claim Esc; region should stay in content");
+    assert_eq!(app.region, Region::Sidebar, "B from ContentLeft should move focus to launcher");
+}
+
+#[tokio::test]
+async fn b_in_sidebar_is_noop() {
+    let mut screens = build_screens();
+    let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+    let mut app = fresh_app_sidebar();
+    app.set_region(Region::Sidebar);
+
+    handle_key(&mut screens, &mut app, &tx,
+               KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE)).await;
+
+    assert_eq!(app.region, Region::Sidebar, "B in sidebar is a no-op");
 }
 ```
 
-(The test uses the existing `handle_key` signature; if `handle_key` doesn't take a `&mut [Box<dyn Screen>]` parameter, adjust to whatever it actually takes. The point of the test is to assert that the region is *not* changed by a launcher "back" action — i.e. the screen's `on_key` consumed the Esc.)
+If `build_screens` / `fresh_app_sidebar` don't exist in your test module, use whatever `make_app` / `app_with_n_panes` helpers the file already uses. The test signature is `handle_key(&mut screens, &mut app, &tx, key)`.
 
-- [ ] **Step 2: Run the test, confirm it fails**
-
-Run:
-```bash
-cargo test -p cyberdeck-tui --bin cyberdeck-tui esc_in_content_dispatches_to_screen_on_key_first
-```
-
-Expected: FAIL. Today the launcher eats Esc and the region changes to Sidebar. After the reorder, the screen sees it first and the region stays ContentLeft.
-
-- [ ] **Step 3: Reorder the dispatch in `handle_key`**
-
-In `crates/tui/src/main.rs`, the `handle_key` function currently has the region-nav step (the "B/Esc" block) at lines ~1550-1651, *before* the screen `on_key` call. The screen `on_key` call is at the end of the function (after the region-nav block).
-
-Move the region-nav "Esc → leave to sidebar" handler (the one at line 1645-1651, the `Esc if app.region == Region::Sidebar` arm and the launcher `Char('b')` fallback if any) to run **after** the screen's `on_key` call. The screen `on_key` call stays where it is (it's currently the last step before `false` falls through to "not handled").
-
-Concretely: cut the launcher-Esc arm from its current position and paste it immediately *after* the screen `on_key` call. If the current code uses a single `match` statement for the region nav, **do not** restructure the match — instead, **delete** the `Esc if app.region == Region::Sidebar` arm from its current `match` and re-add a new arm (or a separate `if` block) at the bottom of `handle_key` that handles the *fall-through* case: "if we got here, no screen claimed the Esc, so the launcher takes it."
-
-The result: any screen whose `on_key` returns `true` claims Esc; the rest fall through to the launcher.
-
-- [ ] **Step 4: Run the new test, confirm it passes**
+- [ ] **Step 2: Run the new tests, confirm they fail**
 
 Run:
 ```bash
-cargo test -p cyberdeck-tui --bin cyberdeck-tui esc_in_content_dispatches_to_screen_on_key_first
+cargo test -p cyberdeck-tui --bin cyberdeck-tui b_in_content_moves_to_launcher b_in_sidebar_is_noop
 ```
 
-Expected: PASS.
+Expected: both FAIL. Today there's no `Char('b')` arm in the dispatcher, so `app.region` stays in `ContentLeft`.
 
-- [ ] **Step 5: Run the existing sidebar-Esc test, confirm it still passes**
+- [ ] **Step 3: Add the `B` shortcut to the global match in `handle_key`**
+
+In `crates/tui/src/main.rs`, find the big match block that begins with the launcher-navigation arms (around line 1500) and ends at line ~1800. Add a new arm for `Char('b') | Char('B')` immediately after the `Esc if app.region == Region::Sidebar` arm (line 1645-1651). Place the new arm so it sits within the existing match expression:
+
+```rust
+Char('b') | Char('B')
+    if matches!(app.region, Region::ContentLeft | Region::ContentRight) =>
+{
+    // Dedicated "back to launcher" shortcut. From the launcher
+    // itself, B is a no-op (you're already there).
+    app.set_region(Region::Sidebar);
+    return false;
+}
+Char('b') | Char('B') if app.region == Region::Sidebar => {
+    // No-op — you're already at the launcher.
+    return false;
+}
+```
+
+The `return false` inside the match arms matches the existing style of the surrounding arms (`PageUp`, `Enter`, etc.).
+
+- [ ] **Step 4: Run the new tests, confirm they pass**
 
 Run:
 ```bash
-cargo test -p cyberdeck-tui --bin cyberdeck-tui esc_from_sidebar
+cargo test -p cyberdeck-tui --bin cyberdeck-tui b_in_content_moves_to_launcher b_in_sidebar_is_noop
 ```
 
-Expected: PASS. (The sidebar-Esc handler still fires for `region == Sidebar`; it just moved position in the file.)
+Expected: both PASS.
+
+- [ ] **Step 5: Run the existing sidebar Esc test, confirm it still passes (no regression from match-arm additions)**
+
+Run:
+```bash
+cargo test -p cyberdeck-tui --bin cyberdeck-tui 'esc_'
+```
+
+Expected: all 6 baseline tests still PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add crates/tui/src/main.rs
-git commit -m "refactor(tui): reorder handle_key so screen.on_key sees Esc first"
+git commit -m "feat(tui): B shortcut moves focus to launcher from any content region"
 ```
 
 ---
