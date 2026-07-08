@@ -35,6 +35,8 @@ use ratatui::text::Line;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio::time::interval;
 
+use crate::keymap::Keymap;
+
 pub use action::Action;
 pub use screen::ScreenId;
 pub use toast::{Toast, ToastKind};
@@ -851,6 +853,11 @@ pub struct App {
     /// Whether the City screen's right-hand weather panel is visible.
     /// Toggled with `w` on the City screen and surfaced in Settings.
     pub show_weather_panel: bool,
+    /// Active user keymap (Settings → Keys). Always populated from
+    /// `Prefs::keymap` at `App::new`; an empty map means "use the
+    /// built-in bindings". Mutated by the `Action::KeymapCmd` arm of the
+    /// dispatcher; persisted via `App::save_prefs`.
+    pub keymap: Keymap,
     /// Last-known city the user picked via the City screen's `c` modal
     /// (or `None` if they haven't overridden the IP-geolocated default).
     pub city_override: Option<String>,
@@ -1142,6 +1149,7 @@ impl App {
             units: prefs.units,
             traffic_overlay: prefs.traffic_overlay,
             show_weather_panel: prefs.show_weather_panel,
+            keymap: prefs.keymap,
             city_override: prefs.city,
             show_help: false,
             running: true,
@@ -1338,8 +1346,7 @@ impl App {
             units: self.units,
             traffic_overlay: self.traffic_overlay,
             show_weather_panel: self.show_weather_panel,
-            // TODO(Task 3): replace with self.keymap.clone() once App::keymap is wired.
-            keymap: crate::keymap::Keymap::default(),
+            keymap: self.keymap.clone(),
         };
         prefs.save();
     }
