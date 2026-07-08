@@ -16,7 +16,7 @@
 // up the full ratatui event loop. We re-export them here for the
 // binary so the rest of `main.rs` doesn't have to change.
 #[allow(unused_imports)]
-use cyberdeck_tui::{app, screens, theme, ui, util, wm};
+use cyberdeck_tui::{app, keymap, screens, theme, ui, util, wm};
 #[cfg(feature = "web")]
 #[allow(unused_imports)]
 use cyberdeck_tui::web_bridge;
@@ -1093,6 +1093,30 @@ async fn handle_key(
         // specific keys (e.g. a tablet profile that ignores the
         // volume buttons). Today every profile returns `Some`.
         None => return false,
+    };
+
+    // User keymap: if the user has rebound the pressed key to a
+    // canonical NavAction, rewrite the KeyCode to the built-in
+    // default *for that action* (Up/Down/Enter/etc.) so the rest of
+    // the handler — modal dispatch, global keys, screen on_key —
+    // keeps matching against the same KeyCode it's always matched
+    // against. Modifiers are preserved. See `keymap.rs`.
+    let key = match crate::keymap::resolve_keymap(key, &app.keymap) {
+        Some(crate::keymap::NavAction::Up)        => KeyEvent::new(KeyCode::Up,        key.modifiers),
+        Some(crate::keymap::NavAction::Down)      => KeyEvent::new(KeyCode::Down,      key.modifiers),
+        Some(crate::keymap::NavAction::Left)      => KeyEvent::new(KeyCode::Left,      key.modifiers),
+        Some(crate::keymap::NavAction::Right)     => KeyEvent::new(KeyCode::Right,     key.modifiers),
+        Some(crate::keymap::NavAction::Enter)     => KeyEvent::new(KeyCode::Enter,     key.modifiers),
+        Some(crate::keymap::NavAction::Esc)       => KeyEvent::new(KeyCode::Esc,       key.modifiers),
+        Some(crate::keymap::NavAction::Tab)       => KeyEvent::new(KeyCode::Tab,       key.modifiers),
+        Some(crate::keymap::NavAction::BackTab)   => KeyEvent::new(KeyCode::BackTab,   key.modifiers),
+        Some(crate::keymap::NavAction::NextScreen)=> KeyEvent::new(KeyCode::Tab,       key.modifiers),
+        Some(crate::keymap::NavAction::PrevScreen)=> KeyEvent::new(KeyCode::BackTab,   key.modifiers),
+        Some(crate::keymap::NavAction::Refresh)   => KeyEvent::new(KeyCode::Char('r'), key.modifiers),
+        Some(crate::keymap::NavAction::Help)      => KeyEvent::new(KeyCode::Char('?'), key.modifiers),
+        Some(crate::keymap::NavAction::Palette)   => KeyEvent::new(KeyCode::Char(':'), key.modifiers),
+        Some(crate::keymap::NavAction::Quit)      => KeyEvent::new(KeyCode::Char('q'), key.modifiers),
+        None => key,
     };
 
     // Modal handling first.
@@ -3247,6 +3271,30 @@ mod tests {
             app.launcher_offset, 5,
             "number-key commit advances cursor one tile"
         );
+    }
+
+    #[tokio::test]
+    async fn keymap_remap_routes_user_key_to_canonical() {
+        use crate::keymap::NavAction;
+        // make_app() is the existing test helper in this mod; it returns
+        // (tx, rx, app) and routes the dispatcher's actions through `tx`.
+        let (_tx, _rx, mut app) = make_app();
+        // Move focus to the sidebar so the Down arm in handle_key actually
+        // runs (it gates on `app.region == Region::Sidebar`).
+        app.set_region(crate::app::Region::Sidebar);
+        let initial = app.launcher_offset;
+        // User rebinds "go down" from KeyCode::Down to Char('s'). The rest
+        // of the TUI keeps matching against KeyCode::Down — we rewrite
+        // the keycode in handle_key so the user gets the same effect.
+        app.keymap.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        let _ = handle_key(&mut [], &mut app, &tokio::sync::mpsc::channel::<Action>(1).0,
+                           KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        // Side-effect assertion: pressing 's' should have moved the
+        // sidebar launcher cursor down (Down | Char('j') handler). We
+        // check `app.launcher_offset` because that's the field every
+        // existing sidebar-navigation test already asserts on.
+        assert_eq!(app.launcher_offset, initial + 1,
+                   "user-bound key 's' must move cursor down via the Down arm");
     }
 
     #[test]
