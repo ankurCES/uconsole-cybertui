@@ -1075,6 +1075,16 @@ async fn commit_launcher(app: &mut App) -> bool {
     false
 }
 
+/// True for any key event that represents a "real" key the user
+/// intended to bind (i.e. anything other than a bare modifier press,
+/// which on some terminals arrives as `KeyCode::Modifier(_)` while the
+/// user is still composing a chord). The capture loop in `handle_key`
+/// uses this to keep waiting on modifier-only events instead of
+/// silently storing "Shift" as a binding.
+fn is_captureable(k: &KeyEvent) -> bool {
+    !matches!(k.code, KeyCode::Modifier(_))
+}
+
 async fn handle_key(
     screens: &mut [Box<dyn Screen>],
     app: &mut App,
@@ -1082,6 +1092,48 @@ async fn handle_key(
     key: KeyEvent,
 ) -> bool {
     use KeyCode::*;
+
+    // User keymap capture loop. When the user enters capture mode on
+    // the Settings → Keys screen, the next non-modifier event is
+    // consumed here: stored as a binding, persisted, and the capture
+    // target is cleared. The event is *not* propagated to any other
+    // handler (modal/global/screen). Runs before the hardware shim so
+    // the user can bind any physical key, including one the shim would
+    // rewrite (e.g. uconsole X/Y/A/B → Up/Down/Enter/Esc).
+    if let Some(action) = app.keymap_capture {
+        if is_captureable(&key) {
+            // Conflict check: a single physical key can be bound to
+            // at most one NavAction. Reject duplicates with a toast
+            // and keep capture armed so the user can try again.
+            // `bindings` is `pub(crate)` and the binary crate is a
+            // separate compilation unit, so we scan via the public
+            // `iter()` accessor (see the matching comment on
+            // `Action::KeymapCmd(K::Clear)`).
+            let conflict = app.keymap.iter().find(|(_, v)| *v == key).map(|(k, _)| k);
+            if let Some(other) = conflict {
+                app.push_toast(ToastKind::Warn,
+                    format!("{:?} already bound to {} — pick a different key", key, other.label()));
+            } else {
+                app.keymap.bind(action, key);
+                app.save_prefs();
+                app.push_toast(ToastKind::Info,
+                    format!("{} → {}", action.label(), keymap::key_event_label(key)));
+                app.keymap_capture = None;
+            }
+            return false; // consumed
+        }
+        // Modifier-only press (Ctrl, Shift, Alt) — ignore and keep
+        // waiting for a real key.
+        if matches!(key.code, KeyCode::Modifier(_)) {
+            return false;
+        }
+        // Real key but the user wants to abort the capture (Esc).
+        if matches!(key.code, KeyCode::Esc) {
+            app.keymap_capture = None;
+            app.push_toast(ToastKind::Info, "capture cancelled".to_string());
+            return false;
+        }
+    }
 
     // Hardware-button remap. Runs first so the rest of the handler
     // (modal dispatch, global keys, screen on_key) sees a normal
@@ -3346,6 +3398,36 @@ mod tests {
         // existing sidebar-navigation test already asserts on.
         assert_eq!(app.launcher_offset, initial + 1,
                    "user-bound key 's' must move cursor down via the Down arm");
+    }
+
+    #[tokio::test]
+    async fn keymap_capture_stores_binding_and_persists() {
+        use crate::keymap::NavAction;
+        use crossterm::event::KeyCode;
+        use std::path::PathBuf;
+        // Point prefs at a temp file BEFORE App::new so the prefs loader
+        // (and the subsequent save_prefs call) writes into the sandbox
+        // instead of clobbering the developer's real prefs.
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", dir.path());
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
+        let mut app = crate::app::App::new(tx, rx);
+        app.keymap_capture = Some(NavAction::Down);
+        let _ = handle_key(&mut [], &mut app,
+            &tokio::sync::mpsc::channel::<Action>(1).0,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+
+        assert_eq!(app.keymap.get(NavAction::Down),
+                   Some(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
+        assert!(app.keymap_capture.is_none(), "capture must clear after success");
+
+        // Verify the binding landed on disk.
+        let prefs_path: PathBuf = dir.path().join("cyberdeck").join("prefs.json");
+        let raw = std::fs::read_to_string(&prefs_path).expect("prefs.json written");
+        assert!(raw.contains("\"down\""), "down binding not in prefs: {raw}");
+        assert!(raw.contains("\"Char\""), "expected KeyCode::Char in prefs: {raw}");
+        assert!(raw.contains("\"s\""), "expected 's' in prefs: {raw}");
     }
 
     #[test]
