@@ -199,7 +199,7 @@ fn render_settings_list(f: &mut Frame, area: Rect, app: &mut App, theme: &Theme,
     f.render_stateful_widget(list, list_area, &mut state);
 
     let hints = Paragraph::new(Line::from(Span::styled(
-        "  j/k scroll · ⏎ toggle row · t theme · m mouse · n nerd · w web|weather · u units · T traffic",
+        "  j/k scroll · ⏎ toggle row · t theme · m mouse · n nerd · w web|weather · u units · T traffic · K keys",
         theme.dim(),
     )));
     let hint_area = Rect::new(

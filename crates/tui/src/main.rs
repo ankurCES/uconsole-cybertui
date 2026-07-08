@@ -4520,4 +4520,86 @@ mod tests {
         let _ = std::fs::remove_dir(&empty);
         assert_eq!(result, "");
     }
+
+    // -----------------------------------------------------------------------
+    // Settings → Keys sub-mode render polish (Task 10).
+    //
+    // These render tests exercise the sub-mode block at the same widths the
+    // plan called out (80 / 100 / 120 / 140 cols × 32 rows) and assert that
+    // the " Keys " title is painted. A regression that strips the title (or
+    // panics inside the renderer at a narrow width) trips these.
+    // -----------------------------------------------------------------------
+
+    fn render_settings_keymap_text(app: &mut App, width: u16, height: u16) -> String {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::by_name(crate::theme::ThemeName::Dark);
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                let mut screen = screens::settings::SettingsScreen;
+                screen.render(f, area, app, &theme, true);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut rows: Vec<String> = Vec::with_capacity(buffer.area.height as usize);
+        for y in 0..buffer.area.height {
+            let mut row = String::with_capacity(buffer.area.width as usize);
+            for x in 0..buffer.area.width {
+                row.push(buffer[(x, y)].symbol().chars().next().unwrap_or(' '));
+            }
+            rows.push(row);
+        }
+        rows.join("\n")
+    }
+
+    fn app_with_keymap_submode() -> App {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        app.current = ScreenId::Settings;
+        app.keymap_editing = true;
+        app
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_80x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 80, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_100x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 100, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title at 100 cols; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_120x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 120, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title at 120 cols; got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn render_settings_keymap_submode_140x32() {
+        let mut app = app_with_keymap_submode();
+        let text = render_settings_keymap_text(&mut app, 140, 32);
+        assert!(
+            text.contains(" Keys "),
+            "Settings → Keys sub-mode must render the `Keys` title at 140 cols; got:\n{text}"
+        );
+    }
 }
