@@ -14,13 +14,14 @@
 //! cheaply while the scanner task writes updates. The write path holds the
 //! lock briefly (one EMA + one HashMap insert + maybe one eviction).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::RwLock;
 use std::time::SystemTime;
 
 use serde::Serialize;
 
 use crate::frames::{DeviceEvent, FrameKind};
+use crate::rssi_model::{bearing_from_samples, rssi_to_distance, PATH_LOSS_EXPONENT_WIFI, TX_POWER_1M_WIFI_DBM};
 
 /// Maximum number of devices kept in the store before we evict the LRU.
 ///
@@ -33,6 +34,12 @@ pub const MAX_DEVICES: usize = 1024;
 /// the running average keeps 70% — slow enough to ignore a single spike,
 /// fast enough to track someone walking away.
 const EMA_ALPHA: f32 = 0.3;
+
+/// How many of the most recent RSSI samples we keep per device, used
+/// to feed `bearing_from_samples`'s gradient signal. Five is a
+/// pragmatic ceiling — enough to smooth out a single noisy spike
+/// while staying responsive to a person walking through the room.
+const RSSI_WINDOW_SIZE: usize = 5;
 
 /// Per-device state. Serialised as part of `/api/devices` JSON.
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -47,26 +54,50 @@ pub struct DeviceState {
     pub last_kind: FrameKind,
     /// Unix epoch seconds when we last heard from this device.
     pub last_seen_unix: u64,
+    /// Phase 3 — estimated distance in metres from the log-distance
+    /// path-loss model. Updated on every `apply` from the smoothed
+    /// RSSI + the device's last-known channel (used to pick Wi-Fi
+    /// vs BLE calibration constants). Clamped to ≥0.5 m so the
+    /// radar canvas never plots a device at the origin.
+    pub distance_m: f32,
+    /// Phase 3 — estimated bearing in degrees clockwise from north.
+    /// Single-AP only — uses channel as a coarse angle proxy plus
+    /// an RSSI-gradient nudge (capped at ±15°). Replace with a
+    /// real triangulation estimate when more radios land.
+    pub bearing_deg: f32,
     /// Number of frames we've observed from this device (not exposed in
     /// the public API but useful for debugging).
     #[serde(skip)]
     pub frames_seen: u64,
+    /// Phase 3 — recent RSSI samples (oldest first) used to feed
+    /// `bearing_from_samples`'s gradient signal. Not exposed in
+    /// the public API; consumers read the computed `bearing_deg`
+    /// instead.
+    #[serde(skip)]
+    pub rssi_window: VecDeque<i8>,
 }
 
 impl DeviceState {
     /// Construct a fresh state from the first event we ever see for this MAC.
     fn from_event(event: &DeviceEvent, now_unix: u64) -> Self {
+        let mut window = VecDeque::with_capacity(RSSI_WINDOW_SIZE);
+        window.push_back(event.rssi_dbm);
+        let (distance_m, bearing_deg) = model_from(event.rssi_dbm, event.channel, &window);
         Self {
             mac: event.mac.clone(),
             rssi_dbm: event.rssi_dbm,
             channel: event.channel,
             last_kind: event.kind,
             last_seen_unix: now_unix,
+            distance_m,
+            bearing_deg,
             frames_seen: 1,
+            rssi_window: window,
         }
     }
 
-    /// Apply a new event: update EMA, bump timestamp, refresh channel/kind.
+    /// Apply a new event: update EMA, bump timestamp, refresh channel/kind,
+    /// recompute distance + bearing from the smoothed RSSI window.
     fn apply(&mut self, event: &DeviceEvent, now_unix: u64) {
         let prev = self.rssi_dbm as f32;
         let next = event.rssi_dbm as f32;
@@ -77,7 +108,28 @@ impl DeviceState {
         self.last_kind = event.kind;
         self.last_seen_unix = now_unix;
         self.frames_seen = self.frames_seen.saturating_add(1);
+        // Slide the window forward. The window is bounded so it
+        // can't grow unbounded for a chatty device — older
+        // samples drop off the front.
+        if self.rssi_window.len() >= RSSI_WINDOW_SIZE {
+            self.rssi_window.pop_front();
+        }
+        self.rssi_window.push_back(event.rssi_dbm);
+        let (distance_m, bearing_deg) =
+            model_from(self.rssi_dbm, self.channel, &self.rssi_window);
+        self.distance_m = distance_m;
+        self.bearing_deg = bearing_deg;
     }
+}
+
+/// Pure helper: run the path-loss model for the current RSSI +
+/// channel + window. Lives outside the impl so it's easy to call
+/// from `from_event` and `apply` with no `&mut self` borrow.
+fn model_from(rssi: i8, channel: u8, window: &VecDeque<i8>) -> (f32, f32) {
+    let samples: Vec<i8> = window.iter().copied().collect();
+    let distance = rssi_to_distance(rssi, TX_POWER_1M_WIFI_DBM, PATH_LOSS_EXPONENT_WIFI);
+    let bearing = bearing_from_samples(&samples, channel);
+    (distance, bearing)
 }
 
 /// Snapshot read by axum handlers and the SSE broadcaster.

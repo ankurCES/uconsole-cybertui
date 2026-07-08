@@ -35,6 +35,7 @@ futures.workspace = true
 pcap-file.workspace = true
 rust-embed.workspace = true
 mime_guess.workspace = true
+zbus = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }

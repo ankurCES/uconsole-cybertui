@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 
+use crate::ble_devices::{BleDeviceState, BleDeviceStore};
 use crate::csi::{VitalReading, VitalsStore};
 use crate::devices::{DeviceState, DeviceStore};
 use crate::frames::DeviceEvent;
@@ -37,6 +38,7 @@ use crate::tags::{Tag, TagDb};
 /// Shared state injected into every handler.
 pub struct AppState {
     pub store: Arc<DeviceStore>,
+    pub ble_store: Arc<BleDeviceStore>,
     pub tags: Arc<TagDb>,
     /// Latest CSI-derived vitals reading (breathing/heart/presence).
     pub vitals: Arc<VitalsStore>,
@@ -51,6 +53,14 @@ pub struct AppState {
 pub struct DevicesResponse {
     pub devices: Vec<DeviceState>,
     pub tags: HashMap<String, Tag>,
+}
+
+/// What `GET /api/ble_devices` returns. Same shape as the Wi-Fi
+/// `DevicesResponse` so the radar canvas can render both stores
+/// through the same template loop.
+#[derive(Debug, Serialize)]
+pub struct BleDevicesResponse {
+    pub devices: Vec<BleDeviceState>,
 }
 
 /// `POST /api/tags` body.
@@ -76,6 +86,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/health", get(health))
         .route("/api/vitals", get(get_vitals))
         .route("/api/devices", get(get_devices))
+        .route("/api/ble_devices", get(get_ble_devices))
         .route("/api/tags", get(get_tags))
         .route("/api/tags", post(post_tag))
         .route("/api/tags/:mac", delete(delete_tag))
@@ -105,6 +116,16 @@ async fn get_devices(State(state): State<Arc<AppState>>) -> Json<DevicesResponse
         .tags
         .overlay(devices.iter().map(|d| d.mac.as_str()));
     Json(DevicesResponse { devices, tags })
+}
+
+/// `GET /api/ble_devices` — snapshot of every BLE device the radar
+/// knows about. Same `(mac, distance_m, bearing_deg)` projection as
+/// the Wi-Fi store so the radar canvas renders both with the same
+/// template loop.
+async fn get_ble_devices(State(state): State<Arc<AppState>>) -> Json<BleDevicesResponse> {
+    Json(BleDevicesResponse {
+        devices: state.ble_store.snapshot(),
+    })
 }
 
 async fn get_tags(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

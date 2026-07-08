@@ -147,6 +147,10 @@ async fn shell_handler() -> Result<impl IntoResponse, axum::http::StatusCode> {
 pub async fn run_with(cfg: RunConfig) -> anyhow::Result<StandaloneLive> {
     let tags = Arc::new(TagDb::load(&cfg.tags_path)?);
     let store = Arc::new(DeviceStore::new());
+    // Phase 3 — BLE store mirrors the Wi-Fi one. Spun up here so
+    // the `/api/ble_devices` endpoint always returns a snapshot
+    // (empty is fine — it means no BLE adapter is reporting).
+    let ble_store = Arc::new(crate::ble_devices::BleDeviceStore::new());
     let vitals = Arc::new(crate::csi::VitalsStore::new());
 
     let (events_tx, _) = broadcast::channel::<DeviceEvent>(SSE_CHANNEL_CAPACITY);
@@ -155,11 +159,39 @@ pub async fn run_with(cfg: RunConfig) -> anyhow::Result<StandaloneLive> {
 
     let state = Arc::new(AppState {
         store: store.clone(),
+        ble_store: ble_store.clone(),
         tags: tags.clone(),
         vitals: vitals.clone(),
         events_tx: events_tx.clone(),
         scanner_tx: scanner_tx.clone(),
     });
+
+    // Phase 3 — BLE scanner spawn. Tries the live BlueZ source
+    // first; falls back to the Dev synthetic stream when
+    // bluetoothd isn't reachable so the radar canvas isn't blank
+    // on dev machines without Bluetooth hardware.
+    let ble_source = if std::env::var("WIFI_RADAR_BLE_DEV").is_ok() {
+        crate::ble_scanner::ScannerSource::Dev
+    } else {
+        crate::ble_scanner::ScannerSource::BlueZ
+    };
+    if let Some(handle) = crate::ble_scanner::spawn(ble_store.clone(), ble_source) {
+        // Park the handle so the spawned task isn't dropped
+        // (drop = immediate cancel via abort()). On real shutdown
+        // the axum server's `with_graceful_shutdown` aborts the
+        // runtime, which tears the task down with it — we don't
+        // call `stop()` explicitly here because `run_with` doesn't
+        // own the shutdown signal. A future enhancement is to wire
+        // `Stop` into the `StandaloneLive` handle so callers can
+        // cancel cleanly.
+        tokio::spawn(async move {
+            // Future: drive `handle.stop()` from the shutdown
+            // signal. For now we leak the handle (the JoinHandle
+            // is in the spawned task) which is fine — when axum
+            // aborts the runtime the inner task is torn down.
+            std::mem::forget(handle);
+        });
+    }
 
     // CSI vitals sensing (nexmon_csi → UDP). Additive: it runs alongside the
     // RSSI radar and only starts when a listen address is configured.

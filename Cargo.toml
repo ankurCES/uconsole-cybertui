@@ -37,6 +37,13 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# d-bus (used by wifi-radar's BLE scanner to subscribe to BlueZ
+# PropertiesChanged on /org/bluez/hci0 + per-device paths — mirrors
+# the ZzangKyu/ble-rssi-distance-estimater pydbus hook in pure Rust
+# so the BLE radar runs inside the same tokio runtime as the Wi-Fi
+# scanner, no Python subprocess needed).
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
 # misc
 chrono = { version = "0.4", features = ["serde"] }
 humantime = "2"

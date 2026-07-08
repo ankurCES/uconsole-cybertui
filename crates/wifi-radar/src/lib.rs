@@ -2,9 +2,12 @@
 
 pub mod api;
 pub mod assets;
+pub mod ble_devices;
+pub mod ble_scanner;
 pub mod csi;
 pub mod devices;
 pub mod frames;
+pub mod rssi_model;
 pub mod run;
 pub mod scanner;
 pub mod shell;
