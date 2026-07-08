@@ -29,24 +29,14 @@ The user reported two concrete symptoms:
 
 ## Rule
 
-**Innermost consumer wins.** The dispatch order in `handle_key` is re-ordered so that the focused screen's `on_key` runs **before** the launcher's "Esc → leave" handler. If the screen returns `false` on Esc, control falls through to the launcher.
+**Innermost consumer wins.** This is already the natural behavior of `main::handle_key`: modals consume Esc, the menu dropdown consumes Esc, the launcher's `Esc` arm (line 1645) consumes Esc *only* when `app.region == Region::Sidebar`, and any other Esc falls through the big match's catch-all `_ =>` block (line ~1774) which forwards to the focused screen's `on_key`. If the screen returns `false`, `handle_key` returns `false` and nothing else claims the Esc — meaning the launcher does NOT get it from a content region in that case. (Today, a screen returning `false` on Esc from a content region simply leaves focus where it is, which is the desired "innermost wins" semantics.)
 
-The full order after this change:
+The new work does **not** reorder anything. It just *exercises* the existing dispatch by:
 
-```text
-1. Capture loop (keymap rebind)  → consumes its own Esc
-2. Hardware shim (wm::keymap)    → may rewrite the keycode
-3. User keymap resolve           → may rewrite the keycode
-4. Modal is open?                → consumes its own Esc
-5. Menu bar dropdown is open?    → consumes its own Esc
-6. Region is Sidebar?            → Esc moves to content (unchanged)
-7. **NEW: screen.on_key() gets Esc first**
-8. If screen returned false on Esc → launcher focus
-9. Global shortcut keys (Ctrl+M, etc.)
-10. Region nav between content-left/right (Tab/BackTab)
-```
+1. Adding `Esc` arms to the three screens that have an obvious "back" action: `Files` (go up a folder), `Editor` (close the editor), `Logs` (clear the active filter).
+2. Adding a dedicated `B` ("back to launcher") shortcut that is unambiguous regardless of which screen is focused.
 
-**The only structural change** is swapping steps 7 and 8.
+Why the spec text originally claimed a reorder was needed: an earlier draft assumed the launcher's `Esc` arm was claiming all Esc unconditionally. Re-reading the code, the arm is *gated on `region == Sidebar`*. For content regions, Esc was always going to the catch-all `_ =>` screen forward. So the structural change the spec describes ("swap steps 7 and 8") is actually just adding the `B` shortcut — the rest of the architecture was already correct.
 
 ## Per-screen decisions
 
