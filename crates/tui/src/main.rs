@@ -4327,6 +4327,58 @@ mod tests {
         assert_eq!(app.region, Region::Sidebar, "B in sidebar is a no-op");
     }
 
+    /// Module 4 — the editor (a hidden builtin, reachable only from
+    /// Files via `e`) must claim `Esc` for itself and return focus to
+    /// Files. The catch-all in `handle_key` only reaches the screen's
+    /// `on_key` when the focused pane's `WindowKind` matches a screen
+    /// in the `screens` vec; for the editor test we slice in just an
+    /// `EditorScreen` so the catch-all dispatches `Esc` to it.
+    #[tokio::test]
+    async fn esc_in_editor_closes_editor() {
+        use crate::screens::editor::EditorScreen;
+        use crate::wm::window::WindowKind;
+        let mut app = fresh_app_sidebar();
+        app.current = crate::app::ScreenId::Editor;
+        app.set_region(Region::ContentLeft);
+        let _ = app.manager.set_pane_kind(WindowKind::Builtin(
+            crate::app::ScreenId::Editor,
+        ));
+        // Clean editor (default state — no file loaded) so Esc takes
+        // the "focus back to Files" branch, not the Discard-confirm
+        // branch.
+        app.editor_dirty = false;
+        assert_eq!(
+            app.manager.focused_pane_kind(),
+            Some(WindowKind::Builtin(crate::app::ScreenId::Editor)),
+            "precondition: focused pane is the editor"
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        handle_key(
+            &mut [Box::new(EditorScreen)],
+            &mut app,
+            &tx,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        )
+        .await;
+
+        assert_eq!(
+            app.manager.focused_pane_kind(),
+            Some(WindowKind::Builtin(crate::app::ScreenId::Files)),
+            "Esc on a clean editor must focus the Files pane"
+        );
+        assert!(
+            matches!(app.modal, Modal::None),
+            "Esc on a clean editor must not open any modal, got {:?}",
+            app.modal
+        );
+        assert_eq!(
+            app.region,
+            Region::ContentLeft,
+            "region should stay in content (screen claimed Esc)"
+        );
+    }
+
     #[tokio::test]
     async fn toast_log_down_advances_offset_clamped_to_history_len() {
         let mut app = fresh_app_sidebar();
