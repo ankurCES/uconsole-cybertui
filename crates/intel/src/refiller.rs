@@ -25,6 +25,7 @@ use tokio::time::{interval, MissedTickBehavior};
 /// HTTP client wrapper. We construct one per spawned task so each
 /// layer has its own connection pool — a wedged upstream can't
 /// starve the other layers' fetches.
+#[derive(Debug)]
 pub struct Client {
     inner: reqwest::Client,
 }

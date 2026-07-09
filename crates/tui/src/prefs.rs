@@ -181,6 +181,11 @@ impl Prefs {
         // Atomic on POSIX, best-effort on Windows. The cyberdeck-tui
         // target is Linux/macOS so this is fine.
         fs::rename(&tmp, path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+        }
         Ok(())
     }
 

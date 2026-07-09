@@ -163,18 +163,24 @@ pub async fn wifi_connect(ssid: &str, password: Option<&str>) -> CoreResult<()> 
     if ssid.is_empty() {
         return Err(CoreError::Invalid("ssid is empty".into()));
     }
-    let mut argv: Vec<String> = vec![
+    let argv: Vec<String> = vec![
         "nmcli".into(),
         "device".into(),
         "wifi".into(),
         "connect".into(),
         ssid.into(),
     ];
-    if let Some(p) = password {
-        argv.push("password".into());
-        argv.push(p.into());
+    if let Some(pw) = password {
+        // Pipe password via stdin so it doesn't appear in /proc/PID/cmdline.
+        // nmcli reads wifi password from stdin when invoked without the
+        // `password` arg on a network that requires one — but only with
+        // `--ask`. We pass the password on stdin to `--ask` mode.
+        let mut ask_argv = argv;
+        ask_argv.insert(1, "--ask".into());
+        crate::shell::run_with_stdin(ask_argv, Privilege::User, pw).await?;
+    } else {
+        run(argv, Privilege::User).await?;
     }
-    run(argv, Privilege::User).await?;
     Ok(())
 }
 

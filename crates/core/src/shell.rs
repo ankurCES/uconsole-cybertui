@@ -129,6 +129,84 @@ where
     }
 }
 
+/// Like `run`, but pipes `stdin_data` into the child's stdin.
+/// Used for passing secrets without exposing them in /proc/PID/cmdline.
+pub async fn run_with_stdin<I, S>(
+    argv: I,
+    privilege: Privilege,
+    stdin_data: &str,
+) -> CoreResult<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut parts: Vec<String> = argv.into_iter().map(|s| s.as_ref().to_string()).collect();
+    if parts.is_empty() {
+        return Err(CoreError::Invalid("empty argv".into()));
+    }
+
+    let already_root = tokio::fs::read_to_string("/proc/self/status")
+        .await
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(1))
+                .and_then(|n| n.parse::<u32>().ok())
+        })
+        .map(|uid| uid == 0)
+        .unwrap_or(false);
+    if matches!(privilege, Privilege::Sudo) && !already_root {
+        parts.insert(0, "pkexec".to_string());
+    }
+
+    let program = parts.remove(0);
+    let args = parts;
+    tracing::debug!(program = %program, args = ?args, "shell::run_with_stdin");
+
+    let mut cmd = Command::new(&program);
+    cmd.args(&args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let label = format!("{} {}", program, args.join(" "));
+    let stdin_bytes = stdin_data.as_bytes().to_vec();
+
+    let fut = async {
+        let mut child = cmd.spawn().map_err(CoreError::from)?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(&stdin_bytes).await;
+            drop(stdin);
+        }
+        let out = child.wait_with_output().await.map_err(CoreError::from)?;
+        Ok::<Output, CoreError>(Output {
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            status: out.status.code().unwrap_or(-1),
+        })
+    };
+
+    match timeout(DEFAULT_TIMEOUT, fut).await {
+        Ok(Ok(out)) if out.success() => Ok(out),
+        Ok(Ok(out)) => Err(CoreError::Command {
+            cmd: label,
+            detail: if out.stderr.trim().is_empty() {
+                format!("exit status {}", out.status)
+            } else {
+                out.stderr.trim().to_string()
+            },
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err(CoreError::Timeout {
+            cmd: label,
+            secs: DEFAULT_TIMEOUT.as_secs(),
+        }),
+    }
+}
+
 /// Read a single file under /sys or /proc and trim trailing whitespace.
 pub async fn read_sysfs(path: &str) -> CoreResult<String> {
     match tokio::fs::read_to_string(path).await {

@@ -507,7 +507,7 @@ pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 // Anything that needs to know "did the strip actually render this frame"
 // reads `tab_strip_rect` on the returned tuple.
 pub fn chunks(area: Rect) -> (Rect, Option<Rect>, Rect, Rect) {
-    let strip_visible = area.height >= 10;
+    let strip_visible = area.height >= 10 && area.width > 80;
     let outer = if strip_visible {
         Layout::default()
             .direction(Direction::Vertical)

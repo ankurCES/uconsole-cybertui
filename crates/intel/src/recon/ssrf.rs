@@ -53,9 +53,20 @@ pub fn validate_target(target: &str) -> Result<(), SsrfError> {
         check_ip(ip)?;
         return Ok(());
     }
-    // Otherwise treat as a hostname. The Recon layers that actually
-    // hit the network (DNS / WHOIS / SSL) should run `validate_target`
-    // after their own resolution step if they need it.
+    // Hostname denylist: block well-known internal names that resolve
+    // to loopback / link-local on every OS.
+    let lower = target.trim().to_lowercase();
+    let lower = lower.trim_end_matches('.');
+    if lower == "localhost"
+        || lower.ends_with(".local")
+        || lower.ends_with(".internal")
+        || lower == "metadata.google.internal"
+    {
+        return Err(SsrfError::Blocked {
+            addr: target.to_string(),
+            rule: "hostname denylist (localhost / .local / .internal)",
+        });
+    }
     Ok(())
 }
 
@@ -278,12 +289,18 @@ mod tests {
     }
 
     #[test]
-    fn validate_target_accepts_hostnames() {
-        // Hostnames are not IP-gated at this layer — the upstream
-        // OS resolver is expected to do its own checks.
+    fn validate_target_accepts_public_hostnames() {
         assert!(validate_target("example.com").is_ok());
         assert!(validate_target("sub.domain.example").is_ok());
-        assert!(validate_target("localhost").is_ok()); // resolver's job.
+    }
+
+    #[test]
+    fn validate_target_rejects_denylist_hostnames() {
+        assert!(validate_target("localhost").is_err());
+        assert!(validate_target("LOCALHOST").is_err());
+        assert!(validate_target("foo.local").is_err());
+        assert!(validate_target("bar.internal").is_err());
+        assert!(validate_target("metadata.google.internal").is_err());
     }
 
     #[test]

@@ -31,7 +31,7 @@ pub mod toast_compat {
 }
 
 /// Default bind address. Configurable via the `bind` argument.
-pub const DEFAULT_BIND: &str = "0.0.0.0:7878";
+pub const DEFAULT_BIND: &str = "127.0.0.1:7878";
 
 /// Run the web server. `live` is whatever implements `LiveRead` (a trait
 /// object so we don't have to thread the TUI's concrete `Live` through here).

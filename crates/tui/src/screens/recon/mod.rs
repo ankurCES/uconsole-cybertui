@@ -141,7 +141,7 @@ impl ReconScreen {
     }
 
     /// Render the right pane (query row + scrollable output area).
-    fn body_lines(&self) -> Vec<Line> {
+    fn body_lines(&self) -> Vec<Line<'_>> {
         let mut out = Vec::with_capacity(self.output.len() + 2);
         // Query row — rendered with a `>` prompt prefix.
         let q_disp = if self.query.is_empty() {

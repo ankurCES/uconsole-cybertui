@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
             }
             "--help" | "-h" => {
                 eprintln!("usage: cyberdeck-web [BIND_ADDR] [--token-file PATH]");
-                eprintln!("  BIND_ADDR   default: 0.0.0.0:7878");
+                eprintln!("  BIND_ADDR   default: 127.0.0.1:7878");
                 eprintln!("  --token-file  read bearer token from PATH (installer pins it)");
                 std::process::exit(0);
             }

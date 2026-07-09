@@ -66,7 +66,7 @@ fn parse_args() -> Args {
                 println!("cyberdeck-tui — a rich TUI for OS-level control on a cyberdeck.\n\n\
                           USAGE: cyberdeck-tui [OPTIONS]\n\n\
                           OPTIONS:\n  \
-                            --web            Also start the LAN web server (default 0.0.0.0:7878)\n  \
+                            --web            Also start the LAN web server (default 127.0.0.1:7878)\n  \
                             --web-bind ADDR  Bind address for the web server (e.g. 127.0.0.1:9000)\n  \
                             --config PATH    Path to a config file (optional)\n  \
                             -h, --help       Show this help\n");
@@ -143,7 +143,7 @@ async fn main() -> anyhow::Result<()> {
         let bind_default = args
             .web_bind
             .clone()
-            .unwrap_or_else(|| "0.0.0.0:7878".to_string());
+            .unwrap_or_else(|| "127.0.0.1:7878".to_string());
         tokio::spawn(async move {
             while let Some((reply, act)) = web_rx.recv().await {
                 match act {
@@ -190,7 +190,14 @@ async fn main() -> anyhow::Result<()> {
                                 };
                                 Arc::new(bridge)
                             };
-                            let serve = cyberdeck_web::run_with(&bind, live_arc, Some(w_tx), None);
+                            let token = cyberdeck_web::auth::Token::new();
+                            let _ = tx_for_task
+                                .send(Action::Toast(
+                                    ToastKind::Info,
+                                    format!("web auth token: {}", token.0),
+                                ))
+                                .await;
+                            let serve = cyberdeck_web::run_with(&bind, live_arc, Some(w_tx), Some(token));
                             tokio::select! {
                                 res = serve => {
                                     if let Err(e) = res {
@@ -507,11 +514,7 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
     // Toasts float above everything.
     ui::draw_toasts(f, f.area(), app, theme);
     // Modal overlay last so it sits on top.
-    draw_modal(f, f.area(), app, theme);
-}
-
-fn rect(x: u16, y: u16, w: u16, h: u16) -> ratatui::layout::Rect {
-    ratatui::layout::Rect::new(x, y, w, h)
+    wm::modal::draw_modal(f, f.area(), app, theme);
 }
 
 /// Phase 2 — substring-match a City palette query against the
@@ -537,455 +540,6 @@ fn city_picker_match(query: &str) -> Option<String> {
 }
 
 use ratatui::Frame;
-use ratatui::text::{Line, Span};
-
-/// Pure line builder for `Modal::Input`. Extracted so tests can assert on
-/// the rendered text directly without spinning up a `Buffer`/`Frame`.
-/// Behaviour: prompt line, live buffer line, then an `[ OK ]   [ Cancel ]`
-/// row so the affordance is visible to the user. Enter / Esc behaviour is
-/// unchanged (handled in `handle_key`).
-fn modal_input_lines(prompt: &str, buf: &str) -> Vec<Line<'static>> {
-    vec![
-        Line::from(prompt.to_string()),
-        Line::from(format!("> {buf}")),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::raw("[ OK ]"),
-            Span::raw("      "),
-            Span::raw("[ Cancel ]"),
-        ]),
-    ]
-}
-
-/// Pure line builder for `Modal::Secret`. Same shape as `modal_input_lines`
-/// but the buffer is masked with `•` so the real value never leaks into
-/// the rendered text.
-fn modal_secret_lines(prompt: &str, buf: &str) -> Vec<Line<'static>> {
-    let masked: String = std::iter::repeat('•').take(buf.chars().count()).collect();
-    vec![
-        Line::from(prompt.to_string()),
-        Line::from(format!("> {masked}▏")),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::raw("[ OK ]"),
-            Span::raw("      "),
-            Span::raw("[ Cancel ]"),
-        ]),
-    ]
-}
-
-fn draw_modal(f: &mut Frame, area: ratatui::layout::Rect, app: &App, theme: &Theme) {
-    match &app.modal {
-        Modal::None => {}
-        Modal::Help => {
-            // Keybindings overlay. Replaces the old hand-rolled
-            // Clear + Block + Paragraph with `popup::render_with_hints`
-            // so the help modal shares the same orbital-style chrome
-            // (shadow band, rounded border, key/description table) as
-            // every other popup on PR #5.
-            //
-            // The keys themselves are split into two columns by
-            // `render_with_hints`: the key gets `theme.key()` (the
-            // accent register) and the description gets `theme.fg()`.
-            //
-            // Entries are organised by region so a first-time user can
-            // read top-to-bottom and learn the D-pad contract: sidebar
-            // first (the natural starting point), then content panes,
-            // then modals. The old "←/→ = switch focus" line was the
-            // exact wording that misled users into thinking the left
-            // pane and right pane were symmetric and interchangeable;
-            // they're not, and the new descriptions say so explicitly.
-            crate::wm::popup::render_with_hints(
-                f,
-                area,
-                "help",
-                &[
-                    ("region · sidebar", ""),
-                    ("↑/↓ j/k", "move cursor"),
-                    ("enter / →", "open screen"),
-                    ("1..9 0", "jump to screen"),
-                    ("region · content", ""),
-                    ("↑/↓ j/k", "scroll list"),
-                    ("←/h", "step back (or sidebar)"),
-                    ("→/l", "step right (multi-pane)"),
-                    ("tab", "next screen"),
-                    ("shift-tab", "previous screen"),
-                    ("esc", "back (sub-screen · or leave to launcher)"),
-                    ("b",   "back to launcher"),
-                    ("anytime", ""),
-                    ("?", "this help"),
-                    (":", "command palette"),
-                    ("f10 / alt+f", "open menu bar"),
-                    ("←/→", "cycle tabs"),
-                    ("tab", "next screen"),
-                    ("shift-tab", "previous screen"),
-                    ("esc", "close menu / modal"),
-                    ("r", "refresh current screen"),
-                    ("q", "quit"),
-                    ("menu · file", ""),
-                    ("refresh all", "scan wifi/bluetooth/reload"),
-                    ("command palette…", "open command palette"),
-                    ("quit", "exit the tui"),
-                    ("menu · view", ""),
-                    ("units: metric", "°C, km/h"),
-                    ("units: imperial", "°F, mph"),
-                    ("toggle traffic overlay", "city map traffic"),
-                    ("toggle weather panel", "city weather pane"),
-                    ("menu · tools", ""),
-                    ("rescan wi-fi", "trigger wifi scan"),
-                    ("rescan bluetooth", "trigger bluetooth scan"),
-                    ("toggle web server", "start/stop http"),
-                    ("menu · help", ""),
-                    ("show help (?)", "this overlay"),
-                    ("toast log (T)", "view all toasts"),
-                ],
-                theme,
-            );
-        }
-        Modal::CommandPalette => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-            let mut lines: Vec<Line> = vec![Line::from(format!(":{}", app.palette_buf))];
-            let actions = palette_actions();
-            let q = app.palette_buf.to_lowercase();
-            let filtered: Vec<_> = actions
-                .iter()
-                .filter(|(_, label)| q.is_empty() || label.to_lowercase().contains(&q))
-                .take(8)
-                .collect();
-            for (i, (_, label)) in filtered.iter().enumerate() {
-                let style = if i == app.palette_idx {
-                    ratatui::style::Style::default()
-                        .fg(theme.selection_fg)
-                        .bg(theme.selection_bg)
-                } else {
-                    ratatui::style::Style::default().fg(theme.fg)
-                };
-                lines.push(Line::from(ratatui::text::Span::styled(
-                    label.to_string(),
-                    style,
-                )));
-            }
-            let w = 50.min(area.width.saturating_sub(4));
-            let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + area.height.saturating_sub(h + 2);
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines).block(
-                Block::default()
-                    .title(" command palette ")
-                    .borders(Borders::ALL)
-                    .border_style(theme.border(true)),
-            );
-            f.render_widget(p, rect);
-        }
-        Modal::Confirm { message, .. } => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-            let lines = vec![
-                Line::from(message.clone()),
-                Line::from(""),
-                Line::from("Press Y to confirm, N/Esc to cancel."),
-            ];
-            let w = 60.min(area.width.saturating_sub(4));
-            let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h)) / 2;
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" confirm ")
-                        .borders(Borders::ALL)
-                        .border_style(theme.warn()),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, rect);
-        }
-        Modal::Input { prompt, buf, .. } => {
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-            let lines = modal_input_lines(prompt, buf);
-            let w = 60.min(area.width.saturating_sub(4));
-            let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h)) / 2;
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines).block(
-                Block::default()
-                    .title(" input ")
-                    .borders(Borders::ALL)
-                    .border_style(theme.border(true)),
-            );
-            f.render_widget(p, rect);
-        }
-        Modal::Secret { prompt, buf, .. } => {
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-            let lines = modal_secret_lines(prompt, buf);
-            let w = 60.min(area.width.saturating_sub(4));
-            let h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h)) / 2;
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines).block(
-                Block::default()
-                    .title(" password ")
-                    .borders(Borders::ALL)
-                    .border_style(theme.warn()),
-            );
-            f.render_widget(p, rect);
-        }
-        Modal::Choice { prompt, options, cursor, .. } => {
-            use ratatui::layout::Rect;
-            use ratatui::text::{Line, Span};
-            use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph};
-            let lines: Vec<Line> = vec![Line::from(prompt.clone()), Line::from("")];
-            // Render up to 12 rows visible at once; the cursor scrolls the
-            // window if the list is longer than that.
-            let max_visible = 12usize;
-            let start = if *cursor >= max_visible { cursor + 1 - max_visible } else { 0 };
-            let end = (start + max_visible).min(options.len());
-            let items: Vec<ListItem> = options[start..end]
-                .iter()
-                .enumerate()
-                .map(|(i, opt)| {
-                    let real_i = start + i;
-                    let style = if real_i == *cursor {
-                        ratatui::style::Style::default()
-                            .fg(theme.selection_fg)
-                            .bg(theme.selection_bg)
-                    } else {
-                        ratatui::style::Style::default().fg(theme.fg)
-                    };
-                    ListItem::new(Line::from(Span::styled(opt.label.clone(), style)))
-                })
-                .collect();
-            let total = options.len();
-            let title = format!(" pick ({}/{}) ", cursor.saturating_add(1).min(total.max(1)), total);
-            let w = 60.min(area.width.saturating_sub(4));
-            let h = ((end - start) as u16 + 4).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h)) / 2;
-            let rect = rect(x, y, w, h);
-            f.render_widget(Clear, rect);
-            // Show the prompt as a header line above the list.
-            lines.iter().for_each(|l| {
-                f.render_widget(
-                    Paragraph::new(l.clone()),
-                    Rect::new(rect.x + 1, rect.y + 1, rect.width.saturating_sub(2), 1),
-                );
-            });
-            let list = List::new(items).block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(theme.border(true)),
-            );
-            // Render the list below the prompt + blank line.
-            let list_rect = Rect::new(
-                rect.x,
-                rect.y + 3,
-                rect.width,
-                rect.height.saturating_sub(3),
-            );
-            f.render_widget(list, list_rect);
-        }
-        Modal::Wizard(w) => {
-            use ratatui::text::{Line, Span};
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
-            let (header, body) = match w {
-                Wizard::WifiEnterprise { ssid, step, eap, identity, password, anon_or_cert } => {
-                    let h = format!("Wi-Fi Enterprise — {ssid}");
-                    let b = match step {
-                        0 => "Pick EAP method (PEAP/TTLS/TLS/PWD) and press Enter.".to_string(),
-                        1 => format!(
-                            "Identity: {}",
-                            identity.as_deref().unwrap_or("(typing)")
-                        ),
-                        2 => match eap.as_deref() {
-                            Some("TLS") => format!(
-                                "Path to client certificate: {}",
-                                anon_or_cert.as_deref().unwrap_or("(typing)")
-                            ),
-                            _ => format!(
-                                "Password: {}",
-                                if password.is_some() { "•••" } else { "(typing)" }
-                            ),
-                        },
-                        _ => "Ready to connect.".to_string(),
-                    };
-                    (h, b)
-                }
-            };
-            let lines = vec![Line::from(header), Line::from(""), Line::from(Span::styled(body, theme.warn()))];
-            let w_ = 60.min(area.width.saturating_sub(4));
-            let h_ = (lines.len() as u16 + 2).min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w_)) / 2;
-            let y = area.y + (area.height.saturating_sub(h_)) / 2;
-            let rect = rect(x, y, w_, h_);
-            f.render_widget(Clear, rect);
-            let p = Paragraph::new(lines)
-                .block(
-                    Block::default()
-                        .title(" wizard ")
-                        .borders(Borders::ALL)
-                        .border_style(theme.border(true)),
-                )
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, rect);
-        }
-        Modal::Progress { label, done, total, .. } => {
-            use ratatui::layout::Rect;
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Gauge, Paragraph};
-            let w_ = 60.min(area.width.saturating_sub(4));
-            let h_ = 5u16.min(area.height.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w_)) / 2;
-            let y = area.y + (area.height.saturating_sub(h_)) / 2;
-            let rect = rect(x, y, w_, h_);
-            f.render_widget(Clear, rect);
-            let header = Paragraph::new(Line::from(label.clone())).block(
-                Block::default()
-                    .title(" working ")
-                    .borders(Borders::ALL)
-                    .border_style(theme.warn()),
-            );
-            f.render_widget(header, Rect::new(rect.x, rect.y, rect.width, 3));
-            let pct = if *total == 0 {
-                None
-            } else {
-                Some(((done.saturating_mul(100)) / total).min(100) as u16)
-            };
-            let gauge_rect = Rect::new(
-                rect.x + 1,
-                rect.y + 3,
-                rect.width.saturating_sub(2),
-                1,
-            );
-            let label = if let Some(p) = pct {
-                format!("{done}/{total} ({p}%)")
-            } else {
-                "…".to_string()
-            };
-            let gauge = Gauge::default()
-                .gauge_style(theme.warn())
-                .label(label)
-                .ratio(pct.map(|p| p as f64 / 100.0).unwrap_or(0.0));
-            f.render_widget(gauge, gauge_rect);
-        }
-        Modal::AuthFailure { command, stderr, retry: _ } => {
-            let body = format!(
-                "Authentication failed: {command}\n\n{}\n\nPress R to retry, Esc to cancel.",
-                stderr
-            );
-            crate::wm::popup::render(
-                f,
-                area,
-                crate::wm::popup::Popup::new("auth required", &body)
-                    .with_hint("[r] retry   [esc] cancel"),
-                theme,
-            );
-        }
-        Modal::ToastLog => {
-            use ratatui::text::Line;
-            use ratatui::widgets::{Block, Borders, Clear, Paragraph};
-            // Newest-first: iterate the ring in reverse so the most recent
-            // entry lands on the topmost visible row. `toast_log_offset`
-            // skips further into the list (toward older entries) and is
-            // clamped to `total - visible` by the key handler so we
-            // never render a blank window.
-            let total = app.toast_history.len();
-            // Reserve at least 2 lines for the title + a one-line hint.
-            let h = (total.min(area.height.saturating_sub(4) as usize) as u16)
-                .max(3)
-                .min(area.height.saturating_sub(4));
-            let w = 70.min(area.width.saturating_sub(4));
-            let x = area.x + (area.width.saturating_sub(w)) / 2;
-            let y = area.y + (area.height.saturating_sub(h + 2)) / 2;
-            let rect = rect(x, y, w, h + 2);
-            f.render_widget(Clear, rect);
-
-            let visible = h as usize;
-            let max_off = total.saturating_sub(visible);
-            // Defensive clamp: the key handler should already keep this in
-            // range, but a stale `toast_log_offset` (e.g. after the user
-            // closes the modal, more toasts age out of the ring, and
-            // re-opens) would otherwise render a blank top.
-            let offset = app.toast_log_offset.min(max_off);
-
-            // We iterate from `total - offset - visible` to
-            // `total - offset` (exclusive) — newest first.
-            let lines: Vec<Line> = if total == 0 {
-                vec![Line::from("(no toasts yet — try something first)")]
-            } else {
-                app.toast_history
-                    .iter()
-                    .rev()
-                    .skip(offset)
-                    .take(visible)
-                    .map(|t| {
-                        let prefix = match t.kind {
-                            crate::app::toast::ToastKind::Info => "ℹ",
-                            crate::app::toast::ToastKind::Ok => "✓",
-                            crate::app::toast::ToastKind::Warn => "⚠",
-                            crate::app::toast::ToastKind::Error => "✗",
-                        };
-                        Line::from(format!(
-                            "{} {} {}",
-                            t.ts.format("%H:%M:%S"),
-                            prefix,
-                            t.message
-                        ))
-                    })
-                    .collect()
-            };
-
-            let p = Paragraph::new(lines).block(
-                Block::default()
-                    .title(format!(
-                        " toast log ({}/{}) ",
-                        offset.saturating_add(1).min(total.max(1)),
-                        total
-                    ))
-                    .borders(Borders::ALL)
-                    .border_style(theme.border(true)),
-            );
-            f.render_widget(p, rect);
-            // Hint line below the modal.
-            let hint_y = rect.y.saturating_add(rect.height);
-            if hint_y < area.y + area.height {
-                f.render_widget(
-                    Paragraph::new(Line::from("[ ↑/↓ ] scroll   [ esc ] close"))
-                        .alignment(ratatui::layout::Alignment::Center),
-                    ratatui::layout::Rect::new(
-                        x,
-                        hint_y,
-                        w,
-                        1,
-                    ),
-                );
-            }
-        }
-    }
-}
-
-fn palette_actions() -> Vec<(&'static str, String)> {
-    let mut v: Vec<(&'static str, String)> = Vec::new();
-    for id in ScreenId::ALL {
-        v.push(("screen", format!("Go to {}", id.label())));
-    }
-    v.push(("action", "Reboot".into()));
-    v.push(("action", "Shutdown".into()));
-    v.push(("action", "Suspend".into()));
-    v.push(("action", "Hibernate".into()));
-    v.push(("action", "Refresh all".into()));
-    v.push(("action", "Start web server".into()));
-    v.push(("action", "Stop web server".into()));
-    v
-}
 
 /// Single point where digit-key shortcuts (`1`..`0`) translate into a
 /// screen change. Keeps `app.current` and the WM pane's `WindowKind`
@@ -1193,40 +747,39 @@ async fn handle_key(
         }
     }
 
-    // Hardware-button remap. Runs first so the rest of the handler
-    // (modal dispatch, global keys, screen on_key) sees a normal
-    // KeyEvent. The desktop profile is identity; the uconsole profile
-    // rewrites X/Y/A/B into Up/Down/Enter/Esc. See `wm/keymap.rs`.
-    let key = match wm::keymap::map_key(key, wm::keymap::KeymapProfile::detect()) {
-        Some(k) => k,
-        // The contract is `Option` so future profiles can swallow
-        // specific keys (e.g. a tablet profile that ignores the
-        // volume buttons). Today every profile returns `Some`.
-        None => return false,
+    // Hardware-button remap — skip when a text-input modal is active so
+    // the user can type literal 'a'/'b' without them becoming Enter/Esc.
+    // Profile cached on App at startup (no per-keypress env::var syscall).
+    let key = if app.modal.accepts_text_input() {
+        key
+    } else {
+        match wm::keymap::map_key(key, app.keymap_profile) {
+            Some(k) => k,
+            None => return false,
+        }
     };
 
-    // User keymap: if the user has rebound the pressed key to a
-    // canonical NavAction, rewrite the KeyCode to the built-in
-    // default *for that action* (Up/Down/Enter/etc.) so the rest of
-    // the handler — modal dispatch, global keys, screen on_key —
-    // keeps matching against the same KeyCode it's always matched
-    // against. Modifiers are preserved. See `keymap.rs`.
-    let key = match crate::keymap::resolve_keymap(key, &app.keymap) {
-        Some(crate::keymap::NavAction::Up)        => KeyEvent::new(KeyCode::Up,        key.modifiers),
-        Some(crate::keymap::NavAction::Down)      => KeyEvent::new(KeyCode::Down,      key.modifiers),
-        Some(crate::keymap::NavAction::Left)      => KeyEvent::new(KeyCode::Left,      key.modifiers),
-        Some(crate::keymap::NavAction::Right)     => KeyEvent::new(KeyCode::Right,     key.modifiers),
-        Some(crate::keymap::NavAction::Enter)     => KeyEvent::new(KeyCode::Enter,     key.modifiers),
-        Some(crate::keymap::NavAction::Esc)       => KeyEvent::new(KeyCode::Esc,       key.modifiers),
-        Some(crate::keymap::NavAction::Tab)       => KeyEvent::new(KeyCode::Tab,       key.modifiers),
-        Some(crate::keymap::NavAction::BackTab)   => KeyEvent::new(KeyCode::BackTab,   key.modifiers),
-        Some(crate::keymap::NavAction::NextScreen)=> KeyEvent::new(KeyCode::Tab,       key.modifiers),
-        Some(crate::keymap::NavAction::PrevScreen)=> KeyEvent::new(KeyCode::BackTab,   key.modifiers),
-        Some(crate::keymap::NavAction::Refresh)   => KeyEvent::new(KeyCode::Char('r'), key.modifiers),
-        Some(crate::keymap::NavAction::Help)      => KeyEvent::new(KeyCode::Char('?'), key.modifiers),
-        Some(crate::keymap::NavAction::Palette)   => KeyEvent::new(KeyCode::Char(':'), key.modifiers),
-        Some(crate::keymap::NavAction::Quit)      => KeyEvent::new(KeyCode::Char('q'), key.modifiers),
-        None => key,
+    // User keymap — also gated on text-input modals for the same reason.
+    let key = if app.modal.accepts_text_input() {
+        key
+    } else {
+        match crate::keymap::resolve_keymap(key, &app.keymap) {
+            Some(crate::keymap::NavAction::Up)        => KeyEvent::new(KeyCode::Up,        key.modifiers),
+            Some(crate::keymap::NavAction::Down)      => KeyEvent::new(KeyCode::Down,      key.modifiers),
+            Some(crate::keymap::NavAction::Left)      => KeyEvent::new(KeyCode::Left,      key.modifiers),
+            Some(crate::keymap::NavAction::Right)     => KeyEvent::new(KeyCode::Right,     key.modifiers),
+            Some(crate::keymap::NavAction::Enter)     => KeyEvent::new(KeyCode::Enter,     key.modifiers),
+            Some(crate::keymap::NavAction::Esc)       => KeyEvent::new(KeyCode::Esc,       key.modifiers),
+            Some(crate::keymap::NavAction::Tab)       => KeyEvent::new(KeyCode::Tab,       key.modifiers),
+            Some(crate::keymap::NavAction::BackTab)   => KeyEvent::new(KeyCode::BackTab,   key.modifiers),
+            Some(crate::keymap::NavAction::NextScreen)=> KeyEvent::new(KeyCode::Tab,       key.modifiers),
+            Some(crate::keymap::NavAction::PrevScreen)=> KeyEvent::new(KeyCode::BackTab,   key.modifiers),
+            Some(crate::keymap::NavAction::Refresh)   => KeyEvent::new(KeyCode::Char('r'), key.modifiers),
+            Some(crate::keymap::NavAction::Help)      => KeyEvent::new(KeyCode::Char('?'), key.modifiers),
+            Some(crate::keymap::NavAction::Palette)   => KeyEvent::new(KeyCode::Char(':'), key.modifiers),
+            Some(crate::keymap::NavAction::Quit)      => KeyEvent::new(KeyCode::Char('q'), key.modifiers),
+            None => key,
+        }
     };
 
     // Modal handling first.
@@ -1245,7 +798,7 @@ async fn handle_key(
                     app.palette_buf.clear();
                 }
                 Enter => {
-                    let actions = palette_actions();
+                    let actions = wm::modal::palette_actions();
                     let q = app.palette_buf.to_lowercase();
                     let filtered: Vec<_> = actions
                         .iter()
@@ -1323,10 +876,16 @@ async fn handle_key(
             let k = *kind;
             match key.code {
                 Esc => {
+                    if let Modal::Secret { buf, .. } = &mut app.modal {
+                        crate::app::zeroize_string(buf);
+                    }
                     app.modal = Modal::None;
                 }
                 Enter => {
                     let value = buf.clone();
+                    if let Modal::Secret { buf, .. } = &mut app.modal {
+                        crate::app::zeroize_string(buf);
+                    }
                     app.modal = Modal::None;
                     run_input(app, tx, k, value).await;
                 }
@@ -1433,7 +992,7 @@ async fn handle_key(
         Modal::AuthFailure { retry: _, .. } => {
             // R retries the inner modal; Esc dismisses everything.
             match key.code {
-                Char('r') | Char('R') => {
+                Char('r') | Char('R') | Enter => {
                     // Pull the inner modal out via mem::replace so we don't
                     // need Modal: Clone (the Progress variant contains a
                     // non-Clone oneshot::Sender).
@@ -1895,6 +1454,13 @@ async fn handle_key(
                         }
                     }
                 }
+            }
+            // Esc fallthrough: if no screen consumed it and we're in a
+            // content region, return to the Overworld menu.
+            if matches!(key.code, Esc)
+                && matches!(app.region, Region::ContentLeft | Region::ContentRight)
+            {
+                app.toggle_menu_active();
             }
         }
     }
@@ -3648,7 +3214,7 @@ mod tests {
         let mut screens = build_screens();
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
         let left = || KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
-        let right = || KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
+        let _right = || KeyEvent::new(KeyCode::Right, KeyModifiers::NONE);
         let down = || KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         let up = || KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
         let enter = || KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
@@ -4373,7 +3939,7 @@ mod tests {
     // chrome). Behaviour of Enter/Esc is unchanged.
     #[test]
     fn modal_input_ok_cancel_button_renders() {
-        let lines = modal_input_lines("Connect to SSID:", "");
+        let lines = wm::modal::modal_input_lines("Connect to SSID:", "");
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -4403,7 +3969,7 @@ mod tests {
     // Cancel ride alongside it.
     #[test]
     fn modal_secret_ok_cancel_button_renders() {
-        let lines = modal_secret_lines("Wi-Fi password for HomeNet", "hunter2");
+        let lines = wm::modal::modal_secret_lines("Wi-Fi password for HomeNet", "hunter2");
         let text: String = lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
@@ -4880,7 +4446,7 @@ mod tests {
         terminal
             .draw(|f| {
                 let area = f.area();
-                draw_modal(f, area, app, &theme);
+                wm::modal::draw_modal(f, area, app, &theme);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -5215,5 +4781,53 @@ mod tests {
             text.contains(" Keys "),
             "Settings → Keys sub-mode must render the `Keys` title at 140 cols; got:\n{text}"
         );
+    }
+
+    #[tokio::test]
+    async fn shim_bypass_in_text_input_modals() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        for modal in [
+            Modal::Input { prompt: "test".into(), buf: String::new(), kind: InputKind::WifiPassword },
+            Modal::Secret { prompt: "test".into(), buf: String::new(), kind: InputKind::WifiPassword },
+            Modal::CommandPalette,
+        ] {
+            let mut app = app_with_n_panes(1);
+            app.menu_active = false;
+            app.modal = modal;
+            app.keymap_profile = wm::keymap::KeymapProfile::Uconsole;
+            handle_key(&mut [], &mut app, &tx,
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).await;
+            // 'a' must NOT become Enter — modal should still be active
+            assert!(!matches!(app.modal, Modal::None),
+                "shim must not remap 'a' → Enter in text-input modal");
+        }
+    }
+
+    #[tokio::test]
+    async fn auth_failure_enter_retries() {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = app_with_n_panes(1);
+        app.menu_active = false;
+        app.modal = Modal::AuthFailure {
+            command: "test".into(),
+            stderr: "denied".into(),
+            retry: Box::new(Modal::Help),
+        };
+        handle_key(&mut [], &mut app, &tx,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)).await;
+        assert!(matches!(app.modal, Modal::Help),
+            "Enter in AuthFailure should retry (restore inner modal)");
+    }
+
+    #[test]
+    fn modal_accepts_text_input_correct() {
+        assert!(Modal::Input { prompt: "".into(), buf: "".into(),
+            kind: InputKind::WifiPassword }.accepts_text_input());
+        assert!(Modal::Secret { prompt: "".into(), buf: "".into(),
+            kind: InputKind::WifiPassword }.accepts_text_input());
+        assert!(Modal::CommandPalette.accepts_text_input());
+        assert!(!Modal::None.accepts_text_input());
+        assert!(!Modal::Help.accepts_text_input());
+        assert!(!Modal::ToastLog.accepts_text_input());
     }
 }

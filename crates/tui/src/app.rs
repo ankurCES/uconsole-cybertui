@@ -114,6 +114,24 @@ pub enum Modal {
     ToastLog,
 }
 
+impl Modal {
+    pub fn accepts_text_input(&self) -> bool {
+        matches!(self, Modal::Input { .. } | Modal::Secret { .. } | Modal::CommandPalette)
+    }
+}
+
+/// Zero a string's backing allocation in-place before it's dropped,
+/// preventing secrets from lingering in freed heap memory.
+/// Uses `write_volatile` so the compiler can't elide the zeroing.
+pub fn zeroize_string(s: &mut String) {
+    unsafe {
+        for b in s.as_bytes_mut() {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    s.clear();
+}
+
 #[derive(Debug)]
 pub struct ChoiceOption {
     pub id: String,
@@ -693,10 +711,10 @@ impl Live {
         // map) regardless so the screen can be wired to live data
         // from the very first paint.
         let (intel_tx, mut intel_rx) = mpsc::channel::<cyberdeck_intel::Snapshot>(64);
-        std::mem::forget(cyberdeck_intel::refiller::spawn_all(
+        let _intel_handles = cyberdeck_intel::refiller::spawn_all(
             intel_tx,
             std::collections::HashMap::new(),
-        ));
+        );
         let tx_intel = tx.clone();
         tokio::spawn(async move {
             while let Some(snap) = intel_rx.recv().await {
@@ -727,6 +745,7 @@ pub struct App {
     pub current: ScreenId,
     pub manager: crate::wm::manager::Manager,
     pub modal: Modal,
+    pub keymap_profile: crate::wm::keymap::KeymapProfile,
     /// Per-layer intel snapshots, keyed by `LayerId`. Populated by the
     /// M5 refiller in `Live::spawn_refreshers` via
     /// `Action::IntelSnapshot`. The Intel screen reads this map on
@@ -1166,6 +1185,7 @@ impl App {
             current,
             manager: crate::wm::manager::Manager::new(current),
             modal: Modal::None,
+            keymap_profile: crate::wm::keymap::KeymapProfile::detect(),
             // M5 — per-layer intel snapshot map. Empty at boot; the
             // refiller in `Live::spawn_refreshers` populates it. The
             // Intel screen's `render` reads from this map first,

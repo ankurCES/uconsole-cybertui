@@ -214,7 +214,7 @@ impl Screen for OverworldScreen {
 
         // Outer block — same border style as every other screen
         // so the Overworld is visually a peer, not a separate app.
-        let title = format!(" Menu · cursor {}/{} ", self.cursor + 1, visible.len());
+        let title = " ▦ MENU ".to_string();
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(theme.border(focus))
@@ -254,7 +254,7 @@ impl Screen for OverworldScreen {
             Span::styled("CAROUSEL", theme.title()),
             Span::raw("  "),
             Span::styled(
-                "Tab cycles · Enter enters · h/j/k/l move",
+                "Tab cycles · A enters · ▲▼◀▶ move",
                 theme.dim(),
             ),
         ]);
@@ -298,9 +298,9 @@ impl Screen for OverworldScreen {
         // ---- Hint line ----
         let hint = Paragraph::new(Line::from(vec![
             Span::raw(" "),
-            Span::styled("↑↓←→/hjkl", theme.key()),
+            Span::styled("▲▼◀▶", theme.key()),
             Span::raw(" move  "),
-            Span::styled("Enter", theme.key()),
+            Span::styled("A", theme.key()),
             Span::raw(" enter  "),
             Span::styled("Tab", theme.key()),
             Span::raw(" cycle  "),
@@ -309,7 +309,9 @@ impl Screen for OverworldScreen {
             Span::styled("?", theme.key()),
             Span::raw(" help"),
         ]));
-        frame.render_widget(hint, vlayout[2]);
+        if area.width > 80 {
+            frame.render_widget(hint, vlayout[2]);
+        }
     }
 
     fn on_key(&mut self, key: KeyEvent, app: &mut App) -> bool {

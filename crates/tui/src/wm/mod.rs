@@ -16,6 +16,7 @@ pub mod broadcaster;
 pub mod input;
 pub mod keymap;
 pub mod manager;
+pub mod modal;
 pub mod popup;
 pub mod pty;
 pub mod render;

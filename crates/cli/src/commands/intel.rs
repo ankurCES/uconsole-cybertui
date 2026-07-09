@@ -17,7 +17,7 @@
 //! CLI just exposes `--json` consumers a stable surface.
 
 use anyhow::Result;
-use clap::{ArgMatches, Subcommand};
+use clap::Subcommand;
 use serde_json::json;
 
 use crate::output::OutputMode;
@@ -48,14 +48,6 @@ pub enum IntelCmd {
 }
 
 impl IntelCmd {
-    /// Clap's `ArgMatches` parser needs us to inspect raw flags to
-    /// detect the `--layer X` vs `--all` vs bare invocation pattern,
-    /// because `Refresh` is a single variant that takes both flags.
-    /// This helper lives here (not in `run`) so a future test can
-    /// drive it without spawning a subprocess.
-    pub(crate) fn wants_all(matches: &ArgMatches) -> bool {
-        matches.get_flag("all")
-    }
 }
 
 pub fn run(cmd: IntelCmd, mode: OutputMode) -> Result<i32> {

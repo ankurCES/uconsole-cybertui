@@ -1,3 +1,3 @@
 fn main() {
-    cyberdeck::main();
+    let _ = cyberdeck::main();
 }
