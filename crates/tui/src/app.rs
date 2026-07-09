@@ -784,6 +784,13 @@ pub struct App {
     /// every screen sets `app.region = Region::ContentLeft` when it becomes
     /// active so the arrow keys never strand on a phantom `ContentRight`.
     pub region: Region,
+    /// M2 (menu revamp) — when `true`, Overworld owns every key (the
+    /// screen-side keymap in `main::handle_key` is bypassed). Toggled
+    /// with `Ctrl+M`. Mirrors Bruce firmware's `loopOptions` ownership:
+    /// while the menu is open the user is talking to the menu, not to
+    /// the underlying screen. See `App::toggle_menu_active` and the
+    /// top-of-handle_key guard in `main.rs`.
+    pub menu_active: bool,
     pub palette_buf: String,
     pub palette_idx: usize,
     /// Menu bar dropdown state. `App.menu.open == None` ⇒ closed (the
@@ -1180,6 +1187,14 @@ impl App {
             // strip falls back to "[Tab]" when this is None.
             current_button_hint: None,
             region: Region::Sidebar,
+            // M2 (menu revamp): when true, Overworld owns every key — the
+            // screen-side keymap is bypassed. Toggled with `Ctrl+M` from
+            // `handle_key`. Defaults to `true` so the user's first paint
+            // is the main menu, not whatever the previous session was
+            // last on. M3 deletes the `Region::Sidebar` variant that
+            // currently does the same job; `menu_active` survives M3 as
+            // the single source of truth for "the menu owns input".
+            menu_active: true,
             palette_buf: String::new(),
             palette_idx: 0,
             // Phase 1 — menu bar dropdown state. Closed at boot.
@@ -1351,6 +1366,28 @@ impl App {
     pub fn set_region(&mut self, r: Region) {
         self.region = r;
         self.sidebar_focused = r == Region::Sidebar;
+    }
+
+    /// M2 (menu revamp) — flip `menu_active` and, when turning the menu
+    /// on, route `current` to `Overworld` so the renderer's
+    /// `if app.menu_active { Overworld }` branch draws the main menu
+    /// instead of the previously-focused screen. When turning off, we
+    /// just clear the flag — the user is back where they were because
+    /// `current` was never touched. The single global hot-key that
+    /// invokes this is `Ctrl+M` in `handle_key`.
+    ///
+    /// Pair this with `enter_overworld_from_screen` below if the caller
+    /// wants the menu active *and* `current` to land on Overworld (we
+    /// never want to mutate `current` on toggle-off — pressing
+    /// `Ctrl+M` from Overworld is a no-op-by-design).
+    pub fn toggle_menu_active(&mut self) {
+        self.menu_active = !self.menu_active;
+        if self.menu_active && self.current != crate::app::screen::ScreenId::Overworld {
+            self.current = crate::app::screen::ScreenId::Overworld;
+            // Region mirrors the screen: menu mode = Sidebar region in
+            // the M1-M2 transitional phase. M3 deletes the variant.
+            self.set_region(Region::Sidebar);
+        }
     }
 
     /// Step the Bruce-style tab cursor one slot forward or backward.

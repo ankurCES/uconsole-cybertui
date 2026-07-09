@@ -133,6 +133,29 @@ impl OverworldScreen {
         }
     }
 
+    /// Test-only accessor for the cursor. `main.rs` introspects the
+    /// singleton OverworldScreen through `Screen::as_any` to verify
+    /// key routing actually updated the cursor (the gate is the only
+    /// path that mutates it, so an observer test is the simplest
+    /// way to pin the routing contract).
+    ///
+    /// Marked `#[allow(dead_code)]` instead of `#[cfg(test)]` because
+    /// the *binary* crate's tests in `main.rs` call this — a lib-crate
+    /// `#[cfg(test)]` gate would not enable the symbol there.
+    #[allow(dead_code)]
+    pub fn cursor_for_test(&self) -> usize {
+        self.cursor
+    }
+
+    /// Test-only accessor for `cols_at_render`. Used alongside
+    /// `cursor_for_test` so tests can compute the expected index
+    /// after N Down presses (`start + N*cols`) without hard-coding
+    /// the column count chosen by `grid_cols_for`.
+    #[allow(dead_code)]
+    pub fn cols_for_test(&self) -> usize {
+        self.cols_at_render
+    }
+
     /// Cursor → (row, col) for a grid of `cols` columns.
     fn cursor_rc(&self, cols: usize) -> (usize, usize) {
         let cols = cols.max(1);
@@ -166,6 +189,14 @@ impl Screen for OverworldScreen {
 
     fn title(&self) -> &'static str {
         "Menu"
+    }
+
+    /// M2 — the gate in `main.rs::handle_key` introspects the singleton
+    /// OverworldScreen through `Box<dyn Screen>` to verify the cursor
+    /// moved. Without this override the trait's default empty body
+    /// returns `None` and the test can't downcast.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
     }
 
     fn render(
@@ -352,6 +383,26 @@ impl Screen for OverworldScreen {
                     ToastKind::Info,
                     "Press q to quit · ? for help".to_string(),
                 );
+                true
+            }
+            // M2 digit-jump: 1-9 → index 0..8, 0 → index 9.
+            // Matches the on-screen "1 System / 2 Network / ..."
+            // hint label convention. Anything else returns false
+            // so the key propagates up the handle_key stack —
+            // e.g. `?` must still toggle `Modal::Help`.
+            KeyCode::Char(d @ '1'..='9') => {
+                let idx = (d as usize) - ('1' as usize);
+                let total = visible.len();
+                if idx < total {
+                    self.cursor = idx;
+                }
+                true
+            }
+            KeyCode::Char('0') => {
+                let total = visible.len();
+                if total >= 10 {
+                    self.cursor = 9;
+                }
                 true
             }
             _ => false,

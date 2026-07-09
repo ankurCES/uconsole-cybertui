@@ -475,10 +475,23 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
     if let Some(area) = tab_strip {
         crate::ui::tab_strip::draw(f, area, app, app.tab_cursor, theme);
     }
-    // The body hosts the launcher when focus is on it; otherwise it
-    // renders the focused screen. The launcher stays available via B/Esc.
+    // M1 (menu revamp): the launcher grid is gone. When `Region::Sidebar`
+    // is the focused region (the user pressed `B` from a screen or `Ctrl+M`
+    // from the menu bar), we render the **Overworld** instead of the old
+    // 4×4 launcher tile grid. The Overworld is the canonical main menu —
+    // the launcher was a sibling of it, and we want one global menu, not
+    // two surfaces competing for the "what screen should I open" question.
+    // The keymap is unchanged in M1: B/Esc/Ctrl+M still move you into
+    // `Region::Sidebar`; M2 retires the keymap path. M3 deletes the
+    // `Region::Sidebar` variant entirely.
     if app.region == Region::Sidebar {
-        ui::draw_launcher(f, body, app, &screens[..], theme);
+        // Render the Overworld in the body. We construct it fresh on each
+        // draw because it owns no persistent state that isn't already on
+        // `App` (its cursor is currently per-launch; M4 routes it through
+        // `App` so it survives across visits — for M1, a fresh cursor
+        // starting on tile 1 = System is fine).
+        let mut overworld = screens::overworld::OverworldScreen::new();
+        overworld.render(f, body, app, theme, true);
     } else {
         // The WM render walks the focused pane and paints it. Screens
         // still own their own borders — same contract as before.
@@ -1534,6 +1547,60 @@ async fn handle_key(
         return false;
     }
 
+    // M2 (menu revamp) — disjoint keymap gate. When `app.menu_active`
+    // is true the Overworld tile grid owns every key: arrows move the
+    // cursor, digits jump (1‑9,0), Enter lands on the chosen screen,
+    // Esc toasts the quit hint. We route directly to the registry's
+    // OverworldScreen (the singleton) so the cursor persists across
+    // keypresses — a fresh `OverworldScreen::new()` per event would
+    // reset the cursor on every arrow press.
+    //
+    // Order rationale:
+    //   • Modals still win (this gate is below the modal match).
+    //   • Legacy Phase-1 menu bar still wins (this gate is below it).
+    //   • Global keys (`q`, `Ctrl+C`) — see below — are matched next,
+    //     so the user can always exit the app even from the menu.
+    //   • Screen on_key and region routing never run while the menu
+    //     owns input. Pressing `Ctrl+M` (handled in the global-keys
+    //     block) toggles `menu_active` back off and restores normal
+    //     navigation.
+    //
+    // The menu's own `Ctrl+M` toggle MUST stay reachable even when
+    // `menu_active=true`, otherwise the gate traps the user inside
+    // the menu — so we explicitly swallow `Ctrl+M` here, toggle, and
+    // return true (consumed). All other keys are forwarded via
+    // `OverworldScreen::on_key`.
+    if app.menu_active {
+        // Hard escape hatch: Ctrl+M closes the menu from inside.
+        // Without this the user can only escape by pressing Enter (which
+        // commits a screen) — leaving no way to back out without
+        // leaving the Overworld view. Toggling the same flag we test
+        // here ends the gate cleanly next frame.
+        if matches!(key.code, KeyCode::Char('m'))
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.kind, KeyEventKind::Press)
+        {
+            app.menu_active = false;
+            return true;
+        }
+        // Locate the singleton OverworldScreen in the registry. The
+        // mirrors `sidebar_row` is computed via `ScreenId::ALL.iter()
+        // .position(...)` elsewhere in this file, so the ordering is
+        // stable across launches.
+        let ow_idx = crate::app::screen::ScreenId::ALL
+            .iter()
+            .position(|s| *s == crate::app::screen::ScreenId::Overworld)
+            .unwrap_or(0);
+        // Defensive: if the registry doesn't contain Overworld (custom
+        // builds, tests), bail and let the regular keymap run. This
+        // should never happen in production — Overworld is a required
+        // registered screen.
+        if let Some(screen) = screens.get_mut(ow_idx) {
+            return screen.on_key(key, app);
+        }
+        return false;
+    }
+
     // Global keys.
     const LAUNCHER_COLS: usize = 4;
     match key.code {
@@ -1575,16 +1642,18 @@ async fn handle_key(
             }
             return false;
         }
-        // Ctrl+M — global menu shortcut. Must be evaluated *after* the
-        // Alt+F arm so Alt+F still maps to the menu key the menu code
-        // expects; Ctrl+M is checked on its own modifier to avoid
-        // stomping on in-screen Ctrl+M bindings (none today).
+        // Ctrl+M — M2 menu-revamp global. Toggles the Overworld tile
+        // grid as the global "I want the menu" shortcut, replacing the
+        // Phase-1 menu-bar (`app.menu`) behavior on this binding. F10
+        // and Alt+F above still open the legacy menu bar so neither
+        // path regresses.
+        //
+        // The toggle runs *after* the menu-active gate higher in this
+        // function, so the same key both opens AND closes the menu
+        // from inside (the gate also handles its own Ctrl+M for in-gate
+        // toggling so the user can never get trapped with no exit).
         Char('m') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-            if app.menu.is_open() {
-                app.menu.close();
-            } else {
-                app.menu.open(crate::ui::menu_bar::MenuId::File);
-            }
+            app.toggle_menu_active();
             return false;
         }
         // Phase 1 — tab strip arrow keys. From the Sidebar, Left (and h)
@@ -3071,6 +3140,12 @@ mod tests {
     fn app_with_n_panes(n: u8) -> App {
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
+        // M2 — tests using this helper exercise the legacy Phase-1
+        // keymap (without first activating the M2 menu). Default
+        // boot has `menu_active=true` so the Overworld would swallow
+        // every key; flip it off so the rest of the test (keymap,
+        // Ctrl+W, etc.) sees the pre-M2 routing.
+        app.menu_active = false;
         // Split n-1 times. Cap is Manager::MAX_PANES = 9.
         for _ in 1..n {
             app.manager
@@ -3156,8 +3231,10 @@ mod tests {
             let quit = handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
             assert!(!quit, "Ctrl+M must not quit");
         });
-        assert!(app.menu.is_open(), "Ctrl+M from sidebar should open the menu");
-        assert_eq!(app.menu.open, Some(crate::ui::menu_bar::MenuId::File));
+        // M2 — Ctrl+M toggles the new `menu_active` flag (the M2
+        // Overworld tile-grid replaces the Phase-1 menu-bar on this
+        // binding). F10 / Alt+F still open the legacy dropdown.
+        assert!(app.menu_active, "Ctrl+M from sidebar should activate the menu");
     }
 
     #[test]
@@ -3172,29 +3249,27 @@ mod tests {
             let quit = handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
             assert!(!quit, "Ctrl+M must not quit");
         });
-        assert!(app.menu.is_open());
-        assert_eq!(app.menu.open, Some(crate::ui::menu_bar::MenuId::File));
+        assert!(app.menu_active);
     }
 
     #[test]
     fn ctrl_m_is_noop_when_menu_already_open() {
-        // Mirror the existing F10 / Alt+F contract: when the menu is
-        // *already* open, Ctrl+M does nothing dramatic (Esc closes the
-        // menu; that is its own shortcut). The menu-open dispatch at
-        // the top of handle_key swallows the Ctrl+M into its `_ =>`
-        // catch-all, which is intentional — the user-facing semantic
-        // is "open the menu", and Esc already handles "close".
+        // M2 — pressing Ctrl+M a second time while the menu is active
+        // toggles it OFF (closes the menu), unlike Phase-1's "sticky"
+        // behavior where the only way out was Esc. This is the
+        // user-facing toggle semantic, same as F10 → F10 in a desktop
+        // app: open, then close.
         let mut app = app_with_n_panes(1);
         let mut screens = build_screens();
         let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
         run(async {
             handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
-            assert!(app.menu.is_open());
-            // Pinned open state after a second Ctrl+M — menu stays open.
+            assert!(app.menu_active, "first Ctrl+M opens the menu");
+            // Second Ctrl+M closes it.
             handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
             assert!(
-                app.menu.is_open(),
-                "Ctrl+M when menu is open is a no-op (Esc closes)"
+                !app.menu_active,
+                "second Ctrl+M closes the menu (toggle semantic)"
             );
         });
     }
@@ -3218,6 +3293,171 @@ mod tests {
         assert!(!quit_flag.take(), "Ctrl+M must NOT signal quit");
     }
 
+    // ---- M2 menu-active gate -----------------------------------------
+    //
+    // The M2 menu-active gate in `handle_key` owns the keyboard surface
+    // while `app.menu_active` is true. The tests below pin its contract:
+    //   * When the menu is active, every key routes to the OverworldScreen
+    //     singleton (so its cursor accumulates across keypresses).
+    //   * The Phase-1 sidebar cursor and global digit handlers are
+    //     silenced — pressing `5` no longer swaps pane kind.
+    //   * The Phase-1 regional cursor (`launcher_offset`) is also
+    //     untouched — the Overworld owns its own cursor.
+    //   * When the menu is dismissed (Ctrl+M a second time, or the user
+    //     pressed Esc to back out), the legacy keymap resumes.
+
+    fn active_menu_app() -> App {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        // M2 default — boot with the menu active. Leave region as the
+        // default (Sidebar) so the test exercises the path where the
+        // user toggles the menu while still in launcher mode.
+        app.menu_active = true;
+        app
+    }
+
+    /// Pressing arrows while `menu_active=true` must move the
+    /// Overworld's persistent cursor and NOT the Phase-1
+    /// `launcher_offset`. This is the core M2 invariant: the two
+    /// cursors live in different fields and never bleed across.
+    #[test]
+    fn menu_active_overworld_arrow_owns_cursor() {
+        let mut app = active_menu_app();
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let ow_idx = ScreenId::ALL
+            .iter()
+            .position(|s| *s == ScreenId::Overworld)
+            .unwrap();
+        let ow_initial = screens[ow_idx]
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::screens::overworld::OverworldScreen>())
+            .expect("OverworldScreen present in registry")
+            .cursor_for_test();
+        let launcher_initial = app.launcher_offset;
+        let cols = screens[ow_idx]
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::screens::overworld::OverworldScreen>())
+            .expect("OverworldScreen present in registry")
+            .cols_for_test();
+        run(async {
+            for _ in 0..3 {
+                handle_key(
+                    &mut screens,
+                    &mut app,
+                    &tx,
+                    KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                )
+                .await;
+            }
+        });
+        let ow_final = screens[ow_idx]
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::screens::overworld::OverworldScreen>())
+            .expect("OverworldScreen present in registry")
+            .cursor_for_test();
+        // Cursor advanced by three rows worth of increment in the
+        // Overworld grid (each Down = +cols). Independent of the
+        // column-count chosen by grid_cols_for at last render, the
+        // delta from N Down presses is exactly N*cols as long as we
+        // don't wrap. The visible count is 18, so 3 downs from cursor
+        // 1 with any cols in [2,5] lands at 1 + 3*cols without wrap.
+        assert_eq!(
+            ow_final,
+            ow_initial + 3 * cols,
+            "three Down presses must advance the Overworld cursor by 3*cols"
+        );
+        // The Phase-1 launcher cursor was untouched.
+        assert_eq!(
+            app.launcher_offset, launcher_initial,
+            "menu-active gate must not touch launcher_offset"
+        );
+    }
+
+    /// Pressing a digit while `menu_active=true` is a tile-jump inside
+    /// the Overworld grid — it must NOT swap pane kind (Phase-1's
+    /// digit-shortcut behavior). The M2 digit arm in
+    /// `OverworldScreen::on_key` just moves the cursor.
+    #[test]
+    fn menu_active_digit_jumps_tile_does_not_swap_pane() {
+        let mut app = active_menu_app();
+        app.current = ScreenId::System;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        let ow_idx = ScreenId::ALL
+            .iter()
+            .position(|s| *s == ScreenId::Overworld)
+            .unwrap();
+        run(async {
+            // Press '5'. M2 = jump Overworld cursor to index 4.
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            )
+            .await;
+        });
+        let ow_cursor = screens[ow_idx]
+            .as_any()
+            .and_then(|a| a.downcast_ref::<crate::screens::overworld::OverworldScreen>())
+            .expect("OverworldScreen present in registry")
+            .cursor_for_test();
+        assert_eq!(
+            ow_cursor, 4,
+            "digit '5' in active menu jumps Overworld cursor to index 4"
+        );
+        // Phase-1 contract: `current` would have flipped to Display.
+        assert_eq!(
+            app.current, ScreenId::System,
+            "M2 menu must NOT auto-swap pane on digit press; Enter commits"
+        );
+    }
+
+    /// `menu_active=false` lets the Phase-1 keymap resume. This is the
+    /// documented "menu dismissed — back to normal nav" state.
+    #[test]
+    fn menu_active_false_restores_phase1_keymap() {
+        let mut app = active_menu_app();
+        app.menu_active = false;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            // Press '5' with menu dismissed — Phase-1 digit-jump fires
+            // and swaps pane kind to Display.
+            handle_key(
+                &mut screens,
+                &mut app,
+                &tx,
+                KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE),
+            )
+            .await;
+        });
+        assert_eq!(
+            app.current, ScreenId::Display,
+            "dismissed menu must route digits through the Phase-1 switcher"
+        );
+    }
+
+    /// Repeated Ctrl+M toggles the menu (open → close → open). This is
+    /// the "stuck inside the menu" escape hatch the gate above must
+    /// not regress.
+    #[test]
+    fn ctrl_m_toggle_is_symmetric() {
+        let mut app = active_menu_app();
+        app.menu_active = false;
+        let mut screens = build_screens();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
+        run(async {
+            handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(app.menu_active, "1st Ctrl+M opens");
+            handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(!app.menu_active, "2nd Ctrl+M closes");
+            handle_key(&mut screens, &mut app, &tx, send_ctrl_m()).await;
+            assert!(app.menu_active, "3rd Ctrl+M opens again");
+        });
+    }
+
     // ---- Sidebar navigation regression tests ---------------------------
     //
     // The sidebar (screen list) is the TUI's main menu. The bugs these
@@ -3233,6 +3473,9 @@ mod tests {
     fn fresh_app_with_sidebar_focus() -> App {
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
+        // M2 — Phase-1 sidebar navigation tests need the menu
+        // dismissed so the legacy arrow/digit handlers still run.
+        app.menu_active = false;
         app.set_region(Region::Sidebar);
         app.launcher_offset = 0;
         app
@@ -3383,6 +3626,9 @@ mod tests {
         // screen instead.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
+        // M2 — dismiss the menu so Left routes via the region router
+        // rather than the Overworld menu-active gate.
+        app.menu_active = false;
         app.set_region(Region::ContentLeft);
         app.current = ScreenId::Network;
         let mut screens = build_screens();
@@ -3410,6 +3656,9 @@ mod tests {
         // list navigation breaks.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
+        // M2 — dismiss the menu so Down/Enter reach the Phase-1 region
+        // router (which is what this regression pins).
+        app.menu_active = false;
         app.set_region(Region::ContentLeft);
         let mut screens = build_screens();
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
@@ -3449,6 +3698,9 @@ mod tests {
         // never change which screen is rendered.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
+        // M2 — dismiss the menu so the walker hits the Phase-1 region
+        // router arms (which this regression pins).
+        app.menu_active = false;
         app.set_region(Region::Sidebar);
         app.current = ScreenId::System;
         let initial_cursor = app.launcher_offset;
@@ -3491,6 +3743,13 @@ mod tests {
     #[test]
     fn number_keys_when_sidebar_focused_move_cursor_to_that_row() {
         let mut app = fresh_app_with_sidebar_focus();
+        // M2 — when the menu is active (default boot), digit keys are
+        // owned by the Overworld tile grid (jump the cursor to that
+        // index). The legacy Phase-1 "digit-key swaps pane kind" path
+        // runs only after the menu has been dismissed. This test pins
+        // the LEGACY fallback, so dismiss the menu first.
+        app.menu_active = false;
+        app.current = ScreenId::System;
         let mut screens = build_screens();
         let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
         run(async {
@@ -3617,6 +3876,12 @@ mod tests {
         // content pane — that's the whole point of the new wiring.
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = App::new(tx, rx);
+        // M2 — the menu defaults to ACTIVE on boot, so pressing `3`
+        // would jump the Overworld cursor instead of swapping panes.
+        // This test pins the LEGACY fallback path: when the menu has
+        // been dismissed (e.g. user pressed Enter on a tile), digit
+        // keys go back to working as pane-switchers.
+        app.menu_active = false;
         app.sidebar_focused = false;
         let mut screens = build_screens();
         let (tx2, _rx2) = tokio::sync::mpsc::channel::<Action>(8);
@@ -3750,6 +4015,10 @@ mod tests {
         // Route every dispatcher through `tx` so `rx.try_recv()` observes
         // the actions they emit.
         app.tx = tx.clone();
+        // M2 — dismiss the default-active menu so Phase-1 assertions
+        // (keymap captures, run_input success, etc.) see the pre-M2
+        // routing instead of Overworld swallowing every key.
+        app.menu_active = false;
         (tx, rx, app)
     }
 

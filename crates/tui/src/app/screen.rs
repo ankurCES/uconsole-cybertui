@@ -297,6 +297,14 @@ pub trait Screen {
     fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
         None
     }
+    /// Immutable counterpart to `as_any_mut`. Used by tests in `main.rs`
+    /// that want to introspect the singleton OverworldScreen's cursor
+    /// after routing keys through the registry — see
+    /// `menu_active_overworld_arrow_owns_cursor`. Same default-empty
+    /// pattern so screens that don't need introspection pay no cost.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
     /// Whether this screen should be skipped by `Tab` / `Shift-Tab` screen
     /// cycling. Defaults to `false` so every screen is reachable unless it
     /// explicitly opts out. Mirrors orbital's hidden-widget skip in its
