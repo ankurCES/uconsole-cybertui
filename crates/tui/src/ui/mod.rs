@@ -5,7 +5,8 @@
 //! default, plus Gruvbox, Nord, and a legacy alias for the existing
 //! dark theme). See `palette.rs` for the struct definition and named
 //! lookups; the renderer will consume a `Palette` from `Settings`.
-pub mod menu_bar;
+// M2 — the Phase-1 `menu_bar` module is deleted; Ctrl+M toggles the
+// Overworld tile grid via `app.menu_active` instead.
 pub mod palette;
 pub mod tab_strip;
 

@@ -1485,68 +1485,13 @@ async fn handle_key(
         }
     }
 
-    // Phase 1 — menu bar absorbs all keys while a dropdown is open.
-    // Esc closes, arrows move, Enter fires. Routed here (before the
-    // global-keys block) so the menu always wins over screen handlers.
-    if app.menu.is_open() {
-        use crate::ui::menu_bar::{MenuId, MENUS};
-        match key.code {
-            Esc => {
-                app.menu.close();
-            }
-            Left => {
-                // Move to the previous menu's last item, or wrap.
-                let cur = app.menu.open.unwrap_or(MenuId::File);
-                let order = [MenuId::File, MenuId::View, MenuId::Tools, MenuId::Help];
-                let idx = order.iter().position(|m| *m == cur).unwrap_or(0);
-                let prev = if idx == 0 { order[order.len() - 1] } else { order[idx - 1] };
-                let menu = MENUS.iter().find(|m| m.id == prev).unwrap();
-                app.menu.open(prev);
-                app.menu.cursor = menu.items.len().saturating_sub(1);
-            }
-            Right => {
-                let cur = app.menu.open.unwrap_or(MenuId::File);
-                let order = [MenuId::File, MenuId::View, MenuId::Tools, MenuId::Help];
-                let idx = order.iter().position(|m| *m == cur).unwrap_or(0);
-                let next = order[(idx + 1) % order.len()];
-                app.menu.open(next);
-                app.menu.cursor = 0;
-            }
-            Up | Char('k') => {
-                let menu = MENUS.iter().find(|m| Some(m.id) == app.menu.open).unwrap();
-                let n = menu.items.len();
-                if n == 0 {
-                    return false;
-                }
-                app.menu.cursor = if app.menu.cursor == 0 { n - 1 } else { app.menu.cursor - 1 };
-            }
-            Down | Char('j') => {
-                let menu = MENUS.iter().find(|m| Some(m.id) == app.menu.open).unwrap();
-                let n = menu.items.len();
-                if n == 0 {
-                    return false;
-                }
-                app.menu.cursor = (app.menu.cursor + 1) % n;
-            }
-            Enter => {
-                let menu_id = app.menu.open.unwrap_or(MenuId::File);
-                let menu = MENUS.iter().find(|m| m.id == menu_id).unwrap();
-                if let Some(item) = menu.items.get(app.menu.cursor) {
-                    let item_copy = *item;
-                    app.menu.close();
-                    crate::ui::menu_bar::dispatch(&item_copy, app, tx).await;
-                } else {
-                    app.menu.close();
-                }
-            }
-            _ => {
-                // Ignore other keys while menu is open — the menu owns
-                // the focus surface until it closes.
-            }
-        }
-        return false;
-    }
-
+    // M2 — the Phase-1 menu bar (App.menu / MenuState / F10 / Alt+F)
+    // is deleted. The Overworld tile grid replaces it; Ctrl+M toggles
+    // that grid (see the gate below). What used to be reached via
+    // "File → Quit" is now `q` or `Ctrl+C`; "File → Help" is `?`;
+    // "File → Command Palette" is `:`. There's nothing left for the
+    // dropdown to host, so the menu-bar gate at this position is gone.
+    //
     // M2 (menu revamp) — disjoint keymap gate. When `app.menu_active`
     // is true the Overworld tile grid owns every key: arrows move the
     // cursor, digits jump (1‑9,0), Enter lands on the chosen screen,
@@ -1576,12 +1521,18 @@ async fn handle_key(
         // commits a screen) — leaving no way to back out without
         // leaving the Overworld view. Toggling the same flag we test
         // here ends the gate cleanly next frame.
+        //
+        // CRITICAL: return `false`, NOT `true`. In `handle_key`,
+        // returning `true` is the quit signal (see `run_app` at
+        // `Event::Key(...) if handle_key(...).await { return Ok(()); }`).
+        // An earlier revision here returned `true`, which made
+        // Ctrl+M quit the entire app instead of toggling the menu.
         if matches!(key.code, KeyCode::Char('m'))
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.kind, KeyEventKind::Press)
         {
-            app.menu_active = false;
-            return true;
+            app.toggle_menu_active();
+            return false;
         }
         // Locate the singleton OverworldScreen in the registry. The
         // mirrors `sidebar_row` is computed via `ScreenId::ALL.iter()
@@ -1604,12 +1555,12 @@ async fn handle_key(
     // Global keys.
     const LAUNCHER_COLS: usize = 4;
     match key.code {
-        Char('q') | Char('Q') => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                return true;
-            }
-            return true;
-        }
+        // `q` (with or without Ctrl) quits. Bare `q` is the universal
+        // TUI muscle memory; Ctrl+Q and Ctrl+C do the same. The
+        // menu-active gate above runs first — so while the menu is
+        // up, `q` does nothing (the user must Ctrl+M out first to
+        // avoid accidental quits).
+        Char('q') | Char('Q') => return true,
         Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return true,
         Char('?') => app.modal = Modal::Help,
         // Module 7.2 — capital T opens the scrollable toast history
@@ -1626,27 +1577,17 @@ async fn handle_key(
             // Delegate to the menu builder so the menu and the key
             // share state-reset semantics (cleared buffer, cursor at 0).
             // The menu item "Help → Command palette (:)" calls the
-            // same `open_palette` — single source of truth.
-            app.modal = crate::ui::menu_bar::open_palette(app);
-        }
-        // Phase 1 — menu bar keys. F10 (canonical), Alt+F (herdr
-        // style), and Ctrl+M (the global "get to menu" shortcut bound
-        // at user request) all open the menu from any screen. While
-        // a menu is open, all keys route into the menu (Esc closes,
-        // arrows move, Enter fires) — see the early-return below.
-        F(10) | Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
-            if app.menu.is_open() {
-                app.menu.close();
-            } else {
-                app.menu.open(crate::ui::menu_bar::MenuId::File);
-            }
-            return false;
+            // Single-source-of-truth for the `: ` palette. Inline
+            // here (rather than dragging in `menu_bar::open_palette`)
+            // because we're deleting the menu_bar module entirely.
+            app.palette_buf.clear();
+            app.palette_idx = 0;
+            app.modal = crate::app::Modal::CommandPalette;
         }
         // Ctrl+M — M2 menu-revamp global. Toggles the Overworld tile
-        // grid as the global "I want the menu" shortcut, replacing the
-        // Phase-1 menu-bar (`app.menu`) behavior on this binding. F10
-        // and Alt+F above still open the legacy menu bar so neither
-        // path regresses.
+        // grid. F10 and Alt+F no longer open the legacy dropdown
+        // (the dropdown is deleted; all of its actions had hot-key
+        // equivalents and live in the global-keys block above).
         //
         // The toggle runs *after* the menu-active gate higher in this
         // function, so the same key both opens AND closes the menu
@@ -2601,11 +2542,9 @@ async fn handle_action(
                     // toggle the flag here — this is a *mode-entry* action,
                     // not a boolean flip. The sub-mode itself clears the
                     // flag on exit (Esc / q) so the user lands back on
-                    // the normal Settings list. The menu close mirrors
-                    // what the keymap capture arm does, so the sub-mode
-                    // doesn't draw a stale dropdown over the Keys table.
+                    // the normal Settings list. The Phase-1 menu bar is
+                    // gone; the sub-mode no longer needs to dismiss it.
                     app.keymap_editing = true;
-                    app.menu.close();
                     Some("keys: editing".to_string())
                 }
             };
@@ -2622,8 +2561,10 @@ async fn handle_action(
                     // set is consumed and turned into a `KeymapCmd::CaptureKey`
                     // by the dispatcher.
                     app.keymap_capture = Some(action);
-                    // Clear the menu so the row stays visible.
-                    app.menu.close();
+                    // The Phase-1 menu-bar `app.menu.close()` call used
+                    // to live here so the dropdown didn't overlap the
+                    // Keys table. The menu bar is gone; the Keys
+                    // sub-mode owns its own chrome.
                 }
                 K::CaptureKey => {
                     // No-op: the actual capture happened in handle_key

@@ -793,12 +793,8 @@ pub struct App {
     pub menu_active: bool,
     pub palette_buf: String,
     pub palette_idx: usize,
-    /// Menu bar dropdown state. `App.menu.open == None` ⇒ closed (the
-    /// default after boot). When set, the dropdown is rendered above
-    /// the content and `cursor` is the highlighted item index.
-    /// Owned here (not on the renderer) so the key handler in main.rs
-    /// can drive cursor moves without borrowing the Frame.
-    pub menu: crate::ui::menu_bar::MenuState,
+    // M2 — `App.menu` (Phase-1 dropdown menu bar) is gone. Ctrl+M toggles
+    // `menu_active`; the Overworld tile grid is the new menu.
     /// Whether the sidebar rail is visible. Defaults to false (Phase
     /// 1 — herdr-style tab navigation is primary). Toggle with `
     /// (backtick) or Ctrl-B. When false, the tab strip is the only
@@ -1197,8 +1193,6 @@ impl App {
             menu_active: true,
             palette_buf: String::new(),
             palette_idx: 0,
-            // Phase 1 — menu bar dropdown state. Closed at boot.
-            menu: crate::ui::menu_bar::MenuState::default(),
             // Phase 1 — sidebar rail hidden by default; the tab strip
             // is the primary screen switcher (herdr-style).
             sidebar_rail: false,
