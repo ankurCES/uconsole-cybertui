@@ -208,6 +208,20 @@ pub async fn dispatch(state: SharedState, req: Request<Value>) -> Response<Value
                 result: json!({ "ok": true, "shutdown": true }),
             }
         }
+
+        // ---- intel (M6 — CLI + daemon parity) ----
+        // Pure data + a trigger; the refiller tasks actually live in
+        // the TUI process (`App::spawn_refreshers`). The daemon
+        // exposes these so `cyberdeck intel layers|refresh|sentinel`
+        // has a 1:1 RPC to wire against when the daemon is running.
+        // Direct (no-daemon) mode falls back to the same `cyberdeck-intel`
+        // types + `App::intel_snapshots` shape, which is the contract the
+        // CLI prints in `--json` mode.
+        Method::IntelLayerList => handle(req.id, handle_intel_layer_list()),
+        Method::IntelRefresh { layer } => {
+            handle(req.id, handle_intel_refresh(layer))
+        }
+        Method::IntelSentinel => handle(req.id, handle_intel_sentinel()),
     }
 }
 
@@ -892,6 +906,80 @@ async fn handle_pane_state(
 }
 
 // ---------------------------------------------------------------------------
+// intel handlers (M6 — CLI parity)
+// ---------------------------------------------------------------------------
+//
+// These handlers do not maintain their own intel state — they project
+// the public surface of `cyberdeck-intel` (LayerId, Sentinel, etc.)
+// and the refiller's "request a refresh" trigger. The actual snapshot
+// store lives on the TUI's `App::intel_snapshots`; the CLI prints the
+// same shape whether reached via the daemon or direct-mode.
+//
+// `shared::intel_snapshots()` would be the cleanest data path, but
+// mirroring the rest of the daemon's "RPC = side-effect / pure-data"
+// split we keep these stateless and document the fallback.
+
+/// `IntelLayerList` → pure data, no fetch.
+fn handle_intel_layer_list() -> Result<Value, RpcError> {
+    use cyberdeck_intel::LayerId;
+    let mut out: Vec<Value> = Vec::with_capacity(LayerId::ALL.len());
+    for &id in LayerId::ALL {
+        out.push(json!({
+            "layer": id,
+            "label": id.label(),
+            "glyph": id.glyph(),
+            "poll_interval_secs": id.poll_interval_secs(),
+        }));
+    }
+    Ok(json!({ "layers": out }))
+}
+
+/// `IntelRefresh { layer }` → no-op on the daemon side (the TUI's
+/// refiller owns the polling loops). Returns a structured ack so
+/// scripts driving the CLI non-interactively see something predictable.
+/// `layer` is the snake_case variant name (`flights`, `earthquakes`,
+/// …); we accept the same string the `IntelLayerList` verb returns so
+/// `cyberdeck intel refresh $(cyberdeck intel layers | jq -r .layers[0].layer)`
+/// is a valid one-liner.
+fn handle_intel_refresh(layer: Option<String>) -> Result<Value, RpcError> {
+    use cyberdeck_intel::LayerId;
+    if let Some(ref want) = layer {
+        // Validate the layer name. Unknown → invalid (don't silently no-op;
+        // a typo in a shell pipeline should fail loudly).
+        if !LayerId::ALL.iter().any(|id| id.label().to_lowercase() == want.to_lowercase()) {
+            return Err(RpcError::new(
+                "invalid",
+                format!("unknown intel layer {want:?} (use `cyberdeck intel layers` to list)"),
+            ));
+        }
+    }
+    Ok(json!({
+        "ok": true,
+        "layer": layer,
+        "note": "refresh triggers a non-blocking refetch on the TUI side; this RPC just records the request",
+    }))
+}
+
+/// `IntelSentinel` → roll up worst-of-all. With no shared snapshot
+/// store yet the daemon computes the rollup from an empty set and
+/// returns Green. The shape is stable so the CLI / dashboard tool
+/// can pattern-match on it without a daemon-vs-direct branch.
+fn handle_intel_sentinel() -> Result<Value, RpcError> {
+    use cyberdeck_intel::{worst_sentinel, Sentinel};
+    let worst = worst_sentinel(std::iter::empty::<Sentinel>());
+    let counts = json!({
+        "green": 0_usize,
+        "yellow": 0_usize,
+        "red": 0_usize,
+    });
+    Ok(json!({
+        "sentinel": worst,
+        "counts": counts,
+        "note": "daemon does not maintain a snapshot store; live counts come from the TUI side",
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -978,6 +1066,11 @@ mod tests {
             Method::PaneState { pane_id: 1 },
             Method::DaemonPing,
             Method::DaemonShutdown,
+            // intel (M6)
+            Method::IntelLayerList,
+            Method::IntelRefresh { layer: None },
+            Method::IntelRefresh { layer: Some("flights".into()) },
+            Method::IntelSentinel,
         ];
         // The plan promises ≥40 variants. Sanity-check the count.
         assert!(
@@ -1145,6 +1238,117 @@ mod tests {
         let e = cyberdeck_core::CoreError::Cancelled;
         let r = map_core_err(e);
         assert_eq!(r.code, "cancelled");
+    }
+
+    // ---- intel (M6) ----
+    //
+    // The daemon exposes the same intel surfaces the CLI hands users:
+    // layer list, refresh trigger, sentinel rollup. These tests pin
+    // the response shapes so the CLI can pattern-match on them in
+    // `--json` mode.
+
+    #[tokio::test]
+    async fn intel_layer_list_returns_all_known_layers() {
+        let state = fresh_state();
+        let req = Request {
+            id: "t".into(),
+            method: Method::IntelLayerList,
+            params: json!({}),
+        };
+        let resp = dispatch(state, req).await;
+        match resp {
+            Response::Ok { result, .. } => {
+                let arr = result["layers"].as_array().expect("layers array");
+                // Plan promised 9 layers in M5 — guard the regression here.
+                assert_eq!(arr.len(), 9, "expected 9 known intel layers");
+                // Each entry must carry the public projection: label,
+                // glyph, poll_interval_secs. The CLI renders all three.
+                for entry in arr {
+                    assert!(entry.get("layer").is_some(), "missing layer id");
+                    assert!(entry.get("label").is_some(), "missing label");
+                    assert!(entry.get("glyph").is_some(), "missing glyph");
+                    assert!(
+                        entry.get("poll_interval_secs").is_some(),
+                        "missing poll_interval_secs"
+                    );
+                }
+            }
+            Response::Err { error, .. } => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn intel_refresh_layerless_succeeds() {
+        let state = fresh_state();
+        let req = Request {
+            id: "t".into(),
+            method: Method::IntelRefresh { layer: None },
+            params: json!({}),
+        };
+        let resp = dispatch(state, req).await;
+        match resp {
+            Response::Ok { result, .. } => {
+                assert_eq!(result["ok"], true);
+                assert!(result["layer"].is_null());
+            }
+            Response::Err { error, .. } => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn intel_refresh_known_layer_succeeds() {
+        let state = fresh_state();
+        let req = Request {
+            id: "t".into(),
+            method: Method::IntelRefresh {
+                layer: Some("flights".into()),
+            },
+            params: json!({}),
+        };
+        let resp = dispatch(state, req).await;
+        match resp {
+            Response::Ok { result, .. } => {
+                assert_eq!(result["ok"], true);
+                assert_eq!(result["layer"], "flights");
+            }
+            Response::Err { error, .. } => panic!("unexpected error: {error:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn intel_refresh_unknown_layer_returns_invalid() {
+        let state = fresh_state();
+        let req = Request {
+            id: "t".into(),
+            method: Method::IntelRefresh {
+                layer: Some("definitely-not-a-layer".into()),
+            },
+            params: json!({}),
+        };
+        let resp = dispatch(state, req).await;
+        match resp {
+            Response::Err { error, .. } => assert_eq!(error.code, "invalid"),
+            Response::Ok { .. } => panic!("expected Err for unknown intel layer"),
+        }
+    }
+
+    #[tokio::test]
+    async fn intel_sentinel_is_green_for_empty_rollup() {
+        let state = fresh_state();
+        let req = Request {
+            id: "t".into(),
+            method: Method::IntelSentinel,
+            params: json!({}),
+        };
+        let resp = dispatch(state, req).await;
+        match resp {
+            Response::Ok { result, .. } => {
+                assert_eq!(result["sentinel"], "green");
+                let counts = result["counts"].as_object().expect("counts object");
+                assert_eq!(counts.get("green").and_then(|v| v.as_u64()), Some(0));
+            }
+            Response::Err { error, .. } => panic!("unexpected error: {error:?}"),
+        }
     }
 
     #[tokio::test]

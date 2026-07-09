@@ -29,6 +29,12 @@ http = ["dep:reqwest"]
 [dependencies]
 cyberdeck-core = { path = "../core" }
 cyberdeck-web = { path = "../web", optional = true }
+# M4: OSINT snapshot types. Just the data layer (Snapshot,
+# LayerStatus, Sentinel, LayerId) — the M5 polling/refiller
+# lands later and shells to the layer `fetch` modules from this
+# same crate. Kept dep-only on the screen side, never blocking
+# builds if upstream feed schemas drift.
+cyberdeck-intel = { path = "../intel" }
 reqwest = { workspace = true, optional = true }
 
 ratatui.workspace = true

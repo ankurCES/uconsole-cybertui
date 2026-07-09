@@ -203,6 +203,7 @@ fn draw_collapsed(
 /// 4 chars when we don't have a hand-tuned abbreviation.
 fn short_label(id: ScreenId) -> &'static str {
     match id {
+        ScreenId::Overworld => "Menu",
         ScreenId::System => "Sys",
         ScreenId::Network => "Net",
         ScreenId::Bluetooth => "BT",
@@ -219,6 +220,8 @@ fn short_label(id: ScreenId) -> &'static str {
         ScreenId::Editor => "Edit",
         ScreenId::LoRa => "LoRa",
         ScreenId::City => "City",
+        ScreenId::Intel => "Intl",
+        ScreenId::Recon => "Reco",
     }
 }
 
@@ -331,16 +334,25 @@ mod tests {
     }
 
     /// `cycle(forward=false)` from the first visible screen wraps to the
-    /// last (which is City today; if ScreenId::ALL changes the test
-    /// still passes because it only checks "wrap-around").
+    /// last one in `ScreenId::ALL`. As we append new visible screens
+    /// (City, Intel, …) the "last" target moves — the contract being
+    /// tested is purely the wrap-around, not any specific screen name.
+    /// We resolve the expected target dynamically so this test does not
+    /// silently break on every ScreenId tail-append.
     #[test]
     fn cycle_backward_wraps_from_first() {
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
-        let app = App::with_current(tx, rx, ScreenId::System);
+        // Overworld is at position 0 of `ScreenId::ALL` (start of the
+        // cycle), so stepping backward must land on the last non-hidden
+        // ScreenId — i.e. the last entry of `ALL` itself, since the
+        // only hidden screen today is `Editor` and it's not at the tail.
+        let app = App::with_current(tx, rx, ScreenId::Overworld);
         let prev = cycle(&app, false);
-        // System is at position 0 in the visible list; stepping
-        // backward should land on the last visible screen.
-        assert_eq!(prev, ScreenId::City);
+        let expected = *ScreenId::ALL.last().expect("ScreenId::ALL is non-empty");
+        assert_eq!(
+            prev, expected,
+            "backward-wrap from Overworld must land on the last visible screen"
+        );
     }
 
     /// Editor must never appear in the visible list (it's reachable only
@@ -396,11 +408,11 @@ mod tests {
         let app = App::with_current(tx, rx, ScreenId::Network);
         // Wide area so the strip is full-mode, not collapsed.
         let area = ratatui::layout::Rect::new(0, 0, 200, 1);
-        // Network is index 1 in ScreenId::ALL (System=0, Network=1).
-        // With 200 cells / MIN_TAB_WIDTH=6 the window can hold ~33
-        // tabs, so Network is rendered at its natural slot: x ∈
-        // [6, 12). A click at x=8 should land on Network.
-        assert_eq!(hit_test(area, 8, 0, &app), Some(ScreenId::Network));
+        // Overworld is now at `ALL[0]`, System at `ALL[1]`, Network
+        // at `ALL[2]`. With 200 cells / MIN_TAB_WIDTH=6 the window
+        // can hold ~33 tabs, so Network renders at x ∈ [12, 18) —
+        // a click at x=14 lands on Network.
+        assert_eq!(hit_test(area, 14, 0, &app), Some(ScreenId::Network));
     }
 
     /// In the collapsed view there is no per-tab hit surface — the
@@ -413,5 +425,111 @@ mod tests {
         let area = ratatui::layout::Rect::new(0, 0, 20, 1);
         assert_eq!(hit_test(area, 5, 0, &app), None);
         assert_eq!(hit_test(area, 10, 0, &app), None);
+    }
+
+    /// Bruce-firmware Tab-preview highlight: when `draw` is called with
+    /// `Some(target)`, the cell at `target`'s column carries a different
+    /// `Style` than the other tabs. The body keeps rendering whatever
+    /// `app.current` says — only the strip lights up `target`. This is the
+    /// "Tab previews, Enter commits" half of the contract; visually the
+    /// user sees one menu name with a contrasting background while the
+    /// rest of the strip uses the normal tab style. Without this render
+    /// the cycle machinery in `App` is silent from the user's POV.
+    #[test]
+    fn cursor_highlights_target_tab() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(160, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = fresh_app();
+        let theme = Theme::by_name(crate::theme::ThemeName::Dark);
+        // Preview "Network" (cursor != app.current == System).
+        let target = ScreenId::Network;
+        terminal
+            .draw(|f| draw(f, Rect::new(0, 0, 160, 1), &app, Some(target), &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // Find the Network tab's column by scanning for its short label
+        // and grab its rendered style. Compare against a non-cursor
+        // sibling. The two styles must differ — that's the whole point
+        // of the preview indicator.
+        let network_label = short_label(ScreenId::Network);
+        let system_label = short_label(ScreenId::System);
+        let mut network_col: Option<u16> = None;
+        let mut system_col: Option<u16> = None;
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push(buf[(x, 0)].symbol().chars().next().unwrap_or(' '));
+        }
+        if let Some(start) = row.find(network_label) {
+            // Centre of the matched run is the most unambiguous column.
+            network_col = Some((start + network_label.len() / 2) as u16);
+        }
+        if let Some(start) = row.find(system_label) {
+            system_col = Some((start + system_label.len() / 2) as u16);
+        }
+        let nc = network_col.expect("Network label must appear in wide strip");
+        let sc = system_col.expect("System label must appear in wide strip");
+        let cursor_style = buf[(nc, 0)].style();
+        let other_style = buf[(sc, 0)].style();
+        assert_ne!(
+            cursor_style, other_style,
+            "preview cursor ({:?}) must paint {:?} with a different style than the non-cursor tab {:?}; both were {:?}",
+            target, target, ScreenId::System, cursor_style
+        );
+    }
+
+    /// Calling `draw` with `cursor=None` keeps the steady-state style of
+    /// the strip: only `app.current` has the "active selection" look
+    /// (the ▶ marker + selection bg). All non-active, non-cursor tabs
+    /// share ONE plain style — no extra highlight is leaking. This is
+    /// the state the rest of the app sees when the user isn't previewing
+    /// anything; if a stray cursor highlight stayed painted when the
+    /// cursor was cleared (e.g. after Esc), this test catches it.
+    #[test]
+    fn no_cursor_means_no_preview_highlight() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        // fresh_app() defaults to System as the current screen. We
+        // intentionally pick non-current, non-cursor tabs (Network,
+        // Files) and assert both share the same plain style. With
+        // cursor=None there is no is_cursor branch taken at all.
+        let backend = TestBackend::new(160, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let app = fresh_app();
+        let theme = Theme::by_name(crate::theme::ThemeName::Dark);
+        terminal
+            .draw(|f| draw(f, Rect::new(0, 0, 160, 1), &app, None, &theme))
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push(buf[(x, 0)].symbol().chars().next().unwrap_or(' '));
+        }
+        let pick = |id: ScreenId| -> ratatui::style::Style {
+            let label = short_label(id);
+            let col = row
+                .find(label)
+                .map(|s| (s + label.len() / 2) as u16)
+                .unwrap_or_else(|| panic!("label {:?} missing in row {:?}", label, row));
+            buf[(col, 0)].style()
+        };
+        let network = pick(ScreenId::Network);
+        let files = pick(ScreenId::Files);
+        assert_eq!(
+            network, files,
+            "with cursor=None both non-active tabs must share the same plain style; got Network={:?} vs Files={:?}",
+            network, files
+        );
+        // And the active tab (System) must look different from the
+        // plain style — confirms the strip's "you are here" marker is
+        // still painted even when no cursor is active.
+        let system = pick(ScreenId::System);
+        assert_ne!(
+            system, network,
+            "active tab {:?} must paint differently from a non-active sibling when cursor=None; both were {:?}",
+            ScreenId::System,
+            system
+        );
     }
 }

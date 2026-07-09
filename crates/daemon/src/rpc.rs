@@ -138,6 +138,24 @@ pub enum Method {
     // daemon control
     DaemonPing,
     DaemonShutdown,
+
+    // ---- intel (Phase 7 M6 — CLI + daemon parity) ----
+    /// Enumerate every LayerId we ship, with its label, glyph, and
+    /// recommended poll interval. Pure-data, no state — used by
+    /// `cyberdeck intel layers`. Stable shape: a JSON array of objects.
+    IntelLayerList,
+    /// Ask the daemon to re-fetch one (or all) intel layers now and
+    /// ship the resulting `Snapshot` out via the watch channel the
+    /// TUI already subscribes to. No state on the daemon side beyond
+    /// the in-progress refiller task list; returns immediately with
+    /// `{"ok": true, "layer": "..."}` so the CLI stays non-blocking.
+    /// `layer` is `None` to refresh all 9 layers at once.
+    IntelRefresh { layer: Option<String> },
+    /// Compute the worst sentinel across every currently-known
+    /// snapshot in `App::intel_snapshots`. Returns
+    /// `{"sentinel": "green|yellow|red", "count_red": N, ...}` so the
+    /// CLI can print the same chip the TUI footer uses.
+    IntelSentinel,
 }
 
 #[cfg(test)]

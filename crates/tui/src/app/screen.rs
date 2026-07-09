@@ -4,6 +4,15 @@ use crate::theme::ThemeName;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScreenId {
+    /// Phase 7 — Overworld: Bruce-firmware-style carousel menu.
+    /// Lives at index 0 of `ScreenId::ALL` so the Tab-cycle always
+    /// starts here. Single-pane screen with a 3×N grid of all
+    /// visible menu names; Enter enters the focused screen; Esc
+    /// opens a Quit confirmation modal (so a stray Esc from a
+    /// child screen can't kill the app). Does NOT have a right
+    /// pane (`has_right_pane == false`) so the region model
+    /// never tries to step into it.
+    Overworld,
     System,
     Network,
     Bluetooth,
@@ -32,10 +41,31 @@ pub enum ScreenId {
     /// resolve the variant and the layout-audit test can pin its
     /// multi-pane bucket before the real implementation is wired in.
     City,
+    /// Phase 7 M4 — Intel screen: OSINT-feed aggregator with a 9-row
+    /// layer grid (left pane) and a per-layer snapshot detail (right
+    /// pane). Each layer renders a hardcoded `cyberdeck_intel::Snapshot`
+    /// from the snapshot module — the M5 refiller lands later. Mirrors
+    /// the City screen's two-pane shape: left = layer grid + status,
+    /// right = selected layer's summary + raw payload preview.
+    Intel,
+    /// Phase 7 M7 — Recon screen: 7-tab OSINT action console. Each
+    /// tab drives one `cyberdeck_intel::recon` primitive (DNS / WHOIS
+    /// / IP / SSL / CVE / CRYPTO / SANCTIONS) and renders its output
+    /// in a scrollable tinted area. Single-pane (no right pane) —
+    /// the output IS the screen. Reachable via the overworld
+    /// carousel and through the Tab cycle; SSRF-gated at the
+    /// primitive layer (Osiris-derived MIT note).
+    Recon,
 }
 
 impl ScreenId {
+    /// The Overworld sits at index 0 so the Tab-cycle always opens
+    /// here (the "front door" metaphor from Bruce firmware). After
+    /// it comes the existing 15 screens in sidebar order; new
+    /// screens land at the tail so `is_hidden`-skipped entries
+    /// (currently just `Editor`) sit in a stable position.
     pub const ALL: &'static [ScreenId] = &[
+        ScreenId::Overworld,
         ScreenId::System,
         ScreenId::Network,
         ScreenId::Bluetooth,
@@ -52,10 +82,13 @@ impl ScreenId {
         ScreenId::Editor,
         ScreenId::LoRa,
         ScreenId::City,
+        ScreenId::Intel,
+        ScreenId::Recon,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            ScreenId::Overworld => "Menu",
             ScreenId::System => "System",
             ScreenId::Network => "Network",
             ScreenId::Bluetooth => "Bluetooth",
@@ -72,12 +105,19 @@ impl ScreenId {
             ScreenId::Editor => "Editor",
             ScreenId::LoRa => "LoRa",
             ScreenId::City => "City",
+            ScreenId::Intel => "Intel",
+            ScreenId::Recon => "Recon",
         }
     }
 
     /// True when the screen renders a left+right split so the region model
     /// has somewhere to step to. Mirrors the multi-pane screens whose
     /// `Borders::ALL` blocks both read `app.region`.
+    ///
+    /// The Overworld is intentionally single-pane so pressing `→`
+    /// from its right border doesn't dead-end on a "no pane here"
+    /// state — pressing Right while on the Overworld does nothing,
+    /// matching its content shape.
     pub fn has_right_pane(self) -> bool {
         matches!(
             self,
@@ -89,11 +129,14 @@ impl ScreenId {
                 | ScreenId::Packages
                 | ScreenId::LoRa
                 | ScreenId::City
+                | ScreenId::Intel
         )
     }
 
     pub fn glyph(self) -> &'static str {
         match self {
+            // Overworld = a 3×3 grid icon (the carousel itself).
+            ScreenId::Overworld => "▦",
             ScreenId::System => "◉",
             ScreenId::Network => "≋",
             ScreenId::Bluetooth => "⛁",
@@ -114,6 +157,15 @@ impl ScreenId {
             // simple "@"; the braille renderer in Step 7 draws the
             // actual map so this is just a sidebar marker.
             ScreenId::City => "◍",
+            // Intel = OSINT/radar "eye" glyph. Mirrors the intel
+            // screen's surveillance/recon semantics without leaning
+            // on colour or emoji.
+            ScreenId::Intel => "◬",
+            // Recon = magnifier — same shelf as Intel but flags the
+            // action-console semantics (user types a query, hits
+            // Enter, reads output) rather than the passive
+            // surveillance shape of the Intel layer grid.
+            ScreenId::Recon => "⌕",
         }
     }
 
@@ -151,6 +203,42 @@ impl ScreenId {
             return candidate;
         }
         current
+    }
+
+    /// Return the screens that should appear in the sidebar launcher,
+    /// preserving `ScreenId::ALL` order. Mirrors the filter that
+    /// `ui::draw_launcher` applies when building the tile grid, so
+    /// `launcher_offset` (a visible-row index) maps cleanly to a
+    /// `ScreenId` from this list.
+    ///
+    /// Sits on `ScreenId` rather than on a screen instance because the
+    /// `launcher_offset` field is a `usize` and the dispatchers in
+    /// `main.rs` need a list to bounds-check against; building the
+    /// list inline in each handler would duplicate the filter.
+    ///
+    /// Filter rules:
+    /// * If the screens slice has a slot at `ALL[idx]` and that
+    ///   screen's `in_sidebar()` returns false, skip it.
+    /// * If the screens slice has no slot at `ALL[idx]`, the id
+    ///   must be `Editor` (the only intentional no-slot entry) to
+    ///   survive — every other no-slot id is treated as absent.
+    ///   This keeps the test-helper `build_screens()`, which only
+    ///   registers 14 of 17 ids, from accidentally surfacing
+    ///   `Overworld` (no slot) and `LoRa` (no slot) as visible
+    ///   launcher tiles.
+    pub fn sidebar_visible(screens: &[Box<dyn Screen>], app: &crate::app::App) -> Vec<ScreenId> {
+        ScreenId::ALL
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, id)| {
+                match screens.get(idx) {
+                    Some(s) if !s.in_sidebar(app) => None,
+                    Some(_) => Some(*id),
+                    None if *id == ScreenId::Editor => None,
+                    None => None,
+                }
+            })
+            .collect()
     }
 }
 
@@ -215,6 +303,15 @@ pub trait Screen {
     /// Tab/Shift-Tab navigation.
     fn is_hidden(&self, _app: &crate::app::App) -> bool {
         false
+    }
+    /// Whether this screen should appear as a tile in the sidebar launcher.
+    /// Defaults to `!is_hidden()`. Overworld opts out — the sidebar launcher
+    /// *is* the menu, so listing a "Menu" tile alongside the screens it
+    /// launches would be circular. The Tab cycle still hits Overworld; only
+    /// the sidebar index skips it (so `launcher_offset` indexes line up
+    /// with the screens you'd actually want to *jump to* with a digit key).
+    fn in_sidebar(&self, app: &crate::app::App) -> bool {
+        !self.is_hidden(app)
     }
 }
 
@@ -285,21 +382,38 @@ mod tests {
     fn cycle_backward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From System (position 0) going backward must wrap to City
-        // (the last visible screen — Editor is hidden in all_visible()),
-        // mirroring orbital's wrap-around tab navigation.
-        let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::City);
+        // Overworld sits at `ALL[0]`, so "going backward from
+        // System" lands on Overworld directly — it no longer wraps
+        // all the way around. From Overworld itself, backward *does*
+        // wrap to the last visible screen. As we append visible
+        // screens (City, Intel, …) the wrap target moves; we resolve
+        // it dynamically against the current `ALL` tail so the test
+        // asserts the wrap-around contract, not a specific screen.
+        let prev_from_overworld =
+            ScreenId::cycle(&screens, &app, ScreenId::Overworld, false);
+        let expected = *ScreenId::ALL.last().expect("ScreenId::ALL is non-empty");
+        assert_eq!(
+            prev_from_overworld, expected,
+            "backward-wrap from Overworld must land on the last screen in ALL"
+        );
     }
 
     #[test]
     fn cycle_forward_wraps_around() {
         let screens = all_visible();
         let app = dummy_app();
-        // From City (last visible screen — Editor is hidden) going forward
-        // must wrap back to System.
-        let next = ScreenId::cycle(&screens, &app, ScreenId::City, true);
-        assert_eq!(next, ScreenId::System);
+        // Overworld sits at the start of the cycle, so the wrap from
+        // the *current* last entry of `ALL` lands on Overworld. We
+        // resolve "last" dynamically against `ScreenId::ALL` so this
+        // test asserts the wrap-around contract rather than a specific
+        // screen name, and survives future tail-appends (the next one
+        // being whatever M5/M6 adds).
+        let last = *ScreenId::ALL.last().expect("ScreenId::ALL is non-empty");
+        let next = ScreenId::cycle(&screens, &app, last, true);
+        assert_eq!(
+            next, ScreenId::Overworld,
+            "forward-wrap from the last entry must land on Overworld (the cycle's start)"
+        );
     }
 
     #[test]
@@ -317,10 +431,14 @@ mod tests {
         // First forward step must skip the hidden Network.
         let next = ScreenId::cycle(&screens, &app, ScreenId::System, true);
         assert_eq!(next, ScreenId::Bluetooth);
-        // And the backward step from System must skip Power too, wrapping
-        // all the way around the visible list (Editor is hidden) to City.
+        // And the backward step from System lands on Overworld (the
+        // immediate predecessor in `ALL`). Pre-Overworld the test
+        // expected `City` — that wrapped all the way around. With
+        // Overworld inserted at `ALL[0]` the wrap now goes one step
+        // backward, which is the right behavior: System's left
+        // neighbor in the cycle IS Overworld.
         let prev = ScreenId::cycle(&screens, &app, ScreenId::System, false);
-        assert_eq!(prev, ScreenId::City);
+        assert_eq!(prev, ScreenId::Overworld);
         // Sanity: with everything visible, the first forward step lands on
         // Network itself, proving the skip is what made the test above pass.
         for s in screens.iter_mut() {

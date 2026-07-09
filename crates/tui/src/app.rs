@@ -671,6 +671,40 @@ impl Live {
                 }
             }
         });
+
+        // M5 — Intel OSINT refiller. One task per `LayerId`, staggered
+        // poll intervals per `LayerId::poll_interval_secs()`. Each task
+        // fetches its upstream body, parses via the layer's
+        // `snapshot_from`, and pushes the resulting `Snapshot` back to
+        // the dispatcher as `Action::IntelSnapshot`. The dispatcher
+        // upserts into `App::intel_snapshots`.
+        //
+        // The URL map is intentionally empty by default — upstream
+        // endpoints require per-deployment configuration (FIRMS
+        // MAP_KEY, AIS Hub, ACLED email registration, etc.). With an
+        // empty map, `spawn_all` returns no handles, so no fetches
+        // happen and the Intel screen renders the hardcoded fixture
+        // from `IntelScreen::fallback_snapshots`. Operators opt into
+        // real feeds by populating `INTEL_FEEDS` env-var or a
+        // dedicated `feeds.toml` config — wiring for that is a M8
+        // follow-up (the engine itself is M5's deliverable).
+        //
+        // We still spawn the dispatcher-side plumbing (channel,
+        // map) regardless so the screen can be wired to live data
+        // from the very first paint.
+        let (intel_tx, mut intel_rx) = mpsc::channel::<cyberdeck_intel::Snapshot>(64);
+        std::mem::forget(cyberdeck_intel::refiller::spawn_all(
+            intel_tx,
+            std::collections::HashMap::new(),
+        ));
+        let tx_intel = tx.clone();
+        tokio::spawn(async move {
+            while let Some(snap) = intel_rx.recv().await {
+                if tx_intel.send(Action::IntelSnapshot(snap)).await.is_err() {
+                    return;
+                }
+            }
+        });
     }
 }
 
@@ -693,6 +727,19 @@ pub struct App {
     pub current: ScreenId,
     pub manager: crate::wm::manager::Manager,
     pub modal: Modal,
+    /// Per-layer intel snapshots, keyed by `LayerId`. Populated by the
+    /// M5 refiller in `Live::spawn_refreshers` via
+    /// `Action::IntelSnapshot`. The Intel screen reads this map on
+    /// every render — missing keys render as `Pending`. Empty at boot;
+    /// the first paint shows the hardcoded fallback in
+    /// `IntelScreen::fallback_snapshots` if no refiller snapshot has
+    /// landed yet, so the user sees real-looking data immediately
+    /// rather than 9 blank rows.
+    pub intel_snapshots: std::collections::BTreeMap<cyberdeck_intel::LayerId, cyberdeck_intel::Snapshot>,
+    /// Worst sentinel rollup across `intel_snapshots`. Updated
+    /// alongside the map so the footer chip can read it without
+    /// recomputing on every frame.
+    pub intel_worst: cyberdeck_intel::Sentinel,
     /// True when the sidebar (screen list) has focus. *Derived* from
     /// `region`: it's `region == Region::Sidebar`. Kept as a `bool` for
     /// compatibility with the old render and test paths that read it
@@ -763,6 +810,17 @@ pub struct App {
     /// pass. `None` on any non-City screen (so a stale rect from a
     /// previous tab never fires).
     pub city_map_rect: Option<ratatui::layout::Rect>,
+    /// Bruce-firmware menu-name strip: the screen the user has
+    /// *previewed* via Tab but not yet committed. While this is
+    /// `Some(id)`, the tab strip highlights `id` (and the body keeps
+    /// rendering `app.current`); pressing Enter commits and flips
+    /// `app.current` to `id`, pressing Esc clears the cursor back
+    /// to `app.current`. `None` means "no preview" — Tab steps the
+    /// cursor and the strip's highlight moves with it. The cursor
+    /// is intentionally tracked separately from `launcher_offset`
+    /// (the sidebar's digit-key row) because the two surfaces can
+    /// be on different screens simultaneously.
+    pub tab_cursor: Option<ScreenId>,
     pub toasts: Vec<Toast>,
     /// Module 7 — persistent history of every toast ever shown, capped at
     /// `TOAST_HISTORY_CAP`. Unlike `toasts` (which `cleanup_toasts` ages out
@@ -1078,6 +1136,19 @@ impl App {
         Self::with_current(tx, rx, crate::app::screen::ScreenId::System)
     }
 
+    /// Test-only constructor that bypasses the prefs file loader and
+    /// drops the mpsc channels — call this from `mod tests` blocks
+    /// inside a screen module that don't actually send Actions. The
+    /// `App` is otherwise identical to `App::new()` so render paths
+    /// exercise the same code. Mirrors the `fresh_app` helper but
+    /// public so per-screen test modules can reach it without
+    /// exposing test plumbing through the public API.
+    #[cfg(test)]
+    pub fn new_for_tests() -> Self {
+        let (tx, rx) = mpsc::channel::<Action>(4);
+        Self::with_current(tx, rx, crate::app::screen::ScreenId::Overworld)
+    }
+
     /// Like [`App::new`] but pins the initial current screen. Used by
     /// tests that need to drive `cycle` from a known starting point
     /// without going through the main loop's `Action::Goto` path.
@@ -1092,6 +1163,17 @@ impl App {
             current,
             manager: crate::wm::manager::Manager::new(current),
             modal: Modal::None,
+            // M5 — per-layer intel snapshot map. Empty at boot; the
+            // refiller in `Live::spawn_refreshers` populates it. The
+            // Intel screen's `render` reads from this map first,
+            // falling back to the hardcoded fixture for any
+            // `LayerId` that's not present yet so the first paint
+            // looks complete instead of "all pending".
+            intel_snapshots: std::collections::BTreeMap::new(),
+            // Worst sentinel rollup. The dispatcher updates this
+            // alongside `intel_snapshots` so the footer chip can
+            // read it O(1) on every frame. Green by default.
+            intel_worst: cyberdeck_intel::Sentinel::Green,
             sidebar_focused: true,
             launcher_offset: 0,
             // No screen-provided hint until a screen sets it; the legend
@@ -1115,6 +1197,9 @@ impl App {
             // same rect the braille grid was drawn into. Cleared on
             // any non-City screen to avoid stale-rect panning.
             city_map_rect: None,
+            // No preview — pressing Tab sets this to a `Some(id)`
+            // and the menu-name strip highlights it; Enter commits.
+            tab_cursor: None,
             toasts: Vec::new(),
             // Module 7.1 — toast history ring. Empty until the first
             // `push_toast` call; cap enforced by `push_toast` itself so
@@ -1266,6 +1351,37 @@ impl App {
     pub fn set_region(&mut self, r: Region) {
         self.region = r;
         self.sidebar_focused = r == Region::Sidebar;
+    }
+
+    /// Step the Bruce-style tab cursor one slot forward or backward.
+    /// `None` is the "no preview yet" state — the first Tab starts
+    /// from `current` and lands on the next screen. Subsequent Tabs
+    /// step the cursor itself. Mirrors `ScreenId::cycle` so the
+    /// ordering matches the rest of the app.
+    pub fn cycle_tab_cursor(&mut self, forward: bool) {
+        use crate::app::screen::{Screen, ScreenId};
+        // The cursor needs a real `ScreenId` to step from, so seed
+        // it from `current` if it's still `None`.
+        let seed = self.tab_cursor.unwrap_or(self.current);
+        let fake_screens: Vec<Box<dyn Screen>> = Vec::new();
+        let next = ScreenId::cycle(&fake_screens, self, seed, forward);
+        self.tab_cursor = Some(next);
+    }
+
+    /// Commit the tab cursor: `app.current` becomes whatever
+    /// `tab_cursor` is pointing at, then `tab_cursor` is reset to
+    /// `None` so the strip stops highlighting. No-op when there's
+    /// no preview (i.e. the user never pressed Tab). This is the
+    /// "Enter commits" half of the Bruce firmware contract.
+    pub fn commit_tab_cursor(&mut self) {
+        if let Some(id) = self.tab_cursor.take() {
+            self.current = id;
+        }
+    }
+
+    /// Cancel the tab cursor (Esc). `app.current` is unchanged.
+    pub fn clear_tab_cursor(&mut self) {
+        self.tab_cursor = None;
     }
 
     /// Shortcut to open a `Modal::Input` with the given prompt and kind.
@@ -1817,6 +1933,84 @@ mod tests {
             app.toast_history.back().unwrap().message.contains("toast 249"),
             "newest entry should be toast 249, got {:?}",
             app.toast_history.back().unwrap().message
+        );
+    }
+
+    /// `tab_cursor` API lock — the three Bruce-firmware helpers that
+    /// the renderer depends on. The renderer only paints a highlight
+    /// when the field is `Some(id)`; if any of these helpers forget to
+    /// set or clear the field, the strip silently stops previewing and
+    /// the user sees no feedback for Tab presses. Locked here so the
+    /// contract can't regress without a test failure.
+    #[test]
+    fn tab_cursor_helpers_lifecycle() {
+        let (tx, rx) = mpsc::channel::<Action>(8);
+        let mut app = App::new(tx, rx);
+        // Steady state: nothing pre-viewed.
+        assert!(app.tab_cursor.is_none(), "fresh app has no preview cursor");
+
+        // Tab (forward) seeds the cursor from `current` (System) and
+        // lands on the next visible screen. Empty screens vec means
+        // nothing is hidden, so we get the unfiltered cycle — must
+        // differ from System.
+        app.cycle_tab_cursor(true);
+        let first = app.tab_cursor.expect("Tab must set tab_cursor");
+        assert_ne!(
+            first, app.current,
+            "Tab must step off the current screen"
+        );
+
+        // Tab again steps the cursor *itself*, not the current screen.
+        // `current` must stay put — only Enter flips it.
+        let pre_current = app.current;
+        app.cycle_tab_cursor(true);
+        assert_eq!(
+            app.current, pre_current,
+            "Tab must NOT mutate app.current; only Enter does"
+        );
+        assert_ne!(
+            app.tab_cursor, Some(first),
+            "a second Tab must advance the cursor"
+        );
+
+        // Esc cancels: cursor clears, current stays.
+        let pre_clear = app.current;
+        let cursor_before_clear = app.tab_cursor;
+        app.clear_tab_cursor();
+        assert!(app.tab_cursor.is_none(), "clear_tab_cursor must reset to None");
+        assert_eq!(
+            app.current, pre_clear,
+            "clear_tab_cursor must NOT change app.current"
+        );
+        // (cursor_before_clear is bound to silence the unused warning —
+        // a future refactor may want to compare; today the value is
+        // carried just to make the assertion shape explicit.)
+        let _ = cursor_before_clear;
+
+        // Commit with no cursor is a no-op: Enter doesn't move the user
+        // anywhere they didn't ask to go.
+        let pre_commit = app.current;
+        app.commit_tab_cursor();
+        assert_eq!(app.current, pre_commit, "Enter with no cursor is a no-op");
+        assert!(app.tab_cursor.is_none(), "Enter must not leak a stale cursor");
+
+        // Full lifecycle: seed via Tab, then Enter commits and clears.
+        app.cycle_tab_cursor(true);
+        let target = app
+            .tab_cursor
+            .expect("Tab must populate the cursor before commit");
+        assert_ne!(
+            target, app.current,
+            "Tab must preview a screen different from the current one"
+        );
+        app.commit_tab_cursor();
+        assert_eq!(
+            app.current, target,
+            "Enter must move app.current to the previewed screen"
+        );
+        assert!(
+            app.tab_cursor.is_none(),
+            "Enter must reset the cursor so the strip stops highlighting"
         );
     }
 }

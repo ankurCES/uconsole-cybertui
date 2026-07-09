@@ -22,4 +22,7 @@ Thumbs.db
 .env.*
 *.pem
 *.key
+# Worktree + agent scratch
 .worktrees/
+.blumi/
+tasks.json

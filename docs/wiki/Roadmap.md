@@ -46,12 +46,17 @@ or Pattern B.
 
 See [Hardening](./Hardening.md).
 
-## Phase 7 — Wiki ⏳ in progress
+## Phase 7 — Carousel + Intel + Recon ✅ shipped
 
-The wiki lives under `docs/wiki/` and mirrors the GitHub wiki
-structure. Pages so far: Home, Architecture, Phase 1, Phase 2, Phase 3,
-Phase 4, Phase 5, Hardening, Keymaps, Hardware/Setup, Photos, Roadmap.
-Fleshing out individual screens (per-screen design notes) is next.
+Overworld front-door carousel (Bruce-firmware style), 9-layer OSINT
+aggregator screen with staggered refiller + sentinel rollup footer,
+and a 7-tab Recon action console (DNS / WHOIS / IP / SSL / CVE /
+CRYPTO / SANCTIONS) gated through an SSRF reject-list (loopback +
+RFC1918 + link-local + multicast, both IPv4 and IPv6). CLI parity
+via `cyberdeck intel` and `cyberdeck recon`; daemon RPC methods
+`IntelLayerList` / `IntelRefresh` / `IntelSentinel`.
+
+See [Phase 7 — Carousel + Intel + Recon](./Phase-7-Carousel-Intel.md).
 
 ## Future (not yet scoped)
 

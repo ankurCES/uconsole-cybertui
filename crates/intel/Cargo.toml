@@ -1,0 +1,44 @@
+[package]
+name = "cyberdeck-intel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "OSINT feed clients + recon primitives for cyberdeck-tui. Inspired by simplifaisoul/osiris (MIT)."
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+humantime.workspace = true
+futures.workspace = true
+once_cell.workspace = true
+# `reqwest` is intentionally the *non-http-feature-gated* dependency
+# here. The intel crate always does network IO; unlike the TUI binary
+# (which gates `reqwest` behind `--features http` so the install
+# script's default build doesn't drag in a TLS stack), this crate's
+# whole reason to exist is to talk to upstream feeds. We use the same
+# workspace `reqwest` entry as the TUI so there's exactly one copy of
+# rustls in the binary.
+reqwest.workspace = true
+# M7 — Recon primitives. `ureq` is a tiny blocking HTTP client used
+# by `recon::ip` for its ip-api.com lookup (no streaming, no need for
+# reqwest's heavier machinery on this one endpoint). `csv` powers the
+# bundled OFAC SDN + crypto-risk table loaders in `recon::{sanctions,
+# crypto}`. Both are workspace-or-crates.io deps already pulled in by
+# adjacent crates, so no extra install footprint in the binary.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+csv = "1"
+
+[dev-dependencies]
+# Stub HTTP server for the snapshot/parse unit tests. Pinned to 0.6 to
+# match the wiremock version the TUI crate's `tests/lora_http_live.rs`
+# uses — keeps the workspace on one wiremock major.
+wiremock = "0.6"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+proptest = "1"

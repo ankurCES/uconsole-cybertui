@@ -16,6 +16,7 @@ after sync.
 | [Phase 4 — Polish](./Phase-4-Polish.md) | Pane-number badges, scrollback, persistence |
 | [Phase 5 — Modal upgrade](./Phase-5-Modals.md) | Secret / Choice / Wizard / Progress / AuthFailure |
 | [Phase 6 — City screen](./Phase-6-City.md) | IP geo + Open-Meteo + braille road map + synthetic traffic |
+| [Phase 7 — Carousel + Intel + Recon](./Phase-7-Carousel-Intel.md) | Overworld carousel, 9-layer OSINT aggregator, 7-tab action console with SSRF gate |
 | [Hardening](./Hardening.md) | No-hang PTY tests (Patterns A + B) |
 | [Keymaps](./Keymaps.md) | Global, WM, per-screen, uconsole-specific |
 | [Hardware / Setup](./Hardware-Setup.md) | ClockworkPi uconsole on Debian 13 trixie |
@@ -29,6 +30,7 @@ after sync.
 - **I want to see screenshots / photos.** → [Photos](./Photos.md)
 - **I'm contributing a new screen.** → [Phase 1 — TUI](./Phase-1-TUI.md) + [Architecture](./Architecture.md)
 - **I'm wiring up the City screen (geo / weather / traffic).** → [Phase 6 — City screen](./Phase-6-City.md)
+- **I'm wiring up Intel (OSINT layer aggregator) or Recon (action console).** → [Phase 7 — Carousel + Intel + Recon](./Phase-7-Carousel-Intel.md)
 - **I'm fixing a flaky PTY test.** → [Hardening](./Hardening.md)
 - **I'm trying to get it running on a non-uconsole box.** → [Hardware / Setup](./Hardware-Setup.md)
 

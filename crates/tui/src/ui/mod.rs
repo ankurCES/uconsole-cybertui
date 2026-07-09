@@ -363,6 +363,35 @@ pub fn draw_status(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
     spans.push(Span::styled(" q ", theme.key()));
     spans.push(Span::styled("quit ", theme.dim()));
 
+    // M5 — Intel footer chip. Shows `intel: N/M layers live · K
+    // {SENTINEL}` so the user can glance at the status bar and
+    // know whether the refiller is healthy without opening the
+    // Intel screen. The chip is right-aligned to the clock and
+    // dimmed when no live data has landed yet (everything still
+    // `Pending`). The sentinel color comes from the theme so a
+    // RED rollup pops even from the corner of the eye.
+    {
+        let total = cyberdeck_intel::LayerId::ALL.len() as u64;
+        let live = app
+            .intel_snapshots
+            .values()
+            .filter(|s| matches!(s.status, cyberdeck_intel::LayerStatus::Ok { .. }))
+            .count() as u64;
+        let sentinel_style = match app.intel_worst {
+            cyberdeck_intel::Sentinel::Red => theme.error(),
+            cyberdeck_intel::Sentinel::Yellow => theme.warn(),
+            cyberdeck_intel::Sentinel::Green => theme.ok(),
+        };
+        let chip = format!(
+            " intel: {}/{} live · {} ",
+            live,
+            total,
+            app.intel_worst.short(),
+        );
+        spans.push(Span::styled("  ", theme.dim()));
+        spans.push(Span::styled(chip, sentinel_style));
+    }
+
     // Right side: clock.
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
@@ -405,16 +434,19 @@ pub fn draw_launcher(
             .iter()
             .enumerate()
             .filter_map(|(idx, id)| {
-                let slot = screens.get(idx);
-                if let Some(s) = slot {
-                    if s.is_hidden(app) {
-                        return None;
-                    }
-                } else if *id == ScreenId::Editor {
-                    // Editor has no registry slot; filter explicitly.
-                    return None;
+                // Same filter as `ScreenId::sidebar_visible` — keep
+                // these two in sync so the launcher cursor and the
+                // painted tile grid always agree. If the registry
+                // has no slot for this id, skip it (Editor is the
+                // only intentional no-slot case; treat it as
+                // absent). See `ScreenId::sidebar_visible` for the
+                // long-form rationale.
+                match screens.get(idx) {
+                    Some(s) if !s.in_sidebar(app) => None,
+                    Some(_) => Some((idx, *id, id.glyph(), id.label())),
+                    None if *id == ScreenId::Editor => None,
+                    None => None,
                 }
-                Some((idx, *id, id.glyph(), id.label()))
             })
             .collect();
     if entries.is_empty() {
@@ -638,16 +670,52 @@ pub fn draw_toasts(f: &mut Frame, area: Rect, app: &App, theme: &Theme) {
 // The previous five-row chrome (header/menu_bar/tab_strip/body/status)
 // consumed ~6 rows on a 32-row terminal and made the screen list feel
 // cramped. The new layout gives the body 30+ rows on the same terminal.
-pub fn chunks(area: Rect) -> (Rect, Rect, Rect) {
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(8),
-            Constraint::Length(1),
-        ])
-        .split(area);
-    (outer[0], outer[1], outer[2])
+// Four rows, top-to-bottom:
+//   * header   (1 row)             — live status icons + clock
+//   * tab_strip (1 row, optional)  — Bruce-firmware menu-name strip with
+//                                    preview-cursor highlight (Tab moves
+//                                    the cursor, Enter commits, Esc cancels)
+//   * body     (flex)              — the launcher grid OR the focused screen
+//   * legend   (1 row)             — on-screen button legend
+// The tab_strip reuses one of the body's flex rows when the terminal is
+// too short (height < 10) so the focused screen never gets crushed.
+// Anything that needs to know "did the strip actually render this frame"
+// reads `tab_strip_rect` on the returned tuple.
+pub fn chunks(area: Rect) -> (Rect, Option<Rect>, Rect, Rect) {
+    let strip_visible = area.height >= 10;
+    let outer = if strip_visible {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // tab_strip
+                Constraint::Min(8),    // body
+                Constraint::Length(1), // legend
+            ])
+            .split(area)
+    } else {
+        // Header / body / legend only — the strip row collapses away.
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(8),
+                Constraint::Length(1),
+            ])
+            .split(area)
+    };
+    if strip_visible {
+        let header = outer[0];
+        let strip = outer[1];
+        let body = outer[2];
+        let legend = outer[3];
+        (header, Some(strip), body, legend)
+    } else {
+        let header = outer[0];
+        let body = outer[1];
+        let legend = outer[2];
+        (header, None, body, legend)
+    }
 }
 
 #[cfg(test)]

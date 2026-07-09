@@ -11,9 +11,10 @@ pub mod output;
 
 use crate::commands::{
     audio::AudioCmd, bluetooth::BluetoothCmd, city::CityCmd, completion::CompletionCmd,
-    config_cmd::ConfigCmd, daemon::DaemonCmd, display::DisplayCmd, logs::LogsCmd, net::NetCmd,
-    packages::PackagesCmd, power::PowerCmd, process::ProcessCmd, services::ServicesCmd,
-    storage::StorageCmd, system::SystemCmd, update::UpdateCmd, workspace::WorkspaceCmd, wm::WmCmd,
+    config_cmd::ConfigCmd, daemon::DaemonCmd, display::DisplayCmd, intel::IntelCmd, logs::LogsCmd,
+    net::NetCmd, packages::PackagesCmd, power::PowerCmd, process::ProcessCmd, recon::ReconCmd,
+    services::ServicesCmd, storage::StorageCmd, system::SystemCmd, update::UpdateCmd,
+    workspace::WorkspaceCmd, wm::WmCmd,
 };
 use crate::output::OutputMode;
 
@@ -106,6 +107,14 @@ pub enum Cmd {
         #[command(subcommand)]
         cmd: CityCmd,
     },
+    Intel {
+        #[command(subcommand)]
+        cmd: IntelCmd,
+    },
+    Recon {
+        #[command(subcommand)]
+        cmd: ReconCmd,
+    },
 }
 
 pub fn run() -> Result<i32> {
@@ -130,6 +139,8 @@ pub fn run() -> Result<i32> {
         Cmd::Config { cmd } => commands::config_cmd::run(cmd, mode),
         Cmd::Update { cmd } => commands::update::run(cmd, mode),
         Cmd::City { cmd } => commands::city::run(cmd, mode),
+        Cmd::Intel { cmd } => commands::intel::run(cmd, mode),
+        Cmd::Recon { cmd } => commands::recon::run(cmd, mode),
     }
 }
 

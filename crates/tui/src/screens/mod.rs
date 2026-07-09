@@ -10,14 +10,17 @@ pub mod editor;
 pub mod files;
 pub mod logs;
 pub mod network;
+pub mod overworld; // Phase 7 — Carousel front door.
 pub mod packages;
 pub mod power;
 pub mod processes;
+pub mod recon; // Phase 7 M7 — 7-tab OSINT action console.
 pub mod services;
 pub mod settings;
 pub mod storage;
 pub mod system;
 pub mod lora;
+pub mod intel;
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;

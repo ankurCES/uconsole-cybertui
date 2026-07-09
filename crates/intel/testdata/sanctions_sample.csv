@@ -1,0 +1,3 @@
+uid,name,sdn_type,program,aka,remarks
+SDN-1001,Test Sanctioned Entity,SDN,SDGT,Demo AKA / AKA 2,"Sanctions list fixture — flagged for sentinel tests"
+SDN-1002,Clean Reference Inc.,Individual,,"Friendly Co.","Test-only reference row; not sanctioned"

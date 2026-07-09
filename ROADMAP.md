@@ -162,3 +162,108 @@ known issues live at [`docs/wiki/Phase-6-City.md`](./docs/wiki/Phase-6-City.md).
 Test counts: 45 unit tests under `screens::city` + 4 dispatcher
 integration tests under `app::tests::city_*` + 6 CLI dispatch tests
 under `cli_dispatch::city_*`. All green.
+## Phase 7 — Carousel menu + Intel + Recon (done)
+
+Three deliverables landed as one milestone:
+
+### M2 — Overworld (carousel front door)
+
+New `screens::overworld` + `ScreenId::Overworld` at index 0 of
+`ScreenId::ALL` (the "front door" metaphor from Bruce firmware).
+Single-pane carousel of all visible sidebar entries; width-bucketed
+grid (≤80→2 cols, ≤120→3, ≤160→4, else 5); Enter mirrors
+`switch_screen` (`app.current` + `wm::WindowKind`); Esc shows an
+info toast (never quits); Tab falls through to the main loop.
+Excludes `Editor` from the visible set.
+
+### M3 — Tab-strip preview indicator
+
+The pre-existing `app.tab_cursor` API (`cycle_tab_cursor` /
+`commit_tab_cursor` / `clear_tab_cursor`) was wired into the
+Tab-strip area: `ui::chunks()` now returns the strip as
+`Option<Rect>`, `main::draw` paints it when present and writes
+`app.tab_strip_rect`. Tab/BackTab on the content side calls
+`cycle_tab_cursor(forward)`; Enter commits; Esc clears.
+
+### M4 + M5 — Intel screen (OSINT feed aggregator)
+
+New `screens::intel` + `ScreenId::Intel`. Two-pane layout
+(`[Constraint::Percentage(28), Min(40)] Horizontal`):
+9-row layer grid on the left, per-layer snapshot detail on the
+right. Nine hardcoded fixtures in M4; M5 swaps the data source for
+`cyberdeck-intel::refiller::spawn_all()` which runs 9 staggered
+`tokio::spawn` tasks (one per `LayerId`) and pushes `Snapshot`s
+through an `mpsc` → `Action::IntelSnapshot` → dispatcher arm →
+`App::intel_snapshots`. The render path reads from
+`intel_snapshots` first and falls back to the fixture for any
+`LayerId` not yet populated so the first paint looks complete.
+Worst-sentinel rollup drives both the right-pane title chip and
+the footer line `intel: N/M layers live · K <SENTINEL>`.
+
+Nine layer modules under `crates/intel/src/` — each owns
+`parse()` + `snapshot_from()` + sentinel rules (Osiris-derived MIT
+notes: flights, earthquakes, fires, weather, satellites, news,
+cctv, maritime, conflicts). All keyless, staggered poll
+intervals (30s → 21,600s).
+
+### M6 — CLI + daemon parity
+
+New `cyberdeck intel` verb (clap 4 subcommand tree) with
+`layers` / `refresh` / `sentinel` arms. New daemon
+`Method::IntelLayerList`, `Method::IntelRefresh { layer }`,
+`Method::IntelSentinel` variants + the matching handlers
+(`Method::IntelLayerList` projects `LayerId::ALL` to a JSON array,
+`Method::IntelRefresh` validates the layer name before acking,
+`Method::IntelSentinel` returns the worst-of-empty rollup). Wire
+shape is identical between direct mode and daemon mode so shell
+pipelines don't have to branch on transport. CLI `Cmd::Intel`
+re-exported under the existing top-level dispatcher.
+
+### M7 — Recon screen (7-tab OSINT action console)
+
+New `screens::recon` + `ScreenId::Recon`. Single-pane (no right
+pane — the output IS the screen). Seven tabs (DNS / WHOIS / IP /
+SSL / CVE / CRYPTO / SANCTIONS), each driving one primitive from
+`cyberdeck-intel::recon::*::run(query)`. SSRF-gated: every
+primitive that resolves a target to a network endpoint runs
+through `cyberdeck-intel::recon::ssrf::check_ip` first — refuses
+`127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`169.254.0.0/16`, IPv6 loopback/ULA/link-local/multicast, etc.
+Property tests over IPv4 reject bands via `proptest` (256 cases
+each). Keymap: Tab/BackTab cycle, printable chars accumulate
+into the query buffer (cap 256), Enter runs the active arm,
+Esc clears, j/k scrolls the output area (capped at 4 KiB).
+
+Two bundled fixtures under `crates/intel/testdata/`:
+`sanctions_sample.csv` (1 sanctioned + 1 clean reference row) and
+`crypto_risk.csv` (1 sanctioned + 1 mixer + 1 reference row)
+so `Recon` is hermetic in CI without any network calls.
+
+CLI parity via `cyberdeck recon <subcommand>` — direct-mode only
+(one sync primitive per invocation; daemon RPC overhead would
+exceed the call cost). Nine `cli_dispatch::recon_*` tests pin the
+verb surface, including the SSRF guard (`recon ip 127.0.0.1`
+returns `{"ok":false, "error":{"message":"...refused to target..."}}`).
+
+### Test counts (cumulative for Phase 7)
+
+* `cyberdeck-intel` lib — 97 tests (9 layer parsers + refiller + 7
+  recon primitives + 6 SSRF properties + 14 module-level helpers);
+  all green.
+* `cyberdeck-daemon` lib — 32 tests including 5 new `intel_*`
+  handlers (`intel_layer_list_returns_all_known_layers`,
+  `intel_refresh_layerless_succeeds`, `intel_refresh_known_layer_succeeds`,
+  `intel_refresh_unknown_layer_returns_invalid`,
+  `intel_sentinel_is_green_for_empty_rollup`); all green.
+* `cyberdeck-tui` lib — 314 tests including 14 new
+  `screens::recon::tests::*` and 13 `screens::intel::tests::*`;
+  all green.
+* `cli_dispatch` integration — 34 tests including 9 new
+  `intel_*` and 9 new `recon_*` tests; all green.
+
+Six `cyberdeck-tui` bin tests pre-existed as failing on
+`bluetooth_passkey_rejects_letters`, `esc_in_editor_closes_editor`,
+etc. before Phase 7 — they are not regressions from this work.
+
+Detailed design + tests + known issues live at
+[`docs/wiki/Phase-7-Carousel-Intel.md`](./docs/wiki/Phase-7-Carousel-Intel.md).

@@ -111,6 +111,13 @@ pub enum Action {
     /// each render. Failures don't emit an Action — the previous
     /// snapshot stays on screen.
     CityWeatherRefreshed(crate::screens::city::weather::Weather),
+    /// M5 — Intel refiller pushed a fresh `Snapshot` for a single
+    /// layer. Dispatcher upserts into `App::intel_snapshots` keyed by
+    /// `LayerId`. The Intel screen reads the map on every render, so
+    /// the grid updates on the very next frame. Failures land as
+    /// `Snapshot::error(...)` (carrying `LayerStatus::Error`); the
+    /// screen renders those rows in red.
+    IntelSnapshot(cyberdeck_intel::Snapshot),
 }
 
 #[derive(Debug, Clone)]

@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 cyberdeck-core = { path = "../core" }
 cyberdeck-tui   = { path = "../tui" }
+cyberdeck-intel = { path = "../intel" }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 serde = { workspace = true }

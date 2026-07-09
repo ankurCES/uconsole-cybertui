@@ -1,0 +1,4 @@
+network,address,category,note,risk
+btc,1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa,genesis,Genesis block coinbase (non-risk reference),info
+btc,1F1tAaz5x1HUXr96LSh4sB5pYBAVBk6Ebc,sanctioned,Test sanctioned exchange address,sanctioned
+btc,bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh,mixer,Test mixer (ChipMixer-style),mixer

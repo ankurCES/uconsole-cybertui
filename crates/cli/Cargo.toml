@@ -16,6 +16,11 @@ cyberdeck-daemon = { path = "../daemon" }
 # instead of re-implementing the HTTP clients. The TUI crate has no
 # runtime dependency on the CLI, so this is one-way (CLI → TUI).
 cyberdeck-tui = { path = "../tui" }
+# `cyberdeck-intel` powers the `intel` verb (Phase 7 M6). Pulling the
+# types in directly lets the CLI print the same JSON shape whether
+# reached via the daemon or in direct mode; otherwise the CLI would
+# shell out to itself or duplicate the layer list.
+cyberdeck-intel = { path = "../intel" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

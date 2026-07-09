@@ -268,6 +268,12 @@ async fn run_app(
     tx: &mpsc::Sender<Action>,
 ) -> anyhow::Result<()> {
     let mut screens: Vec<Box<dyn Screen>> = vec![
+        // Phase 7 — Carousel front door. Lives at index 0 of
+        // `ScreenId::ALL`; first stop on a Tab-cycle. The Vec
+        // order doesn't have to match `ALL` (lookup is by id
+        // via `.find`), but matching helps reviewers map code
+        // to the sidebar.
+        Box::new(screens::overworld::OverworldScreen::new()),
         Box::new(screens::system::SystemScreen),
         Box::new(screens::network::NetworkScreen),
         Box::new(screens::bluetooth::BluetoothScreen),
@@ -293,6 +299,16 @@ async fn run_app(
         // Step 3 stub — Step 8 swaps the placeholder render for the real
         // braille renderer + geo/weather clients wired in Steps 5-7.
         Box::new(screens::city::CityScreen::new()),
+        // Intel screen: layer grid (left) + selected-layer detail (right).
+        // M4 ships a hardcoded snapshot list inside `IntelScreen::new`;
+        // M5 swaps the data source for the refiller without changing
+        // the renderer.
+        Box::new(screens::intel::IntelScreen::new()),
+        // Recon screen: 7-tab OSINT action console (Phase 7 M7).
+        // Single-pane by design — the rendered output IS the screen.
+        // Tab/BackTab cycles tabs, characters append to the query,
+        // Enter runs the active arm, Esc clears, j/k scrolls.
+        Box::new(screens::recon::ReconScreen::new()),
     ];
 
     let mut redraw = true;
@@ -440,10 +456,25 @@ async fn run_app(
 }
 
 fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &Theme) {
-    // Fix #2a — Cyberdeck console layout. 3 rows: header / body / legend.
-    let (header, body, legend) = ui::chunks(f.area());
+    // Four-row layout: header / tab_strip / body / legend. `tab_strip`
+    // is `None` when the terminal is too short (< 10 rows); a tight window
+    // never paints a half-rendered tab strip. The strip row goes away to
+    // give the focused screen as much vertical space as possible — the
+    // strip is purely an indicator, never a hard navigation requirement.
+    let (header, tab_strip, body, legend) = ui::chunks(f.area());
     // The header is now just live status icons + clock on a single row.
     ui::draw_header(f, header, app, theme);
+    // Bruce-firmware menu-name strip with preview cursor highlight.
+    // `app.tab_cursor` is `Some(id)` while the user is previewing a
+    // target screen via Tab (no commit yet); `None` means the strip
+    // shows the *current* screen highlighted and no preview is active.
+    // The click-test rect is set on `app` so the click handler in
+    // `handle_mouse` can resolve (col,row) → ScreenId without redoing
+    // the layout math.
+    app.tab_strip_rect = tab_strip;
+    if let Some(area) = tab_strip {
+        crate::ui::tab_strip::draw(f, area, app, app.tab_cursor, theme);
+    }
     // The body hosts the launcher when focus is on it; otherwise it
     // renders the focused screen. The launcher stays available via B/Esc.
     if app.region == Region::Sidebar {
@@ -950,7 +981,12 @@ fn palette_actions() -> Vec<(&'static str, String)> {
 /// pane would keep showing whatever it last rendered.
 fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
     if matches!(app.region, Region::Sidebar) {
-        app.launcher_offset = sidebar_row.min(ScreenId::ALL.len() - 1);
+        // `launcher_offset` is a visible-row index, not a ScreenId
+        // index — bounds-check against the visible list so callers
+        // that pass a stale raw ALL index (e.g. tests pinning an
+        // old layout) don't poison the cursor.
+        let n = ScreenId::ALL.len();
+        app.launcher_offset = sidebar_row.min(n.saturating_sub(1));
     }
     app.current = screen;
     // Committing from the sidebar (Enter / 1-0 / "Go to N") lands the
@@ -1051,13 +1087,21 @@ fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
 /// and step the cursor +1 (so a stream of Enter presses walks the
 /// grid entry-by-entry). Returns `false` because committing a screen
 /// is not a quit signal.
-async fn commit_launcher(app: &mut App) -> bool {
-    let n = ScreenId::ALL.len();
+///
+/// The cursor is a visible-row index, not a `ScreenId::ALL` index:
+/// `Overworld` is hidden from the launcher (it *is* the menu, so a
+/// "Menu" tile in the launcher is circular), so a raw `ALL[3]`
+/// read would land on the wrong screen. `sidebar_visible` returns
+/// the same filtered list `draw_launcher` paints, keeping digit-key
+/// shortcuts in lockstep with arrow navigation.
+async fn commit_launcher(app: &mut App, screens: &[Box<dyn Screen>]) -> bool {
+    let visible = ScreenId::sidebar_visible(screens, app);
+    let n = visible.len();
     if n == 0 {
         return false;
     }
     let idx = app.launcher_offset.min(n - 1);
-    let id = ScreenId::ALL[idx];
+    let id = visible[idx];
     app.current = id;
     // Set the WM pane so the next render paints the chosen screen
     // even if its region hasn't been visited yet.
@@ -1563,11 +1607,17 @@ async fn handle_key(
         // renderer re-clamps on every frame in case the visible-screen
         // list shrinks (e.g. Editor hidden). Modifier guards make sure
         // we don't intercept Ctrl/Alt-modified versions of these keys.
+        //
+        // `n` is the *visible-screens* count, not `ScreenId::ALL.len()`,
+        // because `Overworld` is hidden from the launcher. Treating the
+        // raw enum length as `n` would let the cursor step past the
+        // last visible tile and land on Offworld offsets that render
+        // as nothing.
         Up | Char('k')
             if app.region == Region::Sidebar
                 && !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            let n = ScreenId::ALL.len();
+            let n = ScreenId::sidebar_visible(screens, app).len().max(1);
             if app.launcher_offset == 0 {
                 app.launcher_offset = n.saturating_sub(1);
             } else {
@@ -1579,7 +1629,7 @@ async fn handle_key(
             if app.region == Region::Sidebar
                 && !key.modifiers.contains(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
         {
-            let n = ScreenId::ALL.len();
+            let n = ScreenId::sidebar_visible(screens, app).len().max(1);
             app.launcher_offset = (app.launcher_offset + 1) % n;
             return false;
         }
@@ -1590,7 +1640,7 @@ async fn handle_key(
             // Column-wise step in a 4-col (or 2-col narrow) grid.
             // Plain (no-modifier) keys only — Ctrl-H and Alt-H belong
             // to system / tab-strip handlers, not the launcher.
-            let n = ScreenId::ALL.len();
+            let n = ScreenId::sidebar_visible(screens, app).len().max(1);
             let cols = LAUNCHER_COLS.min(n);
             if app.launcher_offset == 0 {
                 // Wrap from the very first tile to the last.
@@ -1613,7 +1663,7 @@ async fn handle_key(
             // The user contract is "arrows navigate; Enter selects".
             // Right is an *arrow* — it must never commit. Commit
             // happens on Enter / PageDown / Tab / digit.
-            let n = ScreenId::ALL.len();
+            let n = ScreenId::sidebar_visible(screens, app).len().max(1);
             let cols = LAUNCHER_COLS.min(n);
             if app.launcher_offset + 1 >= n {
                 app.launcher_offset = 0;
@@ -1633,7 +1683,7 @@ async fn handle_key(
             return false;
         }
         PageDown if app.region == Region::Sidebar => {
-            let n = ScreenId::ALL.len();
+            let n = ScreenId::sidebar_visible(screens, app).len();
             app.launcher_offset = n.saturating_sub(1);
             return false;
         }
@@ -1641,7 +1691,7 @@ async fn handle_key(
             // The launcher is the source of truth for "what's selected"
             // (single-focus model), so resolve the cursor directly to a
             // screen id — no separate sidebar_idx indirection.
-            return commit_launcher(app).await;
+            return commit_launcher(app, screens).await;
         }
         Esc if app.region == Region::Sidebar => {
             // From the launcher, Esc sends focus to the *current* screen
@@ -1667,30 +1717,54 @@ async fn handle_key(
         }
         // Numeric jump (1..=9, then 0 ⇒ index 9) — pin to the launcher's
         // visible cursor as well so it lines up with the arrow keys.
+        // Bounds-check against the *visible* count so pressing a digit
+        // higher than the number of tiles is a no-op (not a panic).
         Char(c) if app.region == Region::Sidebar && matches!(c, '0'..='9') && !key.modifiers.contains(KeyModifiers::CONTROL) => {
             let idx: usize = if c == '0' { 9 } else { (c as usize) - ('1' as usize) };
-            let n = ScreenId::ALL.len();
+            let n = ScreenId::sidebar_visible(screens, app).len();
             if idx < n {
                 app.launcher_offset = idx;
-                return commit_launcher(app).await;
+                return commit_launcher(app, screens).await;
             }
             return false;
         }
-        // Tab / Shift-Tab cycles between screens. Only fires on the
-        // content side and only when no modal is open, so it never
-        // collides with the input field's Tab key or the sidebar branch
-        // above. Replaces the old "Tab toggles sidebar" overload that
-        // made D-pad navigation unpredictable.
+        // Tab / Shift-Tab steps the *preview cursor* across the menu-name
+        // strip. The strip lights up one menu name (the "where Tab would
+        // land" indicator); only Enter commits. This matches the Bruce
+        // firmware contract: `Tab` previews, `Enter` confirms, `Esc`
+        // cancels. No modal may be open and focus has to be on the
+        // content side — that's where the strip lives visually.
         Tab if matches!(app.region, Region::ContentLeft | Region::ContentRight)
             && matches!(app.modal, Modal::None) =>
         {
-            let _ = tx.send(Action::CycleScreen(true)).await;
+            app.cycle_tab_cursor(true);
             return false;
         }
         BackTab if matches!(app.region, Region::ContentLeft | Region::ContentRight)
             && matches!(app.modal, Modal::None) =>
         {
-            let _ = tx.send(Action::CycleScreen(false)).await;
+            app.cycle_tab_cursor(false);
+            return false;
+        }
+        // Enter commits the Tab preview — `app.current` jumps to the
+        // cursor's screen, then the cursor resets to None so the strip
+        // stops highlighting. No-op when nothing has been pre-viewed
+        // (the user pressed Enter cold, which keeps the current screen
+        // — same as not pressing it).
+        Enter if matches!(app.region, Region::ContentLeft | Region::ContentRight)
+            && matches!(app.modal, Modal::None) =>
+        {
+            app.commit_tab_cursor();
+            return false;
+        }
+        // Esc cancels the Tab preview. Distinct from the existing
+        // "Esc leaves to sidebar" rule in the Sidebar branch above —
+        // here `Esc` only clears the preview, it does NOT also move
+        // the focus region (that would conflate two different intents).
+        Esc if matches!(app.region, Region::ContentLeft | Region::ContentRight)
+            && matches!(app.modal, Modal::None) =>
+        {
+            app.clear_tab_cursor();
             return false;
         }
         // Content-side Left/h: from ContentLeft jumps to the Sidebar (no
@@ -2743,6 +2817,18 @@ async fn handle_action(
             let mut g = app.live.city_weather.write().await;
             *g = Some(w);
         }
+        Action::IntelSnapshot(snap) => {
+            // M5 — refiller pushed a fresh snapshot for one layer.
+            // Upsert into the per-layer map and recompute the
+            // worst-sentinel rollup so the footer chip is O(1) on
+            // every frame. We hold the worst computation local
+            // rather than calling the crate's helper so a single
+            // batch update is cheap (a max over 9 elements).
+            app.intel_snapshots.insert(snap.layer, snap);
+            app.intel_worst = cyberdeck_intel::worst_sentinel(
+                app.intel_snapshots.values().map(|s| s.sentinel),
+            );
+        }
         Action::CityCtrlRefresh => {
             // User pressed `r` on the City screen. Fire-and-forget:
             // spawn one short-lived task that runs the same geo →
@@ -2941,22 +3027,44 @@ mod tests {
     use crate::app::ToastEntry;
     use crate::wm::tree::SplitDir;
 
+    /// Build a screens Vec that mirrors the production registry's
+    /// `ScreenId::ALL` order, with the same number of entries
+    /// (and the same index alignment) so `ScreenId::sidebar_visible`
+    /// and `draw_launcher` (both of which look up the screen at
+    /// `ALL[idx]`) hit the right slot for every id. The Overworld
+    /// slot IS registered here, but its `in_sidebar()` returns
+    /// false so it's hidden from the launcher — including a stub
+    /// is what keeps the indices aligned.
+    ///
+    /// If you add a new `ScreenId`, append a matching screen
+    /// here in the same position.
+    ///
+    /// `Editor` and `LoRa` are intentionally omitted: they have
+    /// no production registry entry, so `screens.get(idx)` for
+    /// those indices returns `None` and the sidebar filter treats
+    /// that as "absent" (which is the contract the production
+    /// code relies on).
     fn build_screens() -> Vec<Box<dyn Screen>> {
         vec![
-            Box::new(screens::system::SystemScreen),
-            Box::new(screens::network::NetworkScreen),
-            Box::new(screens::bluetooth::BluetoothScreen),
-            Box::new(screens::power::PowerScreen),
-            Box::new(screens::display::DisplayScreen),
-            Box::new(screens::audio::AudioScreen),
-            Box::new(screens::storage::StorageScreen),
-            Box::new(screens::services::ServicesScreen),
-            Box::new(screens::packages::PackagesScreen),
-            Box::new(screens::processes::ProcessesScreen),
-            Box::new(screens::files::FilesScreen),
-            Box::new(screens::logs::LogsScreen),
-            Box::new(screens::settings::SettingsScreen),
-            Box::new(screens::city::CityScreen::new()),
+            Box::new(screens::overworld::OverworldScreen::new()), // ALL[0]  — hidden from sidebar
+            Box::new(screens::system::SystemScreen),               // ALL[1]
+            Box::new(screens::network::NetworkScreen),             // ALL[2]
+            Box::new(screens::bluetooth::BluetoothScreen),         // ALL[3]
+            Box::new(screens::power::PowerScreen),                 // ALL[4]
+            Box::new(screens::display::DisplayScreen),             // ALL[5]
+            Box::new(screens::audio::AudioScreen),                 // ALL[6]
+            Box::new(screens::storage::StorageScreen),             // ALL[7]
+            Box::new(screens::services::ServicesScreen),           // ALL[8]
+            Box::new(screens::packages::PackagesScreen),           // ALL[9]
+            Box::new(screens::processes::ProcessesScreen),         // ALL[10]
+            Box::new(screens::files::FilesScreen),                 // ALL[11]
+            Box::new(screens::logs::LogsScreen),                   // ALL[12]
+            Box::new(screens::settings::SettingsScreen),           // ALL[13]
+            // ALL[14] = Editor → no registry entry
+            // ALL[15] = LoRa → no test stub
+            Box::new(screens::city::CityScreen::new()),            // ALL[16]
+            Box::new(screens::intel::IntelScreen::new()),          // ALL[17]
+            Box::new(screens::recon::ReconScreen::new()),          // ALL[18]
         ]
     }
 
@@ -3171,8 +3279,17 @@ mod tests {
             )
             .await;
         });
-        // Up from 0 wraps to last.
-        assert_eq!(app.launcher_offset, ScreenId::ALL.len() - 1);
+        // Up from 0 wraps to the last visible tile. The launcher
+        // skips Overworld (it's the menu, not a destination) and
+        // skips the no-slot ids (Editor, LoRa), so the visible list
+        // is shorter than `ScreenId::ALL` by 3 — not 2 as it was
+        // before Overworld was added.
+        let visible_n = ScreenId::sidebar_visible(&build_screens(), &app).len();
+        assert_eq!(
+            app.launcher_offset,
+            visible_n - 1,
+            "Up from 0 must wrap to the last sidebar-visible screen"
+        );
     }
 
     #[test]
@@ -3422,14 +3539,27 @@ mod tests {
         // of the TUI keeps matching against KeyCode::Down — we rewrite
         // the keycode in handle_key so the user gets the same effect.
         app.keymap.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        let _ = handle_key(&mut [], &mut app, &tokio::sync::mpsc::channel::<Action>(1).0,
-                           KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)).await;
+        // The launcher arms bounds-check against the *visible* screen list,
+        // not the raw ScreenId::ALL, so passing an empty slice would zero
+        // out `n` and the Down arm would modulo to 0. Use a non-empty
+        // slice so the cursor actually advances.
+        let mut screens = build_screens();
+        let _ = handle_key(
+            &mut screens,
+            &mut app,
+            &tokio::sync::mpsc::channel::<Action>(1).0,
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
+        )
+        .await;
         // Side-effect assertion: pressing 's' should have moved the
         // sidebar launcher cursor down (Down | Char('j') handler). We
         // check `app.launcher_offset` because that's the field every
         // existing sidebar-navigation test already asserts on.
-        assert_eq!(app.launcher_offset, initial + 1,
-                   "user-bound key 's' must move cursor down via the Down arm");
+        assert_eq!(
+            app.launcher_offset,
+            (initial + 1) % ScreenId::sidebar_visible(&screens, &app).len(),
+            "user-bound key 's' must move cursor down via the Down arm"
+        );
     }
 
     #[tokio::test]
