@@ -116,7 +116,7 @@ RADAR_PCAP="${RADAR_PCAP:-}"
 SKIP_MODEL=0
 AI_MODEL_DIR="${AI_MODEL_DIR:-${HOME}/.cyberdeck/models}"
 AI_MODEL_FILE="MiniCPM5-1B-Q4_K_M.gguf"
-AI_MODEL_URL="https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/Q4_K_M.gguf"
+AI_MODEL_URL="https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q4_K_M.gguf"
 
 usage() {
     sed -n '2,40p' "$0"
