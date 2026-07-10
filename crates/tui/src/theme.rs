@@ -19,7 +19,6 @@ use ratatui::style::{Color, Modifier, Style};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ThemeName {
-    #[default]
     Dark,
     Light,
     HighContrast,
@@ -30,6 +29,8 @@ pub enum ThemeName {
     Nord,
     GruvboxDark,
     SolarizedDark,
+    #[default]
+    CyberDeckNative,
 }
 
 /// All theme names in cycling order — `Settings` uses this to advance on
@@ -45,6 +46,7 @@ pub const ALL_THEME_NAMES: &[ThemeName] = &[
     ThemeName::Nord,
     ThemeName::GruvboxDark,
     ThemeName::SolarizedDark,
+    ThemeName::CyberDeckNative,
 ];
 
 impl ThemeName {
@@ -85,6 +87,7 @@ impl ThemeName {
             ThemeName::Nord => "nord",
             ThemeName::GruvboxDark => "gruvbox-dark",
             ThemeName::SolarizedDark => "solarized-dark",
+            ThemeName::CyberDeckNative => "cyberdeck-native",
         }
     }
 
@@ -102,6 +105,7 @@ impl ThemeName {
             "nord" => ThemeName::Nord,
             "gruvbox-dark" => ThemeName::GruvboxDark,
             "solarized-dark" => ThemeName::SolarizedDark,
+            "cyberdeck-native" => ThemeName::CyberDeckNative,
             // Unknown / legacy — fall back rather than panic. The user
             // sees `dark` and the next save normalises the prefs file.
             _ => ThemeName::Dark,
@@ -284,6 +288,20 @@ impl Theme {
                 selection_fg: Color::Rgb(147, 161, 161),
                 border: Color::Rgb(7, 54, 66),      // base02
                 border_focus: Color::Rgb(38, 139, 210),
+            },
+            ThemeName::CyberDeckNative => Self {
+                bg:           Color::Rgb(10, 10, 18),
+                fg:           Color::Rgb(0, 255, 65),
+                dim:          Color::Rgb(60, 130, 130),
+                accent:       Color::Rgb(0, 255, 255),
+                accent_2:     Color::Rgb(255, 0, 128),
+                warn:         Color::Rgb(255, 180, 0),
+                error:        Color::Rgb(255, 50, 50),
+                ok:           Color::Rgb(0, 255, 100),
+                selection_bg: Color::Rgb(0, 60, 80),
+                selection_fg: Color::White,
+                border:       Color::Rgb(0, 100, 40),
+                border_focus: Color::Rgb(0, 255, 255),
             },
         }
     }

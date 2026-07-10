@@ -32,6 +32,8 @@ static ITEMS: &[ScreenId] = &[
     ScreenId::Packages,
     ScreenId::Logs,
     ScreenId::Settings,
+    ScreenId::Ai,
+    ScreenId::AiLogs,
 ];
 
 pub struct MainMenuScreen {

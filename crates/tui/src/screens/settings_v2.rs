@@ -105,5 +105,6 @@ fn theme_label(name: ThemeName) -> &'static str {
         ThemeName::Nord           => "Nord",
         ThemeName::GruvboxDark    => "Gruvbox Dark",
         ThemeName::SolarizedDark  => "Solarized Dark",
+        ThemeName::CyberDeckNative => "CyberDeck Native",
     }
 }

@@ -9,6 +9,7 @@
 // Overworld tile grid via `app.menu_active` instead.
 pub mod palette;
 pub mod tab_strip;
+pub mod top_menu;
 
 // Module 5.4 — sparkline for the header chip. Maps each sample to one of
 // eight block glyphs `▁▂▃▄▅▆▇█`, scaled by the per-interface max so a

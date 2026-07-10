@@ -127,6 +127,17 @@ pub enum Action {
     /// which mutates `state.prefs` and calls `save()`.
     LoraNodeAdd(String),
     LoraNodeDelete(usize),
+    /// S19 — AI agent harness. AiSubmit is sent by the AI screen when the
+    /// user presses Enter; apply_action appends the user message to
+    /// live.ai_messages and spawns a stream_chat task. AiToken / AiThinkToken
+    /// carry streaming SSE delta tokens; AiDone marks response complete.
+    /// LlamaReady / LlamaDown report llama-server health poll results.
+    AiSubmit(String),
+    AiToken(String),
+    AiThinkToken(String),
+    AiDone,
+    LlamaReady,
+    LlamaDown,
 }
 
 #[derive(Debug, Clone)]

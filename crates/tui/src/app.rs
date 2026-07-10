@@ -1534,6 +1534,7 @@ impl App {
             show_weather_panel: self.show_weather_panel,
             keymap: self.keymap.clone(),
             lora_nodes: vec![],
+            ai_model_path: None,
         };
         prefs.save();
     }

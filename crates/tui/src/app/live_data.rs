@@ -20,6 +20,31 @@ use cyberdeck_intel::{LayerId, Snapshot};
 
 use crate::app::action::Action;
 
+/// Role of a message in the AI conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AiRole { User, #[default] Assistant }
+
+/// One turn in the AI conversation. Shared via LiveData so the AI screen
+/// and any future "AI log" screen both read the same history.
+#[derive(Debug, Clone, Default)]
+pub struct AiMessage {
+    pub role: AiRole,
+    pub thinking: String,  // content inside <think>...</think>
+    pub content: String,   // answer text
+    pub streaming: bool,   // true while tokens are still arriving
+}
+
+impl AiMessage {
+    /// Full text representation for passing back to the LLM as history.
+    pub fn full_text(&self) -> String {
+        if self.thinking.is_empty() {
+            self.content.clone()
+        } else {
+            format!("<think>{}</think>{}", self.thinking, self.content)
+        }
+    }
+}
+
 /// All live-refreshed data, shared via Arc so background tasks can write.
 /// Mirrors the existing `Live` struct plus intel snapshots and refresher handles.
 pub struct LiveData {
@@ -46,6 +71,11 @@ pub struct LiveData {
     /// on each render without cloning the full road vector.
     pub city_roads:      Arc<RwLock<Option<std::sync::Arc<Vec<Polyline>>>>>,
     pub intel_snapshots: Arc<RwLock<BTreeMap<LayerId, Snapshot>>>,
+    /// S19 — AI conversation history. Appended by apply_action on AiSubmit /
+    /// AiToken / AiThinkToken / AiDone. Read by AiScreenV2::render.
+    pub ai_messages: Arc<RwLock<Vec<AiMessage>>>,
+    /// S19 — true once llama-server passes its health check.
+    pub llama_ready:  Arc<RwLock<bool>>,
 
     /// Abort handles for background refreshers. Dropped on app exit.
     pub _refreshers: Vec<tokio::task::AbortHandle>,
@@ -90,6 +120,8 @@ impl Default for LiveData {
             city_weather:    Arc::new(RwLock::new(None)),
             city_roads:      Arc::new(RwLock::new(None)),
             intel_snapshots: Arc::new(RwLock::new(BTreeMap::new())),
+            ai_messages:     Arc::new(RwLock::new(Vec::new())),
+            llama_ready:     Arc::new(RwLock::new(false)),
             _refreshers:     Vec::new(),
         }
     }

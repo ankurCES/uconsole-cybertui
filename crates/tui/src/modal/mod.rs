@@ -4,6 +4,7 @@ use crate::theme::Theme;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
+pub mod about;
 pub mod choice;
 pub mod confirm;
 pub mod input;
@@ -12,6 +13,7 @@ pub mod progress;
 pub mod run_action;
 pub mod secret;
 
+pub use about::AboutModal;
 pub use choice::ChoiceModal;
 pub use confirm::ConfirmModal;
 pub use input::InputModal;

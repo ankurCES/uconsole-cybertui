@@ -110,6 +110,11 @@ pub struct Prefs {
     /// this field load as empty via `#[serde(default)]`.
     #[serde(default)]
     pub lora_nodes: Vec<SavedLoraNode>,
+
+    /// S19 — explicit path to a GGUF model file for the local LLM sidecar.
+    /// `None` → auto-discover first .gguf in ~/.cyberdeck/models/.
+    #[serde(default)]
+    pub ai_model_path: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -130,6 +135,7 @@ impl Default for Prefs {
             show_weather_panel: true,
             keymap: Keymap::default(),
             lora_nodes: vec![],
+            ai_model_path: None,
         }
     }
 }
@@ -255,6 +261,7 @@ mod tests {
             lora_nodes: vec![
                 SavedLoraNode { ip: "192.168.1.10".to_string(), label: Some("node-a".to_string()) },
             ],
+            ai_model_path: None,
         };
         original.save_to(&path).expect("save");
         let loaded = Prefs::load_from(&path);
@@ -292,6 +299,7 @@ mod tests {
             show_weather_panel: true,
             keymap: km,
             lora_nodes: vec![],
+            ai_model_path: None,
         };
         original.save_to(&path).expect("save");
         let loaded = Prefs::load_from(&path);

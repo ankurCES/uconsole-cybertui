@@ -67,6 +67,14 @@ pub enum ScreenId {
     /// S16 — Splash shown when backing out of MainMenu. Any key returns;
     /// Esc opens QuitConfirmModal. Not in ScreenId::ALL (not Tab-cycled).
     Screensaver,
+    /// S19 — Local LLM chat via llama-server sidecar (Qwen3-1.7B Q4_K_M).
+    /// Single-pane: scrollable message history + input box. D-pad scrolls,
+    /// Enter submits, Tab toggles thinking-block visibility.
+    Ai,
+    /// S20 — Read-only log trace of the AI conversation. Shows all turns
+    /// (User / Think / Assistant) as one-line entries; Enter expands the
+    /// selected entry into a full-content detail panel below the list.
+    AiLogs,
 }
 
 impl ScreenId {
@@ -95,6 +103,8 @@ impl ScreenId {
         ScreenId::City,
         ScreenId::Intel,
         ScreenId::Recon,
+        ScreenId::Ai,
+        ScreenId::AiLogs,
     ];
 
     pub fn label(self) -> &'static str {
@@ -118,6 +128,8 @@ impl ScreenId {
             ScreenId::City => "City",
             ScreenId::Intel => "Intel",
             ScreenId::Recon    => "Recon",
+            ScreenId::Ai       => "AI",
+            ScreenId::AiLogs   => "AI Logs",
             ScreenId::MainMenu    => "Menu",
             ScreenId::Submenu     => "Submenu",
             ScreenId::Screensaver => "Screensaver",
@@ -180,6 +192,8 @@ impl ScreenId {
             // Enter, reads output) rather than the passive
             // surveillance shape of the Intel layer grid.
             ScreenId::Recon    => "⌕",
+            ScreenId::Ai       => "◈",
+            ScreenId::AiLogs   => "▧",
             ScreenId::MainMenu    => "▦",
             ScreenId::Submenu     => "≡",
             ScreenId::Screensaver => "◌",

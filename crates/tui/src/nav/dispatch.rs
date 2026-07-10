@@ -1,14 +1,15 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
-use crate::app::action::Action;
+use crate::app::action::{Action, RunAction};
 use crate::app::screen::ScreenRegistry;
 use crate::app::state::AppState;
 use crate::keymap::{resolve_keymap, NavAction};
-use crate::modal::{ModalResult, QuitConfirmModal};
+use crate::modal::{AboutModal, ModalResult, QuitConfirmModal, RunActionModal};
 use crate::nav::event::{key_to_nav, key_to_nav_opt, Consumed};
 use crate::nav::menu_stack::PopResult;
 use crate::nav::UiContext;
+use crate::ui::top_menu::MenuAction;
 
 /// Full key dispatch pipeline. Returns true if the key was consumed.
 /// Screens receive NavEvent; raw KeyEvent never crosses the screen boundary.
@@ -39,6 +40,16 @@ pub fn dispatch_key(
         return true;
     }
 
+    // 3.5. F10 toggles the top menu bar (only when no modal is active).
+    if key.code == KeyCode::F(10) && state.ui.modal.is_none() {
+        if state.ui.top_menu.active {
+            state.ui.top_menu.close();
+        } else {
+            state.ui.top_menu.active = true;
+        }
+        return true;
+    }
+
     // 4. Modal routing — modal absorbs every key
     if state.ui.modal.is_some() {
         let ev = key_to_nav(key);
@@ -59,6 +70,12 @@ pub fn dispatch_key(
                 return true;
             }
         }
+    }
+
+    // 4.5. Top menu routing — active menu absorbs keys before the screen.
+    if state.ui.top_menu.active {
+        let ev = key_to_nav(key);
+        return handle_top_menu(ev, state, tx);
     }
 
     // 5. Convert to NavEvent — unrecognised keys are ignored
@@ -104,6 +121,44 @@ pub fn dispatch_key(
         }
         _ => false,
     }
+}
+
+fn handle_top_menu(ev: crate::nav::event::NavEvent, state: &mut AppState, _tx: &mpsc::Sender<Action>) -> bool {
+    let action = state.ui.top_menu.on_nav(ev);
+    match action {
+        MenuAction::Consumed => {}
+        MenuAction::Deactivate => { state.ui.top_menu.close(); }
+        MenuAction::ConfirmPowerOff => {
+            state.ui.open_modal(Box::new(RunActionModal::new(
+                "Power off the system?",
+                Action::Run(RunAction::Shutdown),
+            )));
+            state.ui.top_menu.close();
+        }
+        MenuAction::ConfirmReboot => {
+            state.ui.open_modal(Box::new(RunActionModal::new(
+                "Restart the system?",
+                Action::Run(RunAction::Reboot),
+            )));
+            state.ui.top_menu.close();
+        }
+        MenuAction::ConfirmSuspend => {
+            state.ui.open_modal(Box::new(RunActionModal::new(
+                "Suspend the system?",
+                Action::Run(RunAction::Suspend),
+            )));
+            state.ui.top_menu.close();
+        }
+        MenuAction::ExitTui => {
+            state.ui.open_modal(Box::new(QuitConfirmModal));
+            state.ui.top_menu.close();
+        }
+        MenuAction::OpenAbout => {
+            state.ui.open_modal(Box::new(AboutModal));
+            state.ui.top_menu.close();
+        }
+    }
+    true
 }
 
 /// uConsole hardware button remap: A→Enter, B→Esc.

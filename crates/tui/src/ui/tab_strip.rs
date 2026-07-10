@@ -225,6 +225,8 @@ fn short_label(id: ScreenId) -> &'static str {
         ScreenId::MainMenu    => "Menu",
         ScreenId::Submenu     => "Sub",
         ScreenId::Screensaver => "    ",
+        ScreenId::Ai    => "AI",
+        ScreenId::AiLogs => "AILg",
     }
 }
 

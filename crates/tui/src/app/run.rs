@@ -40,6 +40,22 @@ pub async fn run_v2(terminal: &mut Tui) -> anyhow::Result<()> {
 
     live.spawn_refreshers(tx.clone());
 
+    // S19: spawn llama-server sidecar if a model is available.
+    #[cfg(feature = "http")]
+    let llama_child: Option<crate::llm::LlamaSidecar> = {
+        match crate::llm::spawn_sidecar(&prefs).await {
+            Some(sidecar) => {
+                crate::llm::spawn_health_poll(tx.clone());
+                Some(sidecar)
+            }
+            None => {
+                // No binary or no model — LlamaDown notifies the screen.
+                let _ = tx.try_send(Action::LlamaDown);
+                None
+            }
+        }
+    };
+
     let mut state = AppState::new(prefs, live, tx, rx);
     // v2 root is MainMenu, not Overworld.
     state.nav.stack = MenuStack::with_root(ScreenId::MainMenu);
@@ -59,7 +75,13 @@ pub async fn run_v2(terminal: &mut Tui) -> anyhow::Result<()> {
         tokio::select! {
             maybe = state.rx.recv() => {
                 match maybe {
-                    Some(Action::Quit) | None => return Ok(()),
+                    Some(Action::Quit) | None => {
+                        #[cfg(feature = "http")]
+                        if let Some(mut child) = llama_child {
+                            crate::llm::kill_sidecar(&mut child).await;
+                        }
+                        return Ok(());
+                    }
                     Some(a) => apply_action(a, &mut state, &dispatch_tx),
                 }
                 // Drain burst: coalesce multiple refresher ticks into one redraw.
@@ -94,12 +116,16 @@ fn draw_v2(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(0),    // content (rows 0-21)
-            Constraint::Length(1), // hint bar  (row 22)
-            Constraint::Length(1), // status bar (row 23)
+            Constraint::Length(1), // top menu bar (row 0)
+            Constraint::Min(0),    // content      (rows 1-21)
+            Constraint::Length(1), // hint bar      (row 22)
+            Constraint::Length(1), // status bar    (row 23)
         ])
         .split(area);
-    let (content, hint_row, status_row) = (chunks[0], chunks[1], chunks[2]);
+    let (menu_row, content, hint_row, status_row) = (chunks[0], chunks[1], chunks[2], chunks[3]);
+
+    // Top menu bar — always rendered on row 0.
+    state.ui.top_menu.render_bar(f, menu_row, &state.ui.theme);
 
     let current_id = state.nav.stack.current();
 
@@ -192,10 +218,18 @@ fn draw_v2(
     if let Some(modal) = state.ui.modal.as_ref() {
         render_modal_overlay(f, area, modal.as_ref(), &state.ui.theme);
     }
+
+    // Top menu dropdown — rendered after modal so it appears over content,
+    // but a modal takes full priority when open.
+    if state.ui.modal.is_none() {
+        state.ui.top_menu.render_dropdown(f, menu_row, &state.ui.theme);
+    }
 }
 
 fn build_registry() -> ScreenRegistry {
     use screens::{
+        ai_v2::AiScreenV2,
+        ai_logs_v2::AiLogsScreen,
         audio_v2::AudioScreenV2,
         bluetooth_v2::BluetoothScreenV2,
         city_v2::CityScreenV2,
@@ -241,6 +275,8 @@ fn build_registry() -> ScreenRegistry {
     r.register(Box::new(LogsScreenV2::default()));
     r.register(Box::new(SettingsScreenV2::default()));
     r.register(Box::new(EditorScreenV2::default()));
+    r.register(Box::new(AiScreenV2::default()));
+    r.register(Box::new(AiLogsScreen::default()));
     r
 }
 
@@ -271,6 +307,69 @@ fn apply_action(action: Action, state: &mut AppState, tx: &mpsc::Sender<Action>)
         Action::Run(ra) => {
             let tx2 = tx.clone();
             tokio::spawn(async move { handle_run_action(ra, tx2).await; });
+        }
+        #[cfg(feature = "http")]
+        Action::AiSubmit(text) => {
+            use crate::app::live_data::{AiMessage, AiRole};
+            let mut history: Vec<AiMessage> = Vec::new();
+            if let Ok(mut msgs) = state.live.ai_messages.try_write() {
+                msgs.push(AiMessage {
+                    role: AiRole::User,
+                    content: text,
+                    ..Default::default()
+                });
+                msgs.push(AiMessage {
+                    role: AiRole::Assistant,
+                    streaming: true,
+                    ..Default::default()
+                });
+                // snapshot all but the trailing streaming placeholder
+                let len = msgs.len();
+                history = msgs[..len.saturating_sub(1)].to_vec();
+            }
+            let tx2 = tx.clone();
+            tokio::spawn(async move {
+                crate::llm::stream_chat(history, tx2).await;
+            });
+        }
+        #[cfg(feature = "http")]
+        Action::AiToken(tok) => {
+            if let Ok(mut msgs) = state.live.ai_messages.try_write() {
+                if let Some(last) = msgs.last_mut() {
+                    last.content.push_str(&tok);
+                }
+            }
+        }
+        #[cfg(feature = "http")]
+        Action::AiThinkToken(tok) => {
+            if let Ok(mut msgs) = state.live.ai_messages.try_write() {
+                if let Some(last) = msgs.last_mut() {
+                    last.thinking.push_str(&tok);
+                }
+            }
+        }
+        #[cfg(feature = "http")]
+        Action::AiDone => {
+            if let Ok(mut msgs) = state.live.ai_messages.try_write() {
+                if let Some(last) = msgs.last_mut() {
+                    last.streaming = false;
+                }
+            }
+        }
+        #[cfg(feature = "http")]
+        Action::LlamaReady => {
+            if let Ok(mut r) = state.live.llama_ready.try_write() {
+                *r = true;
+            }
+        }
+        #[cfg(feature = "http")]
+        Action::LlamaDown => {
+            // llama_ready stays false; screen shows loading state.
+            // Toast so user knows why AI isn't available.
+            state.ui.push_toast(
+                crate::app::toast::ToastKind::Error,
+                "AI: no model found — place a .gguf in ~/.cyberdeck/models/",
+            );
         }
         _ => {}
     }

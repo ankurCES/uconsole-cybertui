@@ -5,6 +5,7 @@ use chrono::{DateTime, Local};
 use crate::app::toast::{Toast, ToastKind};
 use crate::modal::Modal;
 use crate::theme::{Theme, ThemeName};
+use crate::ui::top_menu::TopMenuBar;
 
 // re-use cap from parent module
 use super::{ToastEntry, TOAST_HISTORY_CAP};
@@ -16,6 +17,7 @@ pub struct UiState {
     pub modal:         Option<Box<dyn Modal>>,
     pub status_msg:    Option<String>,
     pub clock:         DateTime<Local>,
+    pub top_menu:      TopMenuBar,
 }
 
 impl UiState {
@@ -27,6 +29,7 @@ impl UiState {
             modal:         None,
             status_msg:    None,
             clock:         Local::now(),
+            top_menu:      TopMenuBar::default(),
         }
     }
 

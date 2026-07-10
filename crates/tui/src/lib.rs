@@ -11,6 +11,8 @@
 
 pub mod app;
 pub mod keymap;
+#[cfg(feature = "http")]
+pub mod llm;
 pub mod modal;
 pub mod nav;
 pub mod prefs;
