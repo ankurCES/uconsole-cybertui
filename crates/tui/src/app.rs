@@ -745,7 +745,6 @@ pub struct App {
     pub current: ScreenId,
     pub manager: crate::wm::manager::Manager,
     pub modal: Modal,
-    pub keymap_profile: crate::wm::keymap::KeymapProfile,
     /// Per-layer intel snapshots, keyed by `LayerId`. Populated by the
     /// M5 refiller in `Live::spawn_refreshers` via
     /// `Action::IntelSnapshot`. The Intel screen reads this map on
@@ -1185,7 +1184,6 @@ impl App {
             current,
             manager: crate::wm::manager::Manager::new(current),
             modal: Modal::None,
-            keymap_profile: crate::wm::keymap::KeymapProfile::detect(),
             // M5 — per-layer intel snapshot map. Empty at boot; the
             // refiller in `Live::spawn_refreshers` populates it. The
             // Intel screen's `render` reads from this map first,
@@ -1398,8 +1396,6 @@ impl App {
         self.menu_active = !self.menu_active;
         if self.menu_active && self.current != crate::app::screen::ScreenId::Overworld {
             self.current = crate::app::screen::ScreenId::Overworld;
-            // Region mirrors the screen: menu mode = Sidebar region in
-            // the M1-M2 transitional phase. M3 deletes the variant.
             self.set_region(Region::Sidebar);
         }
     }

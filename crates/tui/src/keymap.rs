@@ -1,11 +1,6 @@
 //! User-editable keymap: maps physical `KeyEvent`s onto canonical
 //! `NavAction`s the rest of the TUI binds against.
-//!
-//! NOTE: this is distinct from `wm::keymap`, which is the
-//! hardware-button shim that rewrites X/Y/A/B → Up/Down/Enter/Esc
-//! on the uconsole. The two layers stack: the hardware shim runs
-//! first (in `main::handle_key`), then this user map is applied.
-//! See `wm::keymap` for the env-var-selected profile system.
+//! Used by the Settings → Keys sub-screen.
 
 use std::collections::HashMap;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

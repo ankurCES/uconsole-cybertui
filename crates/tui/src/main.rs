@@ -747,38 +747,16 @@ async fn handle_key(
         }
     }
 
-    // Hardware-button remap — skip when a text-input modal is active so
-    // the user can type literal 'a'/'b' without them becoming Enter/Esc.
-    // Profile cached on App at startup (no per-keypress env::var syscall).
+    // ponytail: single flat remap, no profiles/env vars/user-keymap layers.
+    // a→Enter, b→Esc (uConsole face buttons). D-pad sends real arrow codes.
+    // Gated on text-input modals so literal a/b still work in input fields.
     let key = if app.modal.accepts_text_input() {
         key
     } else {
-        match wm::keymap::map_key(key, app.keymap_profile) {
-            Some(k) => k,
-            None => return false,
-        }
-    };
-
-    // User keymap — also gated on text-input modals for the same reason.
-    let key = if app.modal.accepts_text_input() {
-        key
-    } else {
-        match crate::keymap::resolve_keymap(key, &app.keymap) {
-            Some(crate::keymap::NavAction::Up)        => KeyEvent::new(KeyCode::Up,        key.modifiers),
-            Some(crate::keymap::NavAction::Down)      => KeyEvent::new(KeyCode::Down,      key.modifiers),
-            Some(crate::keymap::NavAction::Left)      => KeyEvent::new(KeyCode::Left,      key.modifiers),
-            Some(crate::keymap::NavAction::Right)     => KeyEvent::new(KeyCode::Right,     key.modifiers),
-            Some(crate::keymap::NavAction::Enter)     => KeyEvent::new(KeyCode::Enter,     key.modifiers),
-            Some(crate::keymap::NavAction::Esc)       => KeyEvent::new(KeyCode::Esc,       key.modifiers),
-            Some(crate::keymap::NavAction::Tab)       => KeyEvent::new(KeyCode::Tab,       key.modifiers),
-            Some(crate::keymap::NavAction::BackTab)   => KeyEvent::new(KeyCode::BackTab,   key.modifiers),
-            Some(crate::keymap::NavAction::NextScreen)=> KeyEvent::new(KeyCode::Tab,       key.modifiers),
-            Some(crate::keymap::NavAction::PrevScreen)=> KeyEvent::new(KeyCode::BackTab,   key.modifiers),
-            Some(crate::keymap::NavAction::Refresh)   => KeyEvent::new(KeyCode::Char('r'), key.modifiers),
-            Some(crate::keymap::NavAction::Help)      => KeyEvent::new(KeyCode::Char('?'), key.modifiers),
-            Some(crate::keymap::NavAction::Palette)   => KeyEvent::new(KeyCode::Char(':'), key.modifiers),
-            Some(crate::keymap::NavAction::Quit)      => KeyEvent::new(KeyCode::Char('q'), key.modifiers),
-            None => key,
+        match key.code {
+            Char('a') => KeyEvent::new(KeyCode::Enter, key.modifiers),
+            Char('b') => KeyEvent::new(KeyCode::Esc, key.modifiers),
+            _ => key,
         }
     };
 
@@ -1269,21 +1247,6 @@ async fn handle_key(
             app.set_region(Region::ContentLeft);
             return false;
         }
-        // `B` is the dedicated "back to launcher" shortcut. Esc from a
-        // content region can be claimed by the focused sub-screen
-        // (Files = go up a folder, etc.), so users need an explicit,
-        // unambiguous way to leave content for the launcher. From the
-        // launcher itself, B is a no-op.
-        Char('b') | Char('B')
-            if matches!(app.region, Region::ContentLeft | Region::ContentRight) =>
-        {
-            app.set_region(Region::Sidebar);
-            return false;
-        }
-        Char('b') | Char('B') if app.region == Region::Sidebar => {
-            // Already at the launcher — no-op.
-            return false;
-        }
         // Numeric jump (1..=9, then 0 ⇒ index 9) — pin to the launcher's
         // visible cursor as well so it lines up with the arrow keys.
         // Bounds-check against the *visible* count so pressing a digit
@@ -1324,16 +1287,6 @@ async fn handle_key(
             && matches!(app.modal, Modal::None) =>
         {
             app.commit_tab_cursor();
-            return false;
-        }
-        // Esc cancels the Tab preview. Distinct from the existing
-        // "Esc leaves to sidebar" rule in the Sidebar branch above —
-        // here `Esc` only clears the preview, it does NOT also move
-        // the focus region (that would conflate two different intents).
-        Esc if matches!(app.region, Region::ContentLeft | Region::ContentRight)
-            && matches!(app.modal, Modal::None) =>
-        {
-            app.clear_tab_cursor();
             return false;
         }
         // Content-side Left/h: from ContentLeft jumps to the Sidebar (no
@@ -1455,12 +1408,13 @@ async fn handle_key(
                     }
                 }
             }
-            // Esc fallthrough: if no screen consumed it and we're in a
-            // content region, return to the Overworld menu.
+            // Esc fallthrough: if no screen consumed Esc, clear tab
+            // preview and go back to the launcher (sidebar).
             if matches!(key.code, Esc)
                 && matches!(app.region, Region::ContentLeft | Region::ContentRight)
             {
-                app.toggle_menu_active();
+                app.clear_tab_cursor();
+                app.set_region(Region::Sidebar);
             }
         }
     }
@@ -3292,43 +3246,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn keymap_remap_routes_user_key_to_canonical() {
-        use crate::keymap::NavAction;
-        // make_app() is the existing test helper in this mod; it returns
-        // (tx, rx, app) and routes the dispatcher's actions through `tx`.
-        let (_tx, _rx, mut app) = make_app();
-        // Move focus to the sidebar so the Down arm in handle_key actually
-        // runs (it gates on `app.region == Region::Sidebar`).
-        app.set_region(crate::app::Region::Sidebar);
-        let initial = app.launcher_offset;
-        // User rebinds "go down" from KeyCode::Down to Char('s'). The rest
-        // of the TUI keeps matching against KeyCode::Down — we rewrite
-        // the keycode in handle_key so the user gets the same effect.
-        app.keymap.bind(NavAction::Down, KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
-        // The launcher arms bounds-check against the *visible* screen list,
-        // not the raw ScreenId::ALL, so passing an empty slice would zero
-        // out `n` and the Down arm would modulo to 0. Use a non-empty
-        // slice so the cursor actually advances.
-        let mut screens = build_screens();
-        let _ = handle_key(
-            &mut screens,
-            &mut app,
-            &tokio::sync::mpsc::channel::<Action>(1).0,
-            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE),
-        )
-        .await;
-        // Side-effect assertion: pressing 's' should have moved the
-        // sidebar launcher cursor down (Down | Char('j') handler). We
-        // check `app.launcher_offset` because that's the field every
-        // existing sidebar-navigation test already asserts on.
-        assert_eq!(
-            app.launcher_offset,
-            (initial + 1) % ScreenId::sidebar_visible(&screens, &app).len(),
-            "user-bound key 's' must move cursor down via the Down arm"
-        );
-    }
-
-    #[tokio::test]
     async fn keymap_capture_stores_binding_and_persists() {
         use crate::keymap::NavAction;
         use crossterm::event::KeyCode;
@@ -4178,19 +4095,17 @@ mod tests {
         )
         .await;
 
-        // No parent — Files returned false. The launcher does NOT take
-        // Esc from content regions (catch-all _ => in handle_key just
-        // returns false), so region stays where it is. This documents
-        // the contract: at filesystem root, Esc is a no-op.
+        // No parent — Files returned false. Unconsumed Esc falls through
+        // to the sidebar (B button = universal "back" with flat remap).
         assert_eq!(
             app.region,
-            Region::ContentLeft,
-            "at filesystem root, Esc should not move focus away from Files"
+            Region::Sidebar,
+            "at filesystem root, unconsumed Esc should go to sidebar"
         );
         assert_eq!(
             app.files_cwd,
             std::path::PathBuf::from("/"),
-            "cwd should be unchanged when Esc is a no-op"
+            "cwd should be unchanged when Esc falls through"
         );
     }
 
@@ -4274,10 +4189,11 @@ mod tests {
             app.logs_filter.is_empty(),
             "Esc with no active filter must not mutate the filter"
         );
+        // Unconsumed Esc falls through to sidebar (B = universal back).
         assert_eq!(
             app.region,
-            Region::ContentLeft,
-            "no filter active means Logs returns false; region stays put"
+            Region::Sidebar,
+            "no filter active → Logs returns false → Esc goes to sidebar"
         );
     }
 
@@ -4304,7 +4220,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn b_in_sidebar_is_noop() {
+    async fn b_in_sidebar_goes_to_content() {
         let mut screens = build_screens();
         let (tx, _rx) = tokio::sync::mpsc::channel::<Action>(8);
         let mut app = fresh_app_sidebar();
@@ -4318,7 +4234,9 @@ mod tests {
         )
         .await;
 
-        assert_eq!(app.region, Region::Sidebar, "B in sidebar is a no-op");
+        // B → Esc (flat remap); Esc in sidebar sends focus to current screen.
+        assert_eq!(app.region, Region::ContentLeft,
+            "B (Esc) in sidebar should focus the current screen");
     }
 
     /// Module 4 — the editor (a hidden builtin, reachable only from
@@ -4794,12 +4712,11 @@ mod tests {
             let mut app = app_with_n_panes(1);
             app.menu_active = false;
             app.modal = modal;
-            app.keymap_profile = wm::keymap::KeymapProfile::Uconsole;
             handle_key(&mut [], &mut app, &tx,
                 KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)).await;
             // 'a' must NOT become Enter — modal should still be active
             assert!(!matches!(app.modal, Modal::None),
-                "shim must not remap 'a' → Enter in text-input modal");
+                "flat remap must not remap 'a' → Enter in text-input modal");
         }
     }
 
