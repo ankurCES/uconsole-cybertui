@@ -1,6 +1,6 @@
 //! llama-server sidecar lifecycle + streaming chat client.
 //!
-//! Designed for Qwen3-1.7B Q4_K_M running on the ClockworkPi uConsole CM4.
+//! Designed for MiniCPM5-1B Q4_K_M running on the ClockworkPi uConsole CM4.
 //! The model loads ONCE at TUI boot and stays warm until exit. All HTTP is
 //! async (reqwest + chunk()); the tokio event loop is never blocked.
 
@@ -114,7 +114,7 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
     }
 
     let body = serde_json::json!({
-        "model": "qwen3",
+        "model": "minicpm5",
         "messages": json_msgs,
         "stream": true,
         "temperature": 0.7,

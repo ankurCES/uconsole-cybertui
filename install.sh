@@ -113,6 +113,10 @@ DO_DEPS=0
 FORCE_DEV=0
 RADAR_TAGS_PATH="${RADAR_TAGS_PATH:-/var/lib/wifi-radar/tags.json}"
 RADAR_PCAP="${RADAR_PCAP:-}"
+SKIP_MODEL=0
+AI_MODEL_DIR="${AI_MODEL_DIR:-${HOME}/.cyberdeck/models}"
+AI_MODEL_FILE="MiniCPM5-1B-Q4_K_M.gguf"
+AI_MODEL_URL="https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/Q4_K_M.gguf"
 
 usage() {
     sed -n '2,40p' "$0"
@@ -140,6 +144,7 @@ OPTIONS
   --radar-pcap <path>  Use a pcap file instead of dev mode.
   --refuse-sudo        Refuse to escalate; require preset to be non-sudo.
   --skip-deps          Don't install OS-level packages.
+  --skip-model         Don't download the AI model (MiniCPM5-1B GGUF).
   --uninstall          Reverse the install.
 
 ENV
@@ -175,6 +180,7 @@ while [[ $# -gt 0 ]]; do
         -y|--yes)     ASSUME_YES=1 ;;
         --refuse-sudo) REFUSE_SUDO=1 ;;
         --skip-deps)  SKIP_DEPS=1 ;;
+        --skip-model) SKIP_MODEL=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
         --prefix)     INSTALL_PREFIX="$2"; shift ;;
         --bind)       BIND_ADDR="$2"; shift ;;
@@ -424,6 +430,37 @@ fi
 if [[ $PRESET_DEPS -eq 1 ]]; then
     log "--deps: dependencies installed. Nothing more to do."
     exit 0
+fi
+
+# ---------- 0b. AI model download ----------
+# Downloads MiniCPM5-1B Q4_K_M GGUF (~688 MB) to ~/.cyberdeck/models/.
+# Runs before the build so the model is ready when the TUI binary lands.
+# Skipped with --skip-model, --web (no TUI), --radar (no TUI), or --build.
+# Idempotent: skips if the file already exists at the expected path.
+NEED_MODEL=0
+[[ $PRESET_TUI -eq 1 || $PRESET_FULL -eq 1 ]] && NEED_MODEL=1
+if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
+    MODEL_DEST="${AI_MODEL_DIR}/${AI_MODEL_FILE}"
+    if [[ -f "$MODEL_DEST" ]]; then
+        log "AI model already exists: $MODEL_DEST"
+    else
+        log "Downloading AI model: MiniCPM5-1B Q4_K_M (~688 MB)"
+        log "  → $MODEL_DEST"
+        mkdir -p "$AI_MODEL_DIR"
+        if command -v curl >/dev/null 2>&1; then
+            curl -L --progress-bar -o "${MODEL_DEST}.part" "$AI_MODEL_URL" \
+                && mv "${MODEL_DEST}.part" "$MODEL_DEST"
+        elif command -v wget >/dev/null 2>&1; then
+            wget --show-progress -O "${MODEL_DEST}.part" "$AI_MODEL_URL" \
+                && mv "${MODEL_DEST}.part" "$MODEL_DEST"
+        else
+            warn "Neither curl nor wget found — skipping AI model download."
+            warn "Download manually: $AI_MODEL_URL → $MODEL_DEST"
+        fi
+        if [[ -f "$MODEL_DEST" ]]; then
+            log "AI model downloaded: $(du -h "$MODEL_DEST" | cut -f1) at $MODEL_DEST"
+        fi
+    fi
 fi
 
 # ---------- 0. uninstall ----------
@@ -802,6 +839,7 @@ EOF
 if [[ $PRESET_TUI -eq 1 || $PRESET_FULL -eq 1 ]]; then
     cat <<EOF
     TUI       : ${INSTALL_PREFIX}/bin/${TUI_BIN}
+    AI model  : ${AI_MODEL_DIR}/${AI_MODEL_FILE}
     Launch    : ${TUI_BIN}
     Keys      : ? for help, q to quit, Ctrl-W is the window-manager prefix
 
