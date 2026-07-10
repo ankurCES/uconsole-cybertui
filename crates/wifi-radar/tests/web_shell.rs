@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, mpsc};
 use tower::ServiceExt;
 
 use wifi_radar::api::AppState;
+use wifi_radar::ble_devices::BleDeviceStore;
 use wifi_radar::devices::DeviceStore;
 use wifi_radar::frames::DeviceEvent;
 use wifi_radar::run::build_router;
@@ -43,6 +44,7 @@ async fn get_root_returns_radar_html() {
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
+        ble_store: Arc::new(BleDeviceStore::new()),
     });
     let app = build_router(state, workspace_web_dir());
 
@@ -74,6 +76,7 @@ async fn static_assets_are_served() {
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
+        ble_store: Arc::new(BleDeviceStore::new()),
     });
     let app = build_router(state, workspace_web_dir());
 
@@ -111,6 +114,7 @@ async fn static_assets_fall_back_to_embedded_when_dir_absent() {
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
+        ble_store: Arc::new(BleDeviceStore::new()),
     });
 
     // Point at a path that definitely doesn't exist on disk.

@@ -11,6 +11,8 @@
 
 use std::time::Duration;
 
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use serde::Deserialize;
 
 use super::geo::CityLocation;
@@ -69,6 +71,12 @@ struct OpenMeteoCurrent {
     wind_direction_10m: Option<u16>,
     #[serde(rename = "weather_code")]
     weather_code: Option<u8>,
+    #[serde(default = "default_is_day")]
+    is_day: u8,
+}
+
+fn default_is_day() -> u8 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,8 +85,13 @@ struct OpenMeteoHourly {
     precipitation_probability: Vec<Option<u8>>,
 }
 
+pub struct FetchResult {
+    pub weather: Weather,
+    pub is_day: bool,
+}
+
 impl OpenMeteoResponse {
-    fn into_weather(self) -> Result<Weather, WeatherError> {
+    fn into_result(self) -> Result<FetchResult, WeatherError> {
         let current = self
             .current
             .ok_or_else(|| WeatherError::BadPayload("missing `current` block".into()))?;
@@ -93,6 +106,7 @@ impl OpenMeteoResponse {
         let wind_kph = current.wind_speed_10m.unwrap_or(0.0);
         let wind_dir_deg = current.wind_direction_10m;
         let weather_code = current.weather_code.unwrap_or(0);
+        let is_day = current.is_day != 0;
 
         // Hourly precipitation: cap at HOURLY_PRECIP_HOURS slots,
         // skipping `None` entries. Open-Meteo occasionally returns
@@ -112,22 +126,25 @@ impl OpenMeteoResponse {
             }
         });
 
-        Ok(Weather {
-            temp_c,
-            feels_like_c,
-            humidity_pct,
-            wind_kph,
-            wind_dir_deg,
-            weather_code,
-            next_12h_precip_pct,
-            fetched_at: chrono::Local::now(),
+        Ok(FetchResult {
+            weather: Weather {
+                temp_c,
+                feels_like_c,
+                humidity_pct,
+                wind_kph,
+                wind_dir_deg,
+                weather_code,
+                next_12h_precip_pct,
+                fetched_at: chrono::Local::now(),
+            },
+            is_day,
         })
     }
 }
 
 /// Fetch current weather for `loc`. One-shot — the dispatcher
 /// re-fires this on the 10-minute tick and on user-driven `r`.
-pub async fn fetch(loc: &CityLocation) -> Result<Weather, WeatherError> {
+pub async fn fetch(loc: &CityLocation) -> Result<FetchResult, WeatherError> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .timeout(REQUEST_TIMEOUT)
@@ -140,7 +157,7 @@ pub async fn fetch(loc: &CityLocation) -> Result<Weather, WeatherError> {
             (
                 "current",
                 "temperature_2m,apparent_temperature,relative_humidity_2m,\
-                 wind_speed_10m,wind_direction_10m,weather_code"
+                 wind_speed_10m,wind_direction_10m,weather_code,is_day"
                     .to_string(),
             ),
             ("hourly", "precipitation_probability".to_string()),
@@ -151,13 +168,89 @@ pub async fn fetch(loc: &CityLocation) -> Result<Weather, WeatherError> {
         .await?
         .json()
         .await?;
-    resp.into_weather()
+    resp.into_result()
 }
 
 /// WMO weather code → human label. Re-exported from `cyberdeck-core`
 /// so the TUI and CLI share one mapping. See
 /// `cyberdeck_core::city::weather_code_label` for the canonical impl.
 pub use cyberdeck_core::city::weather_code_label as weather_label;
+
+fn styled(s: &str, color: Color) -> Span<'static> {
+    Span::styled(s.to_string(), Style::default().fg(color))
+}
+
+/// 4-line ASCII art icon for a WMO weather code + day/night flag.
+pub fn weather_icon(wmo: u8, is_day: bool) -> Vec<Line<'static>> {
+    match wmo {
+        0 if is_day => vec![
+            Line::from(styled("    \\   / ", Color::Yellow)),
+            Line::from(styled("     .-.  ", Color::Yellow)),
+            Line::from(styled("  -(   )- ", Color::Yellow)),
+            Line::from(styled("     `-'  ", Color::Yellow)),
+        ],
+        0 => vec![
+            Line::from(styled("     .-.  ", Color::Blue)),
+            Line::from(styled("    (   ) ", Color::Blue)),
+            Line::from(styled("     `-'  ", Color::Blue)),
+            Line::from(styled("    *  *  ", Color::Blue)),
+        ],
+        1..=2 if is_day => vec![
+            Line::from(vec![styled(" \\  /", Color::Yellow), styled("     ", Color::Gray)]),
+            Line::from(vec![styled("  .--", Color::Yellow), styled("--. ", Color::Gray)]),
+            Line::from(vec![styled("-(   ", Color::Yellow), styled("  ) ", Color::Gray)]),
+            Line::from(styled("  `----' ", Color::Gray)),
+        ],
+        1..=2 => vec![
+            Line::from(vec![styled("  .-", Color::Blue), styled("---.  ", Color::Gray)]),
+            Line::from(vec![styled(" (  ", Color::Blue), styled("   )  ", Color::Gray)]),
+            Line::from(styled("  `---'   ", Color::Gray)),
+            Line::from(styled("          ", Color::DarkGray)),
+        ],
+        3 => vec![
+            Line::from(styled("  .-----. ", Color::Gray)),
+            Line::from(styled(" (       )", Color::Gray)),
+            Line::from(styled("  `-----' ", Color::Gray)),
+            Line::from(styled(" overcast ", Color::DarkGray)),
+        ],
+        45 | 48 => vec![
+            Line::from(styled("_ - _ - _ ", Color::DarkGray)),
+            Line::from(styled(" _ - _ -  ", Color::DarkGray)),
+            Line::from(styled("_ - _ - _ ", Color::DarkGray)),
+            Line::from(styled("   fog    ", Color::DarkGray)),
+        ],
+        51..=57 => vec![
+            Line::from(styled("  .-----. ", Color::Gray)),
+            Line::from(styled(" (  drz  )", Color::Gray)),
+            Line::from(styled("  `-----' ", Color::Gray)),
+            Line::from(styled("  ' ' ' ' ", Color::Cyan)),
+        ],
+        61..=67 | 80..=82 => vec![
+            Line::from(styled("   .-.    ", Color::Gray)),
+            Line::from(styled("  (   )   ", Color::Gray)),
+            Line::from(styled(" / / / /  ", Color::Cyan)),
+            Line::from(styled("/ / / /   ", Color::Cyan)),
+        ],
+        71..=77 | 85..=86 => vec![
+            Line::from(styled("  .-----. ", Color::Gray)),
+            Line::from(styled(" ( snow  )", Color::Gray)),
+            Line::from(styled("  `-----' ", Color::Gray)),
+            Line::from(styled(" * * * *  ", Color::White)),
+        ],
+        95..=99 => vec![
+            Line::from(styled("  .-----. ", Color::DarkGray)),
+            Line::from(styled(" (  ⚡   )", Color::Yellow)),
+            Line::from(styled("  `-----' ", Color::DarkGray)),
+            Line::from(styled(" /|/|/|/  ", Color::Yellow)),
+        ],
+        _ => vec![
+            Line::from(styled("  .-----. ", Color::DarkGray)),
+            Line::from(styled(" (  ???  )", Color::DarkGray)),
+            Line::from(styled("  `-----' ", Color::DarkGray)),
+            Line::from(styled("          ", Color::DarkGray)),
+        ],
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -217,7 +310,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        let w = resp.into_weather().expect("valid payload");
+        let w = resp.into_result().expect("valid payload").weather;
         assert!((w.temp_c - 9.2).abs() < 1e-3);
         assert!((w.feels_like_c - 7.4).abs() < 1e-3);
         assert_eq!(w.humidity_pct, 78);
@@ -251,7 +344,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            resp.into_weather(),
+            resp.into_result(),
             Err(WeatherError::BadPayload(_))
         ));
     }
@@ -287,7 +380,7 @@ mod tests {
             .json()
             .await
             .unwrap();
-        let w = resp.into_weather().expect("valid payload");
+        let w = resp.into_result().expect("valid payload").weather;
         assert!((w.feels_like_c - w.temp_c).abs() < 1e-3);
         // No hourly → next_12h_precip_pct is None.
         assert!(w.next_12h_precip_pct.is_none());
@@ -306,6 +399,39 @@ mod tests {
                 weather_label(code),
                 "unknown",
                 "code {code} should have a human label"
+            );
+        }
+    }
+
+    #[test]
+    fn weather_icon_returns_4_lines() {
+        // Every major WMO code path and both day/night variants must
+        // produce exactly 4 lines of ASCII art so the layout never
+        // shifts vertically.
+        let codes: &[(u8, bool)] = &[
+            (0, true),   // clear day
+            (0, false),  // clear night
+            (1, true),   // partly cloudy day
+            (2, false),  // partly cloudy night
+            (3, true),   // overcast
+            (45, true),  // fog
+            (48, false), // fog (rime)
+            (51, true),  // drizzle
+            (61, true),  // rain
+            (80, false), // rain showers
+            (71, true),  // snow
+            (85, false), // snow showers
+            (95, true),  // thunderstorm
+            (99, false), // thunderstorm w/ hail
+            (255, true), // unknown / fallback
+        ];
+        for &(code, day) in codes {
+            let lines = weather_icon(code, day);
+            assert_eq!(
+                lines.len(),
+                4,
+                "weather_icon({code}, {day}) returned {} lines, expected 4",
+                lines.len(),
             );
         }
     }

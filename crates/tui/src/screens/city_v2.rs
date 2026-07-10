@@ -11,7 +11,7 @@ use crate::app::screen::{ScreenId, ScreenV2, Zone};
 use crate::nav::event::{Consumed, NavEvent};
 use crate::nav::UiContext;
 use crate::screens::city::roads::CityRoads;
-use crate::screens::city::render::{draw_roads, BrailleGrid, Viewport};
+use crate::screens::city::render::{draw_areas, draw_pois, draw_roads, BrailleGrid, Viewport};
 use crate::screens::city::weather::weather_label;
 
 const ZONES: &[Zone]  = &[Zone::Left, Zone::Right];
@@ -85,10 +85,11 @@ impl ScreenV2 for CityScreenV2 {
             NavEvent::Char('r') => {
                 let city_loc     = ctx.live.city_loc.clone();
                 let city_weather = ctx.live.city_weather.clone();
-                let city_roads   = ctx.live.city_roads.clone();
+                let city_data    = ctx.live.city_data.clone();
+                let is_day       = ctx.live.is_day.clone();
                 let tx           = ctx.tx.clone();
                 tokio::spawn(async move {
-                    crate::app::live_data::refresh_city(city_loc, city_weather, city_roads, tx).await;
+                    crate::app::live_data::refresh_city(city_loc, city_weather, city_data, is_day, tx).await;
                 });
                 Consumed::Yes
             }
@@ -113,14 +114,17 @@ impl ScreenV2 for CityScreenV2 {
         let w = map_inner.width.saturating_sub(2);
         let h = map_inner.height.saturating_sub(2);
 
-        // Prefer live Overpass roads; fall back to bundled city data.
-        let live_roads = ctx.live.city_roads.try_read().ok().and_then(|g| g.clone());
+        let live_data = ctx.live.city_data.try_read().ok().and_then(|g| g.clone());
         let map_lines: Vec<Line<'static>> = if w > 0 && h > 0 {
             let vp = Viewport::new(self.viewport_bbox, w, h);
             let mut grid = BrailleGrid::new(w, h);
-            let roads: &[crate::screens::city::roads::Polyline] =
-                live_roads.as_deref().unwrap_or(&self.roads.roads);
-            draw_roads(&mut grid, &vp, roads);
+            if let Some(ref cd) = live_data {
+                draw_areas(&mut grid, &vp, &cd.areas);
+                draw_roads(&mut grid, &vp, &cd.roads);
+                draw_pois(&mut grid, &vp, &cd.pois);
+            } else {
+                draw_roads(&mut grid, &vp, &self.roads.roads);
+            }
             grid.to_lines()
         } else {
             vec![Line::from("")]

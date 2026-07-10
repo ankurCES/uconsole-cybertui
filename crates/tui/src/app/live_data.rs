@@ -7,7 +7,7 @@ use tokio::time::{interval, MissedTickBehavior};
 use cyberdeck_core::audio::Sink;
 use cyberdeck_core::bluetooth::BtDevice;
 use cyberdeck_core::city::{CityLocation, Weather};
-use crate::screens::city::roads::Polyline;
+use crate::screens::city::overpass::CityData;
 use cyberdeck_core::display::DisplayOutput;
 use cyberdeck_core::net::Interface;
 use cyberdeck_core::packages::Package;
@@ -66,10 +66,8 @@ pub struct LiveData {
     pub web_ctrl:        Arc<Mutex<mpsc::Sender<(mpsc::Sender<Action>, Action)>>>,
     pub city_loc:        Arc<RwLock<Option<CityLocation>>>,
     pub city_weather:    Arc<RwLock<Option<Weather>>>,
-    /// Roads fetched from Overpass API. `None` until first fetch lands;
-    /// wrapped in `Arc` so `CityScreenV2` can clone the handle cheaply
-    /// on each render without cloning the full road vector.
-    pub city_roads:      Arc<RwLock<Option<std::sync::Arc<Vec<Polyline>>>>>,
+    pub city_data:       Arc<RwLock<Option<std::sync::Arc<CityData>>>>,
+    pub is_day:          Arc<RwLock<bool>>,
     pub intel_snapshots: Arc<RwLock<BTreeMap<LayerId, Snapshot>>>,
     /// S19 — AI conversation history. Appended by apply_action on AiSubmit /
     /// AiToken / AiThinkToken / AiDone. Read by AiScreenV2::render.
@@ -120,7 +118,8 @@ impl Default for LiveData {
             )),
             city_loc:        Arc::new(RwLock::new(None)),
             city_weather:    Arc::new(RwLock::new(None)),
-            city_roads:      Arc::new(RwLock::new(None)),
+            city_data:       Arc::new(RwLock::new(None)),
+            is_day:          Arc::new(RwLock::new(true)),
             intel_snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             ai_messages:     Arc::new(RwLock::new(Vec::new())),
             llama_ready:     Arc::new(RwLock::new(false)),
@@ -158,31 +157,32 @@ impl LiveData {
             }
         });
 
-        // ── one-shot: IP geolocation + weather + roads for City screen ───────
-        // Runs once at startup; the 10-min periodic task below re-runs it.
+        // ── one-shot: IP geolocation + weather + city data for City screen ────
         {
             let city_loc     = self.city_loc.clone();
             let city_weather = self.city_weather.clone();
-            let city_roads   = self.city_roads.clone();
+            let city_data    = self.city_data.clone();
+            let is_day       = self.is_day.clone();
             let tx_geo       = tx.clone();
             tokio::spawn(async move {
-                refresh_city(city_loc, city_weather, city_roads, tx_geo).await;
+                refresh_city(city_loc, city_weather, city_data, is_day, tx_geo).await;
             });
         }
 
-        // ── 10-min: re-fetch geo + weather + roads ────────────────────────────
+        // ── 10-min: re-fetch geo + weather + city data ──────────────────────
         {
             let city_loc     = self.city_loc.clone();
             let city_weather = self.city_weather.clone();
-            let city_roads   = self.city_roads.clone();
+            let city_data    = self.city_data.clone();
+            let is_day       = self.is_day.clone();
             let tx_periodic  = tx.clone();
             tokio::spawn(async move {
                 let mut t = interval(Duration::from_secs(600));
                 t.set_missed_tick_behavior(MissedTickBehavior::Skip);
-                t.tick().await; // skip first tick; one-shot already ran
+                t.tick().await;
                 loop {
                     t.tick().await;
-                    refresh_city(city_loc.clone(), city_weather.clone(), city_roads.clone(), tx_periodic.clone()).await;
+                    refresh_city(city_loc.clone(), city_weather.clone(), city_data.clone(), is_day.clone(), tx_periodic.clone()).await;
                 }
             });
         }
@@ -222,12 +222,12 @@ impl LiveData {
     }
 }
 
-/// Shared logic: geo → weather → Overpass roads, all best-effort.
-/// Called once at startup, every 10 minutes, and on manual `r` press.
+/// Shared logic: geo → weather → city data (roads+POIs+areas), all best-effort.
 pub async fn refresh_city(
     city_loc:     Arc<RwLock<Option<CityLocation>>>,
     city_weather: Arc<RwLock<Option<Weather>>>,
-    city_roads:   Arc<RwLock<Option<std::sync::Arc<Vec<Polyline>>>>>,
+    city_data:    Arc<RwLock<Option<std::sync::Arc<CityData>>>>,
+    is_day:       Arc<RwLock<bool>>,
     tx:           tokio::sync::mpsc::Sender<Action>,
 ) {
     let loc = match crate::screens::city::geo::locate().await {
@@ -240,24 +240,57 @@ pub async fn refresh_city(
     *city_loc.write().await = Some(loc.clone());
     let _ = tx.send(Action::Tick).await;
 
-    // Weather — independent of roads; don't let a failure block road fetch.
     match crate::screens::city::weather::fetch(&loc).await {
-        Ok(w) => { *city_weather.write().await = Some(w); }
+        Ok(wr) => {
+            *is_day.write().await = wr.is_day;
+            *city_weather.write().await = Some(wr.weather);
+        }
         Err(e) => { tracing::warn!("city weather fetch failed: {e}"); }
     }
     let _ = tx.send(Action::Tick).await;
 
-    // Roads — derive a bbox from ip-api coords (free tier returns no bbox).
     let bbox = loc.bbox.unwrap_or_else(|| {
-        let span = 0.1; // ~11km radius
+        let span = 0.1;
         [loc.lat - span, loc.lon - span, loc.lat + span, loc.lon + span]
     });
-    match crate::screens::city::overpass::fetch_roads(bbox).await {
-        Ok(roads) if !roads.is_empty() => {
-            *city_roads.write().await = Some(std::sync::Arc::new(roads));
+
+    // Disk cache: ~/.cyberdeck/cities/{name}.json, 24h TTL
+    let cache_path = dirs::home_dir().map(|h| {
+        let slug = loc.name.to_lowercase().replace(' ', "-");
+        h.join(".cyberdeck").join("cities").join(format!("{slug}.json"))
+    });
+    if let Some(ref p) = cache_path {
+        if let Ok(meta) = tokio::fs::metadata(p).await {
+            let fresh = meta.modified().ok()
+                .and_then(|m| m.elapsed().ok())
+                .map(|age| age < Duration::from_secs(86400))
+                .unwrap_or(false);
+            if fresh {
+                if let Ok(bytes) = tokio::fs::read(p).await {
+                    if let Ok(data) = serde_json::from_slice::<CityData>(&bytes) {
+                        *city_data.write().await = Some(std::sync::Arc::new(data));
+                        let _ = tx.send(Action::Tick).await;
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    match crate::screens::city::overpass::fetch_city_data(bbox).await {
+        Ok(data) if !data.roads.is_empty() => {
+            if let Some(ref p) = cache_path {
+                if let Some(parent) = p.parent() {
+                    let _ = tokio::fs::create_dir_all(parent).await;
+                }
+                if let Ok(json) = serde_json::to_vec(&data) {
+                    let _ = tokio::fs::write(p, json).await;
+                }
+            }
+            *city_data.write().await = Some(std::sync::Arc::new(data));
             let _ = tx.send(Action::Tick).await;
         }
         Ok(_) => { tracing::debug!("overpass returned 0 roads for bbox {bbox:?}"); }
-        Err(e) => { tracing::warn!("overpass fetch failed: {e}"); }
+        Err(e) => { tracing::warn!("overpass city data fetch failed: {e}"); }
     }
 }

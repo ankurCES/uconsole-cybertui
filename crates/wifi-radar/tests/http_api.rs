@@ -11,6 +11,7 @@ use tokio::sync::{broadcast, mpsc};
 use tower::ServiceExt;
 
 use wifi_radar::api::{router, AppState, UpsertTagRequest};
+use wifi_radar::ble_devices::BleDeviceStore;
 use wifi_radar::devices::DeviceStore;
 use wifi_radar::frames::{DeviceEvent, FrameKind};
 use wifi_radar::tags::{Tag, TagDb};
@@ -44,6 +45,7 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
+        ble_store: Arc::new(BleDeviceStore::new()),
     });
     let app = router(state.clone());
     (state, app)

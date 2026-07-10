@@ -296,6 +296,8 @@ pub struct Live {
     /// first fetch)" until that lands. Same ownership rules as
     /// `city_loc`.
     pub city_weather: Arc<RwLock<Option<crate::screens::city::weather::Weather>>>,
+    pub city_data: Arc<RwLock<Option<std::sync::Arc<crate::screens::city::overpass::CityData>>>>,
+    pub is_day: Arc<RwLock<bool>>,
 }
 
 impl Default for Live {
@@ -341,6 +343,8 @@ impl Default for Live {
             // until a value lands.
             city_loc: Arc::new(RwLock::new(None)),
             city_weather: Arc::new(RwLock::new(None)),
+            city_data: Arc::new(RwLock::new(None)),
+            is_day: Arc::new(RwLock::new(true)),
         }
     }
 }
@@ -654,6 +658,7 @@ impl Live {
         // on the typical home connection). A 5xx error from one doesn't
         // affect the other — both are best-effort.
         let tx_city = tx.clone();
+        let is_day_arc = Arc::clone(&self.is_day);
         tokio::spawn(async move {
             let mut t = interval(Duration::from_secs(600));
             t.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -678,9 +683,10 @@ impl Live {
                 // snapshot stays on screen.
                 if let Ok(loc) = crate::screens::city::geo::locate().await {
                     match crate::screens::city::weather::fetch(&loc).await {
-                        Ok(w) => {
+                        Ok(fr) => {
+                            *is_day_arc.write().await = fr.is_day;
                             if tx_city
-                                .send(Action::CityWeatherRefreshed(w))
+                                .send(Action::CityWeatherRefreshed(fr.weather))
                                 .await
                                 .is_err()
                             {

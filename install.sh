@@ -252,12 +252,14 @@ APT_PKGS=(
     # System: ps, log tail
     procps
     systemd             # journalctl
-    # Build deps for the Rust toolchain (+ curl/ca-certificates for rustup)
+    # Build deps for the Rust toolchain + llama.cpp (cmake, C++ compiler)
     build-essential
     pkg-config
     libssl-dev
     libdbus-1-dev
     libudev-dev
+    cmake
+    git
     curl
     ca-certificates
 )
@@ -284,6 +286,8 @@ DNF_PKGS=(
     openssl-devel
     dbus-devel
     systemd-devel
+    cmake
+    git
     curl
     ca-certificates
 )
@@ -307,6 +311,8 @@ PACMAN_PKGS=(
     pkgconf
     openssl
     dbus
+    cmake
+    git
     curl
     ca-certificates
 )
@@ -434,19 +440,65 @@ fi
 
 # ---------- 0b. llama-server binary ----------
 # The TUI spawns llama-server as a sidecar for local AI inference.
-# Check if it's on PATH; if not, attempt to install via the llama.cpp
-# release binaries (ARM64 for CM4, x86_64 for dev machines).
+# Check if it's on PATH; if not, build from source (works on ARM64 CM4 +
+# x86_64 dev machines). Needs cmake + a C++ compiler (installed via deps above).
 NEED_MODEL=0
 [[ $PRESET_TUI -eq 1 || $PRESET_FULL -eq 1 ]] && NEED_MODEL=1
-if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
-    if ! command -v llama-server >/dev/null 2>&1; then
-        warn "llama-server not found on PATH."
-        warn "Install llama.cpp: https://github.com/ggerganov/llama.cpp/releases"
-        warn "  On Debian/Ubuntu ARM64: apt install llama-cpp (if packaged)"
-        warn "  Or build from source: cmake -B build && cmake --build build --target llama-server"
-        warn "The AI screen will show an error until llama-server is available."
+LLAMA_INSTALL_PREFIX="${LLAMA_INSTALL_PREFIX:-/usr/local}"
+
+install_llama_server() {
+    local build_dir="${XDG_CACHE_HOME:-$HOME/.cache}/cyberdeck/llama-cpp-build"
+    local src_dir="${build_dir}/llama.cpp"
+
+    for tool in cmake g++ git; do
+        if ! command -v "$tool" >/dev/null 2>&1; then
+            die "Need $tool to build llama-server. Install it and re-run."
+        fi
+    done
+
+    if [[ -d "$src_dir/.git" ]]; then
+        log "Updating existing llama.cpp source…"
+        ( cd "$src_dir" && git pull --ff-only 2>/dev/null || true )
     else
+        log "Cloning llama.cpp…"
+        mkdir -p "$build_dir"
+        git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$src_dir"
+    fi
+
+    log "Building llama-server (release, CPU-only)…"
+    cmake -S "$src_dir" -B "$src_dir/build" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_CUDA=OFF \
+        -DGGML_METAL=OFF \
+        -DBUILD_SHARED_LIBS=OFF 2>&1 | tail -5
+    cmake --build "$src_dir/build" --target llama-server -j "$(nproc 2>/dev/null || echo 2)" 2>&1 | tail -5
+
+    local server_bin="$src_dir/build/bin/llama-server"
+    if [[ ! -x "$server_bin" ]]; then
+        server_bin="$(find "$src_dir/build" -name llama-server -type f -executable 2>/dev/null | head -1)"
+    fi
+    [[ -x "$server_bin" ]] || die "llama-server binary not found after build. Check cmake output above."
+
+    log "Installing llama-server to ${LLAMA_INSTALL_PREFIX}/bin/"
+    if [[ $EUID -eq 0 ]]; then
+        install -m 0755 "$server_bin" "${LLAMA_INSTALL_PREFIX}/bin/llama-server"
+    else
+        sudo install -m 0755 "$server_bin" "${LLAMA_INSTALL_PREFIX}/bin/llama-server"
+    fi
+    log "llama-server installed: ${LLAMA_INSTALL_PREFIX}/bin/llama-server"
+}
+
+if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
+    if command -v llama-server >/dev/null 2>&1; then
         log "llama-server found: $(which llama-server)"
+    else
+        log "llama-server not found — building from source…"
+        if [[ $ASSUME_YES -eq 1 ]]; then
+            install_llama_server
+        else
+            confirm "Build & install llama-server from source (~5 min on CM4)?" && install_llama_server \
+                || warn "Skipping llama-server install. The AI screen will show an error."
+        fi
     fi
 fi
 

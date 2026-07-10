@@ -13,6 +13,7 @@ use std::time::Duration;
 use axum::http::header;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use wifi_radar::ble_devices::BleDeviceStore;
 use tokio::sync::{broadcast, mpsc};
 
 use wifi_radar::api::{router as api_router, sse_router, AppState};
@@ -38,6 +39,7 @@ async fn sse_endpoint_streams_events_over_real_socket() {
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx: events_tx.clone(),
         scanner_tx,
+        ble_store: Arc::new(BleDeviceStore::new()),
     });
     let static_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
     let app = build_router(state.clone(), static_dir);

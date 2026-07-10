@@ -54,10 +54,10 @@ use crate::prefs::Units;
 use crate::theme::Theme;
 
 use super::city::geo::CityLocation;
-use super::city::render::{draw_roads, BrailleGrid, Viewport};
+use super::city::render::{draw_areas, draw_pois, draw_roads, BrailleGrid, Viewport};
 use super::city::roads::{CityRoads, Polyline};
 use super::city::traffic::{synthetic_overlay, TrafficLevel, TrafficOverlay};
-use super::city::weather::{weather_label, Weather};
+use super::city::weather::{weather_icon, weather_label, Weather};
 
 /// Minimum bbox span (in degrees) — below this, the map stops zooming
 /// in so the user can't get stuck in a sub-pixel viewport. Roughly
@@ -499,31 +499,38 @@ fn render_map_pane(
         return;
     };
 
-    // Build the grid, paint roads, optionally overlay traffic.
+    // Build grid. Draw order: areas → roads → POIs → traffic → marker.
     let mut grid = BrailleGrid::new(inner.width, inner.height);
-    draw_roads(&mut grid, &vp, &screen.roads.roads);
 
-    if app.traffic_overlay {
-        let overlay = screen.traffic();
-        // Re-draw the affected polylines on top of the neutral road
-        // network in their traffic colour. We could mix the two
-        // passes, but a clean repaint keeps the colour logic in one
-        // place and a second `draw_polyline` is microseconds.
-        paint_traffic(&mut grid, &vp, &screen.roads.roads, &overlay);
+    // Use live CityData (areas+roads+POIs) if available, else bundled roads only.
+    let live_data = app.live.city_data.try_read().ok().and_then(|g| g.clone());
+    if let Some(ref cd) = live_data {
+        draw_areas(&mut grid, &vp, &cd.areas);
+        draw_roads(&mut grid, &vp, &cd.roads);
+        draw_pois(&mut grid, &vp, &cd.pois);
+    } else {
+        draw_roads(&mut grid, &vp, &screen.roads.roads);
     }
 
-    // Location marker — a single dot at the viewport-projected
-    // (lat, lon) of the user's resolved location. Falls back to the
-    // bbox centre if `location` is missing.
-    if let Some(loc) = &screen.location {
-        let (mx, my) = vp.project(loc.lat, loc.lon);
-        // Draw a small cross so the marker reads as a marker, not as
-        // just another dot in the road network.
-        grid.set_dot(mx, my);
-        grid.set_dot(mx.wrapping_sub(1), my);
-        grid.set_dot(mx + 1, my);
-        grid.set_dot(mx, my.wrapping_sub(1));
-        grid.set_dot(mx, my + 1);
+    if app.traffic_overlay {
+        let roads = live_data.as_ref().map(|cd| cd.roads.as_slice())
+            .unwrap_or(&screen.roads.roads);
+        let overlay = synthetic_overlay(roads, chrono::Local::now());
+        paint_traffic(&mut grid, &vp, roads, &overlay);
+    }
+
+    // Location marker — blinking cross, yellow
+    let blink_on = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() / 500 % 2 == 0)
+        .unwrap_or(true);
+    if blink_on {
+        if let Some(loc) = &screen.location {
+            let (mx, my) = vp.project(loc.lat, loc.lon);
+            for &(dx, dy) in &[(0i32, 0i32), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+                grid.set_dot_colored(mx + dx, my + dy, ratatui::style::Color::LightYellow);
+            }
+        }
     }
 
     // Pack the grid into lines and render as a Paragraph. Use a
@@ -624,8 +631,12 @@ fn render_weather_pane(
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Current temperature + feels-like. Use the user's units pref.
     if let Some(w) = &screen.weather {
+        // Weather icon (4 lines of ASCII art)
+        let is_day = app.live.is_day.try_read().map(|g| *g).unwrap_or(true);
+        lines.extend(weather_icon(w.weather_code, is_day));
+        lines.push(Line::from(""));
+
         let (temp_str, feels_str) = format_temp(w, app.units);
         let label = weather_label(w.weather_code);
         lines.push(Line::from(vec![

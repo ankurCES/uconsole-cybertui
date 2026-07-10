@@ -15,8 +15,10 @@
 //! line touches. `project_polyline` projects a lat/lon polyline into
 //! the dot grid using a `Viewport`, pan/zoom-aware.
 
-use ratatui::text::Line;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 
+use super::overpass::{Area, AreaKind, Poi, PoiKind};
 use super::roads::{Polyline, RoadImportance};
 
 /// 2x-horizontal × 4x-vertical resolution grid of braille dots.
@@ -30,42 +32,48 @@ pub struct BrailleGrid {
     /// inside `to_lines` matches the Unicode braille mask so setting
     /// `bits[cell*8 + i]` lights up exactly dot `i` of cell `cell`.
     bits: Vec<u8>,
+    /// Per-cell foreground color. Last writer wins — draw order
+    /// (areas → roads → POIs) determines visual priority.
+    colors: Vec<Color>,
 }
 
 impl BrailleGrid {
     /// Empty grid. Out-of-range `set_dot` / `set_cell_dot` calls are
     /// silently dropped — callers don't have to clip before drawing.
     pub fn new(w_chars: u16, h_chars: u16) -> Self {
-        let n = (w_chars as usize) * (h_chars as usize) * 8;
+        let cells = (w_chars as usize) * (h_chars as usize);
         Self {
             w_chars,
             h_chars,
-            bits: vec![0; n],
+            bits: vec![0; cells * 8],
+            colors: vec![Color::White; cells],
         }
     }
 
-    /// Set a single dot in *grid* coords (`x` ∈ `0..w_chars*2`,
-    /// `y` ∈ `0..h_chars*4`). Bit-OR so overlapping draws accumulate.
-    pub fn set_dot(&mut self, x: i32, y: i32) {
+    fn dot_to_cell(&self, x: i32, y: i32) -> Option<(usize, usize)> {
         if x < 0 || y < 0 {
-            return;
+            return None;
         }
         let (x, y) = (x as u32, y as u32);
-        let w = self.w_chars as u32 * 2;
-        let h = self.h_chars as u32 * 4;
-        if x >= w || y >= h {
-            return;
+        if x >= self.w_chars as u32 * 2 || y >= self.h_chars as u32 * 4 {
+            return None;
         }
-        // Each terminal cell holds 2 columns × 4 rows of dots.
-        let cx = x / 2;
-        let cy = y / 4;
-        let dx = x % 2;
-        let dy = y % 4;
-        // Unicode braille bit layout (bit 0 = top-left of the cell):
-        //   dot (dx, dy) → bit offset = dy * 2 + dx.
-        let bit = (dy * 2 + dx) as usize;
-        let cell = (cy as usize) * (self.w_chars as usize) + (cx as usize);
-        self.bits[cell * 8 + bit] = 1;
+        let cell = (y / 4) as usize * self.w_chars as usize + (x / 2) as usize;
+        let bit = ((y % 4) * 2 + x % 2) as usize;
+        Some((cell, bit))
+    }
+
+    pub fn set_dot(&mut self, x: i32, y: i32) {
+        if let Some((cell, bit)) = self.dot_to_cell(x, y) {
+            self.bits[cell * 8 + bit] = 1;
+        }
+    }
+
+    pub fn set_dot_colored(&mut self, x: i32, y: i32, color: Color) {
+        if let Some((cell, bit)) = self.dot_to_cell(x, y) {
+            self.bits[cell * 8 + bit] = 1;
+            self.colors[cell] = color;
+        }
     }
 
     /// Pack the bit grid into `Line`s of Unicode braille chars.
@@ -74,20 +82,25 @@ impl BrailleGrid {
     pub fn to_lines(&self) -> Vec<Line<'static>> {
         let mut out = Vec::with_capacity(self.h_chars as usize);
         for cy in 0..self.h_chars {
-            let mut s = String::with_capacity(self.w_chars as usize);
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(self.w_chars as usize);
             for cx in 0..self.w_chars {
                 let cell = (cy as usize) * (self.w_chars as usize) + (cx as usize);
                 let byte = self.bits[cell * 8..cell * 8 + 8]
                     .iter()
                     .enumerate()
                     .fold(0u8, |acc, (i, &b)| acc | (b << i));
-                if byte == 0 {
-                    s.push(' ');
+                let ch = if byte == 0 {
+                    ' '
                 } else {
-                    s.push(char::from_u32(0x2800 + byte as u32).unwrap_or(' '));
-                }
+                    char::from_u32(0x2800 + byte as u32).unwrap_or(' ')
+                };
+                let color = self.colors[cell];
+                spans.push(Span::styled(
+                    String::from(ch),
+                    Style::default().fg(color),
+                ));
             }
-            out.push(Line::from(s));
+            out.push(Line::from(spans));
         }
         out
     }
@@ -274,6 +287,98 @@ pub fn draw_roads(grid: &mut BrailleGrid, vp: &Viewport, roads: &[Polyline]) {
     }
 }
 
+/// Bresenham line with per-dot color.
+pub fn line_colored(grid: &mut BrailleGrid, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+    let dx = (x1 - x0).abs();
+    let dy = -(y1 - y0).abs();
+    let sx = if x0 < x1 { 1 } else { -1 };
+    let sy = if y0 < y1 { 1 } else { -1 };
+    let mut err = dx + dy;
+    let (mut x, mut y) = (x0, y0);
+    loop {
+        grid.set_dot_colored(x, y, color);
+        if x == x1 && y == y1 {
+            break;
+        }
+        let e2 = 2 * err;
+        if e2 >= dy {
+            err += dy;
+            x += sx;
+        }
+        if e2 <= dx {
+            err += dx;
+            y += sy;
+        }
+    }
+}
+
+fn area_color(kind: &AreaKind) -> Color {
+    match kind {
+        AreaKind::Park => Color::Green,
+        AreaKind::Forest => Color::Rgb(0, 100, 0),
+        AreaKind::Water => Color::Cyan,
+    }
+}
+
+fn poi_color(kind: &PoiKind) -> Color {
+    match kind {
+        PoiKind::FireStation => Color::Red,
+        PoiKind::Police => Color::Blue,
+        PoiKind::Hospital => Color::Magenta,
+    }
+}
+
+/// Scanline-fill an area polygon into the braille grid.
+pub fn draw_areas(grid: &mut BrailleGrid, vp: &Viewport, areas: &[Area]) {
+    for area in areas {
+        if area.points.len() < 3 {
+            continue;
+        }
+        let color = area_color(&area.kind);
+        let projected: Vec<(i32, i32)> = area.points.iter().map(|p| vp.project(p[0], p[1])).collect();
+
+        // Bounding box in dot coords
+        let min_y = projected.iter().map(|p| p.1).min().unwrap_or(0).max(0);
+        let max_y = projected.iter().map(|p| p.1).max().unwrap_or(0).min(grid.h_chars as i32 * 4 - 1);
+
+        for y in min_y..=max_y {
+            // Collect X intersections with polygon edges
+            let mut xs = Vec::new();
+            let n = projected.len();
+            for i in 0..n {
+                let (x0, y0) = projected[i];
+                let (x1, y1) = projected[(i + 1) % n];
+                if (y0 <= y && y1 > y) || (y1 <= y && y0 > y) {
+                    let t = (y - y0) as f64 / (y1 - y0) as f64;
+                    xs.push((x0 as f64 + t * (x1 - x0) as f64) as i32);
+                }
+            }
+            xs.sort_unstable();
+            // Fill between pairs
+            for pair in xs.chunks(2) {
+                if pair.len() == 2 {
+                    for x in pair[0]..=pair[1] {
+                        grid.set_dot_colored(x, y, color);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Draw POIs as 3×3 colored dot clusters.
+pub fn draw_pois(grid: &mut BrailleGrid, vp: &Viewport, pois: &[Poi]) {
+    for poi in pois {
+        let (cx, cy) = vp.project(poi.lat, poi.lon);
+        let color = poi_color(&poi.kind);
+        for dy in -1..=1i32 {
+            for dx in -1..=1i32 {
+                grid.set_dot_colored(cx + dx, cy + dy, color);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,7 +386,9 @@ mod tests {
     fn grid_to_str(g: &BrailleGrid) -> String {
         g.to_lines()
             .into_iter()
-            .map(|l| l.to_string())
+            .map(|l| {
+                l.spans.iter().map(|s| s.content.as_ref()).collect::<String>()
+            })
             .collect::<Vec<_>>()
             .join("\n")
     }

@@ -131,7 +131,9 @@ pub fn run(cmd: CityCmd, mode: OutputMode) -> Result<i32> {
             };
             let result = rt.block_on(cyberdeck_tui::screens::city::weather::fetch(&loc));
             match result {
-                Ok(w) => {
+                Ok(fr) => {
+                    let is_day = fr.is_day;
+                    let w = fr.weather;
                     crate::output::print(
                         mode,
                         &json!({
@@ -144,6 +146,7 @@ pub fn run(cmd: CityCmd, mode: OutputMode) -> Result<i32> {
                             "weather_label": cyberdeck_tui::screens::city::weather::weather_label(w.weather_code),
                             "next_12h_precip_pct": w.next_12h_precip_pct,
                             "fetched_at": w.fetched_at.to_rfc3339(),
+                            "is_day": is_day,
                         }),
                     )
                     .map(|_| 0)
