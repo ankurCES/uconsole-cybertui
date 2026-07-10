@@ -11,11 +11,14 @@
 
 pub mod app;
 pub mod keymap;
+pub mod modal;
+pub mod nav;
 pub mod prefs;
 pub mod screens;
 pub mod theme;
 pub mod ui;
 pub mod util;
+pub mod widgets;
 pub mod workspace;
 pub mod wm;
 

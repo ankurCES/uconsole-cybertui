@@ -4,6 +4,8 @@
 
 pub mod audio;
 pub mod bluetooth;
+pub mod main_menu;
+pub mod submenu;
 pub mod city;
 pub mod display;
 pub mod editor;
@@ -21,6 +23,15 @@ pub mod storage;
 pub mod system;
 pub mod lora;
 pub mod intel;
+
+// ── ScreenV2 migrations ──────────────────────────────────────────────────────
+pub mod stubs_v2;
+pub mod system_v2;
+pub mod network_v2;
+pub mod lora_v2;
+pub mod intel_v2;
+pub mod recon_v2;
+pub mod city_v2;
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;

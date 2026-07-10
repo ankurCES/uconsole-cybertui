@@ -56,6 +56,14 @@ pub enum ScreenId {
     /// carousel and through the Tab cycle; SSRF-gated at the
     /// primitive layer (Osiris-derived MIT note).
     Recon,
+    /// S3 — Root menu screen. Five categories (System, Network, Security,
+    /// Tools, Settings) each opening a Submenu. Not in ScreenId::ALL
+    /// (not Tab-cycled); reached by direct push in S6 event loop.
+    MainMenu,
+    /// S3 — Dynamic submenu screen. Items sourced from
+    /// NavigationState::submenu_items set by the parent MainMenu on
+    /// Confirm. Not in ScreenId::ALL.
+    Submenu,
 }
 
 impl ScreenId {
@@ -106,7 +114,9 @@ impl ScreenId {
             ScreenId::LoRa => "LoRa",
             ScreenId::City => "City",
             ScreenId::Intel => "Intel",
-            ScreenId::Recon => "Recon",
+            ScreenId::Recon    => "Recon",
+            ScreenId::MainMenu => "Menu",
+            ScreenId::Submenu  => "Submenu",
         }
     }
 
@@ -165,7 +175,9 @@ impl ScreenId {
             // action-console semantics (user types a query, hits
             // Enter, reads output) rather than the passive
             // surveillance shape of the Intel layer grid.
-            ScreenId::Recon => "⌕",
+            ScreenId::Recon    => "⌕",
+            ScreenId::MainMenu => "▦",
+            ScreenId::Submenu  => "≡",
         }
     }
 
@@ -320,6 +332,116 @@ pub trait Screen {
     /// with the screens you'd actually want to *jump to* with a digit key).
     fn in_sidebar(&self, app: &crate::app::App) -> bool {
         !self.is_hidden(app)
+    }
+}
+
+// ── v2 navigation types ────────────────────────────────────────────────────
+
+/// Focusable region within a screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    Main,  // single-pane screens
+    Left,  // multi-pane left column
+    Right, // multi-pane right column
+}
+
+/// Screen trait v2: receives NavEvent instead of raw KeyEvent.
+/// Screens own their own cursor/selection state as struct fields.
+pub trait ScreenV2: Send {
+    fn id(&self) -> ScreenId;
+
+    fn title(&self) -> &str {
+        self.id().label()
+    }
+
+    /// Handle a navigation event. Return Consumed::Yes to stop propagation.
+    fn on_nav(
+        &mut self,
+        event: crate::nav::event::NavEvent,
+        ctx: &mut crate::nav::UiContext<'_>,
+    ) -> crate::nav::event::Consumed;
+
+    /// Draw into `area`. Must be pure — no side effects.
+    fn render(
+        &self,
+        frame: &mut ratatui::Frame,
+        area: ratatui::layout::Rect,
+        ctx: &crate::nav::UiContext<'_>,
+    );
+
+    /// Zones exposed for focus cycling. Single-pane returns `&[Zone::Main]`.
+    fn focusable_zones(&self) -> &[Zone];
+
+    /// Called when this screen becomes the top of the MenuStack.
+    fn on_focus(&mut self, _ctx: &mut crate::nav::UiContext<'_>) {}
+
+    /// Called just before this screen is popped from the MenuStack.
+    fn on_blur(&mut self, _ctx: &mut crate::nav::UiContext<'_>) {}
+
+    /// True to exclude from Tab cycling (e.g. Editor).
+    fn is_hidden(&self) -> bool {
+        false
+    }
+
+    fn hint(&self) -> &str {
+        "▲▼ scroll   A select   B back"
+    }
+}
+
+/// Registry of ScreenV2 implementations, keyed by ScreenId.
+pub struct ScreenRegistry {
+    screens: std::collections::HashMap<ScreenId, Box<dyn ScreenV2>>,
+}
+
+impl Default for ScreenRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ScreenRegistry {
+    pub fn new() -> Self {
+        Self { screens: std::collections::HashMap::new() }
+    }
+
+    pub fn register(&mut self, screen: Box<dyn ScreenV2>) {
+        self.screens.insert(screen.id(), screen);
+    }
+
+    pub fn get_mut(&mut self, id: ScreenId) -> Option<&mut dyn ScreenV2> {
+        if let Some(b) = self.screens.get_mut(&id) {
+            Some(b.as_mut())
+        } else {
+            None
+        }
+    }
+
+    /// Cycle forward through registered, visible screens.
+    pub fn next_visible(&self, current: ScreenId) -> ScreenId {
+        let all = ScreenId::ALL;
+        let pos = all.iter().position(|&id| id == current).unwrap_or(0);
+        let n = all.len();
+        for step in 1..=n {
+            let id = all[(pos + step) % n];
+            if self.screens.get(&id).map_or(false, |s| !s.is_hidden()) {
+                return id;
+            }
+        }
+        current
+    }
+
+    /// Cycle backward through registered, visible screens.
+    pub fn prev_visible(&self, current: ScreenId) -> ScreenId {
+        let all = ScreenId::ALL;
+        let pos = all.iter().position(|&id| id == current).unwrap_or(0);
+        let n = all.len();
+        for step in 1..=n {
+            let id = all[(pos + n - step) % n];
+            if self.screens.get(&id).map_or(false, |s| !s.is_hidden()) {
+                return id;
+            }
+        }
+        current
     }
 }
 

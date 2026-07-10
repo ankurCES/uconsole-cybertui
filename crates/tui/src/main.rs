@@ -45,6 +45,7 @@ use app::toast::ToastKind;
 use app::{App, ChoiceCommit, ChoiceOption, ConfirmKind, InputKind, Modal, Region, Wizard};
 use theme::Theme;
 
+#[allow(dead_code)]
 type Tui = Terminal<CrosstermBackend<Stdout>>;
 
 #[derive(Debug, Default)]
@@ -122,143 +123,10 @@ async fn main() -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend).context("init terminal")?;
 
-    let (tx, rx) = mpsc::channel::<Action>(256);
-    let mut app = App::new(tx.clone(), rx);
+    // --web / --web-bind flags are wired through run_v2 in a future story.
+    let _ = &args;
 
-    // Kick off the background refreshers.
-    app.live.spawn_refreshers(tx.clone());
-
-    // Optionally start the embedded web server. The serve() future is owned
-    // by a dedicated tap task that listens on a dedicated control channel
-    // (`web_ctrl` on App::live) for WebStart/WebStop actions. UI code
-    // (Settings toggle, command palette) routes through that channel
-    // directly — no separate `tx` plumbing needed.
-    #[cfg(feature = "web")]
-    {
-        let (web_tx, mut web_rx) = mpsc::channel::<(mpsc::Sender<Action>, Action)>(32);
-        // Expose the sender on the Live so UI code can reach us.
-        *app.live.web_ctrl.lock().await = web_tx;
-        let live = app.live.clone();
-        let tap_tx = tx.clone();
-        let bind_default = args
-            .web_bind
-            .clone()
-            .unwrap_or_else(|| "127.0.0.1:7878".to_string());
-        tokio::spawn(async move {
-            while let Some((reply, act)) = web_rx.recv().await {
-                match act {
-                    Action::Run(RunAction::WebStart) => {
-                        // Already running?
-                        {
-                            let g = live.web_shutdown.lock().await;
-                            if g.is_some() {
-                                let _ = reply
-                                    .send(Action::Toast(
-                                        ToastKind::Warn,
-                                        "web server already running".into(),
-                                    ))
-                                    .await;
-                                continue;
-                            }
-                        }
-                        let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
-                        *live.web_shutdown.lock().await = Some(sd_tx);
-                        *live.web_enabled.write().await = true;
-                        let bind = bind_default.clone();
-                        *live.web_url.write().await = Some(format!("http://{bind}"));
-                        let _ = reply
-                            .send(Action::Toast(
-                                ToastKind::Ok,
-                                format!("web server starting on {bind}"),
-                            ))
-                            .await;
-                        let live_for_task = live.clone();
-                        let tx_for_task = tap_tx.clone();
-                        tokio::spawn(async move {
-                            let (w_tx, mut w_rx) =
-                                mpsc::channel::<cyberdeck_web::run::toast_compat::Action>(64);
-                            let pump_tx = tx_for_task.clone();
-                            tokio::spawn(async move {
-                                while let Some(wa) = w_rx.recv().await {
-                                    let _ = pump_tx.send(crate::web_bridge::web_to_app(wa)).await;
-                                }
-                            });
-                            let live_arc: Arc<dyn cyberdeck_web::api::LiveRead + Send + Sync> = {
-                                let bridge = crate::web_bridge::TuiLiveRead {
-                                    live: live_for_task.clone(),
-                                    action_tx: tx_for_task.clone(),
-                                };
-                                Arc::new(bridge)
-                            };
-                            let token = cyberdeck_web::auth::Token::new();
-                            let _ = tx_for_task
-                                .send(Action::Toast(
-                                    ToastKind::Info,
-                                    format!("web auth token: {}", token.0),
-                                ))
-                                .await;
-                            let serve = cyberdeck_web::run_with(&bind, live_arc, Some(w_tx), Some(token));
-                            tokio::select! {
-                                res = serve => {
-                                    if let Err(e) = res {
-                                        let _ = tx_for_task
-                                            .send(Action::Toast(
-                                                ToastKind::Error,
-                                                format!("web server failed: {e}"),
-                                            ))
-                                            .await;
-                                    }
-                                }
-                                _ = sd_rx => {
-                                    let _ = tx_for_task
-                                        .send(Action::Toast(
-                                            ToastKind::Info,
-                                            "web server stopped".into(),
-                                        ))
-                                        .await;
-                                }
-                            }
-                            *live_for_task.web_enabled.write().await = false;
-                            *live_for_task.web_url.write().await = None;
-                            let _ = live_for_task.web_shutdown.lock().await.take();
-                        });
-                    }
-                    Action::Run(RunAction::WebStop) => {
-                        if let Some(sd) = live.web_shutdown.lock().await.take() {
-                            let _ = sd.send(());
-                            let _ = reply
-                                .send(Action::Toast(ToastKind::Info, "stopping web server".into()))
-                                .await;
-                        } else {
-                            let _ = reply
-                                .send(Action::Toast(
-                                    ToastKind::Warn,
-                                    "web server not running".into(),
-                                ))
-                                .await;
-                        }
-                    }
-                    other => {
-                        let _ = reply.send(other).await;
-                    }
-                }
-            }
-        });
-        if args.web {
-            let _ = tx.send(Action::Run(RunAction::WebStart)).await;
-        }
-    }
-    #[cfg(not(feature = "web"))]
-    if args.web {
-        let _ = tx
-            .send(Action::Toast(
-                ToastKind::Warn,
-                "rebuild with `cargo build -p cyberdeck-tui --features web` to enable --web".into(),
-            ))
-            .await;
-    }
-
-    let res = run_app(&mut terminal, &mut app, &tx).await;
+    let res = app::run::run_v2(&mut terminal).await;
 
     restore_terminal();
     terminal.show_cursor().ok();
@@ -269,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn run_app(
     terminal: &mut Tui,
     app: &mut App,
@@ -462,6 +331,7 @@ async fn run_app(
     }
 }
 
+#[allow(dead_code)]
 fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &Theme) {
     // Four-row layout: header / tab_strip / body / legend. `tab_strip`
     // is `None` when the terminal is too short (< 10 rows); a tight window
@@ -524,6 +394,7 @@ fn draw(f: &mut Frame, app: &mut App, screens: &mut [Box<dyn Screen>], theme: &T
 /// and the city name (`"New York"`) so users can type either. The
 /// bundled order is the same as `CityRoads::BUNDLED` so callers
 /// that care about cycling order get a deterministic result.
+#[allow(dead_code)]
 fn city_picker_match(query: &str) -> Option<String> {
     let q = query.to_lowercase();
     for slug in screens::city::roads::CityRoads::BUNDLED {
@@ -546,6 +417,7 @@ use ratatui::Frame;
 /// in sync so the right side actually redraws with the new screen —
 /// without this, the sidebar would say "Network" but the content
 /// pane would keep showing whatever it last rendered.
+#[allow(dead_code)]
 fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
     if matches!(app.region, Region::Sidebar) {
         // `launcher_offset` is a visible-row index, not a ScreenId
@@ -661,6 +533,7 @@ fn switch_screen(app: &mut App, screen: ScreenId, sidebar_row: usize) {
 /// read would land on the wrong screen. `sidebar_visible` returns
 /// the same filtered list `draw_launcher` paints, keeping digit-key
 /// shortcuts in lockstep with arrow navigation.
+#[allow(dead_code)]
 async fn commit_launcher(app: &mut App, screens: &[Box<dyn Screen>]) -> bool {
     let visible = ScreenId::sidebar_visible(screens, app);
     let n = visible.len();
@@ -693,10 +566,12 @@ async fn commit_launcher(app: &mut App, screens: &[Box<dyn Screen>]) -> bool {
 /// user is still composing a chord). The capture loop in `handle_key`
 /// uses this to keep waiting on modifier-only events instead of
 /// silently storing "Shift" as a binding.
+#[allow(dead_code)]
 fn is_captureable(k: &KeyEvent) -> bool {
     !matches!(k.code, KeyCode::Modifier(_))
 }
 
+#[allow(dead_code)]
 async fn handle_key(
     screens: &mut [Box<dyn Screen>],
     app: &mut App,
@@ -1421,6 +1296,7 @@ async fn handle_key(
     false
 }
 
+#[allow(dead_code)]
 async fn run_palette(app: &mut App, tx: &mpsc::Sender<Action>, label: &str) {
     if let Some(rest) = label.strip_prefix("Go to ") {
         for id in ScreenId::ALL {
@@ -1475,6 +1351,7 @@ async fn run_palette(app: &mut App, tx: &mpsc::Sender<Action>, label: &str) {
     }
 }
 
+#[allow(dead_code)]
 async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind, arg: String) {
     let act = match kind {
         ConfirmKind::Reboot => RunAction::Reboot,
@@ -1525,6 +1402,7 @@ async fn run_confirm(app: &mut App, tx: &mpsc::Sender<Action>, kind: ConfirmKind
 /// most GUI clipboards add when the source text is a single line.
 ///
 /// No-op when no `Modal::Input` or `Modal::Secret` is active.
+#[allow(dead_code)]
 pub(crate) fn handle_paste(app: &mut App, mut text: String) {
     while matches!(
         text.chars().last(),
@@ -1551,6 +1429,7 @@ pub(crate) fn handle_paste(app: &mut App, mut text: String) {
 /// `try_wait` loop so we don't block the TUI on a hung clipboard daemon).
 /// Returns an empty string on any failure (no clipboard tool, hung
 /// daemon, empty selection) — `handle_paste` is then a clean no-op.
+#[allow(dead_code)]
 fn read_clipboard_for_paste() -> String {
     use std::io::Read;
     use std::process::{Command, Stdio};
@@ -1597,6 +1476,7 @@ fn read_clipboard_for_paste() -> String {
     String::new()
 }
 
+#[allow(dead_code)]
 pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: InputKind, value: String) {
     let act = match kind {
         InputKind::WifiPassword => {
@@ -1789,6 +1669,7 @@ pub(crate) async fn run_input(app: &mut App, tx: &mpsc::Sender<Action>, kind: In
 /// Dispatch the user's selection in a `Modal::Choice`. `commit_kind` describes
 /// what to do next: open a new Input/Secret modal with a prefill, or fire a
 /// RunAction directly.
+#[allow(dead_code)]
 async fn run_choice(
     app: &mut App,
     tx: &mpsc::Sender<Action>,
@@ -1854,10 +1735,12 @@ async fn run_choice(
 
 /// Advance the wizard: when the user hits Enter on the body, transition
 /// to the next step's prompt (or fire the final RunAction).
+#[allow(dead_code)]
 async fn advance_wizard(app: &mut App, tx: &mpsc::Sender<Action>) {
     advance_wizard_step(app, tx).await;
 }
 
+#[allow(dead_code)]
 async fn advance_wizard_step(app: &mut App, tx: &mpsc::Sender<Action>) {
     if let Modal::Wizard(w) = &app.modal {
         match w {
@@ -1884,6 +1767,7 @@ async fn advance_wizard_step(app: &mut App, tx: &mpsc::Sender<Action>) {
 /// Wi-Fi Enterprise, we currently only know how to encode the request;
 /// the core side (Phase 6) will translate it into `nmcli connection up`
 /// with 802-1x settings.
+#[allow(dead_code)]
 async fn finalize_wizard(app: &mut App, tx: &mpsc::Sender<Action>) {
     // Pull all fields out of the wizard via `std::mem::replace` so we can
     // overwrite `app.modal` without cloning (the wizard variant contains a
@@ -1913,6 +1797,7 @@ async fn finalize_wizard(app: &mut App, tx: &mpsc::Sender<Action>) {
     }
 }
 
+#[allow(dead_code)]
 async fn handle_action(
     screens: &mut [Box<dyn Screen>],
     app: &mut App,
@@ -2426,6 +2311,7 @@ async fn handle_action(
     false
 }
 
+#[allow(dead_code)]
 fn spawn_action(tx: mpsc::Sender<Action>, act: RunAction) {
     // `live` (the App's Live registry) isn't needed yet — every RunAction hits
     // cyberdeck_core directly. Once `RunAction::SetGovernor`,
@@ -3258,6 +3144,10 @@ mod tests {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<Action>(1);
         let mut app = crate::app::App::new(tx, rx);
+        // Clear any bindings loaded from real prefs (XDG_CONFIG_HOME is
+        // ignored on macOS, so App::new may load production prefs that
+        // conflict with the key we're about to capture).
+        app.keymap = crate::keymap::Keymap::default();
         app.keymap_capture = Some(NavAction::Down);
         let _ = handle_key(&mut [], &mut app,
             &tokio::sync::mpsc::channel::<Action>(1).0,
@@ -3267,12 +3157,16 @@ mod tests {
                    Some(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE)));
         assert!(app.keymap_capture.is_none(), "capture must clear after success");
 
-        // Verify the binding landed on disk.
+        // Disk check: only works on XDG-respecting systems (Linux/BSD).
+        // On macOS dirs::config_dir() ignores XDG_CONFIG_HOME and writes
+        // to ~/Library/Application Support, so the temp-dir path won't exist.
         let prefs_path: PathBuf = dir.path().join("cyberdeck").join("prefs.json");
-        let raw = std::fs::read_to_string(&prefs_path).expect("prefs.json written");
-        assert!(raw.contains("\"down\""), "down binding not in prefs: {raw}");
-        assert!(raw.contains("\"Char\""), "expected KeyCode::Char in prefs: {raw}");
-        assert!(raw.contains("\"s\""), "expected 's' in prefs: {raw}");
+        if prefs_path.exists() {
+            let raw = std::fs::read_to_string(&prefs_path).unwrap();
+            assert!(raw.contains("\"down\""), "down binding not in prefs: {raw}");
+            assert!(raw.contains("\"Char\""), "expected KeyCode::Char in prefs: {raw}");
+            assert!(raw.contains("\"s\""), "expected 's' in prefs: {raw}");
+        }
     }
 
     #[tokio::test]

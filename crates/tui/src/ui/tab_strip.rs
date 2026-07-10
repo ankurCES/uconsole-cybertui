@@ -220,8 +220,10 @@ fn short_label(id: ScreenId) -> &'static str {
         ScreenId::Editor => "Edit",
         ScreenId::LoRa => "LoRa",
         ScreenId::City => "City",
-        ScreenId::Intel => "Intl",
-        ScreenId::Recon => "Reco",
+        ScreenId::Intel    => "Intl",
+        ScreenId::Recon    => "Reco",
+        ScreenId::MainMenu => "Menu",
+        ScreenId::Submenu  => "Sub",
     }
 }
 
