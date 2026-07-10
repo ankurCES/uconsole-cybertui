@@ -9,6 +9,7 @@ pub mod confirm;
 pub mod input;
 pub mod overlay;
 pub mod progress;
+pub mod run_action;
 pub mod secret;
 
 pub use choice::ChoiceModal;
@@ -16,6 +17,7 @@ pub use confirm::ConfirmModal;
 pub use input::InputModal;
 pub use overlay::render_modal_overlay;
 pub use progress::ProgressModal;
+pub use run_action::RunActionModal;
 pub use secret::SecretModal;
 
 pub enum ModalResult {

@@ -118,6 +118,9 @@ pub enum Action {
     /// `Snapshot::error(...)` (carrying `LayerStatus::Error`); the
     /// screen renders those rows in red.
     IntelSnapshot(cyberdeck_intel::Snapshot),
+    /// S8 — Apply a new theme immediately (settings_v2 theme picker).
+    /// Handled in run_v2: updates UiState::theme + Prefs::theme + saves prefs.
+    SetTheme(crate::theme::ThemeName),
 }
 
 #[derive(Debug, Clone)]

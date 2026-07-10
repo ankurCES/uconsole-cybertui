@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use chrono::Local;
 use crossterm::event::{self, Event};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
@@ -12,16 +13,18 @@ use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tokio::sync::mpsc;
 
-use crate::app::action::Action;
+use crate::app::action::{Action, RunAction};
 use crate::app::live_data::LiveData;
 use crate::app::screen::{ScreenId, ScreenRegistry};
 use crate::app::state::AppState;
+use crate::app::toast::ToastKind;
 use crate::modal::render_modal_overlay;
 use crate::nav::dispatch::dispatch_key;
 use crate::nav::menu_stack::MenuStack;
 use crate::nav::UiContext;
 use crate::prefs::Prefs;
 use crate::screens;
+use crate::theme::Theme;
 
 type Tui = ratatui::Terminal<CrosstermBackend<Stdout>>;
 
@@ -46,6 +49,7 @@ pub async fn run_v2(terminal: &mut Tui) -> anyhow::Result<()> {
 
     loop {
         if needs_redraw {
+            state.ui.clock = Local::now();
             terminal
                 .draw(|f| draw_v2(f, &mut state, &mut screens, &dispatch_tx))
                 .context("terminal draw")?;
@@ -56,11 +60,12 @@ pub async fn run_v2(terminal: &mut Tui) -> anyhow::Result<()> {
             maybe = state.rx.recv() => {
                 match maybe {
                     Some(Action::Quit) | None => return Ok(()),
-                    Some(_) => {}
+                    Some(a) => apply_action(a, &mut state, &dispatch_tx),
                 }
                 // Drain burst: coalesce multiple refresher ticks into one redraw.
                 while let Ok(a) = state.rx.try_recv() {
                     if matches!(a, Action::Quit) { return Ok(()); }
+                    apply_action(a, &mut state, &dispatch_tx);
                 }
                 needs_redraw = true;
             }
@@ -150,17 +155,24 @@ fn draw_v2(
 
 fn build_registry() -> ScreenRegistry {
     use screens::{
+        audio_v2::AudioScreenV2,
+        bluetooth_v2::BluetoothScreenV2,
         city_v2::CityScreenV2,
+        display_v2::DisplayScreenV2,
+        editor_v2::EditorScreenV2,
+        files_v2::FilesScreenV2,
         intel_v2::IntelScreenV2,
+        logs_v2::LogsScreenV2,
         lora_v2::LoraScreenV2,
         main_menu::MainMenuScreen,
         network_v2::NetworkScreenV2,
+        packages_v2::PackagesScreenV2,
+        power_v2::PowerScreenV2,
+        processes_v2::ProcessesScreenV2,
         recon_v2::ReconScreenV2,
-        stubs_v2::{
-            AudioScreenV2, BluetoothScreenV2, DisplayScreenV2, EditorScreenV2, FilesScreenV2,
-            LogsScreenV2, PackagesScreenV2, PowerScreenV2, ProcessesScreenV2, ServicesScreenV2,
-            SettingsScreenV2, StorageScreenV2,
-        },
+        services_v2::ServicesScreenV2,
+        settings_v2::SettingsScreenV2,
+        storage_v2::StorageScreenV2,
         submenu::SubMenuScreen,
         system_v2::SystemScreenV2,
     };
@@ -174,17 +186,141 @@ fn build_registry() -> ScreenRegistry {
     r.register(Box::new(IntelScreenV2::default()));
     r.register(Box::new(ReconScreenV2::default()));
     r.register(Box::new(CityScreenV2::default()));
-    r.register(Box::new(BluetoothScreenV2));
-    r.register(Box::new(PowerScreenV2));
-    r.register(Box::new(DisplayScreenV2));
-    r.register(Box::new(AudioScreenV2));
-    r.register(Box::new(StorageScreenV2));
-    r.register(Box::new(PackagesScreenV2));
-    r.register(Box::new(ProcessesScreenV2));
-    r.register(Box::new(ServicesScreenV2));
-    r.register(Box::new(FilesScreenV2));
-    r.register(Box::new(LogsScreenV2));
-    r.register(Box::new(SettingsScreenV2));
-    r.register(Box::new(EditorScreenV2));
+    r.register(Box::new(BluetoothScreenV2::default()));
+    r.register(Box::new(PowerScreenV2::default()));
+    r.register(Box::new(DisplayScreenV2::default()));
+    r.register(Box::new(AudioScreenV2::default()));
+    r.register(Box::new(StorageScreenV2::default()));
+    r.register(Box::new(PackagesScreenV2::default()));
+    r.register(Box::new(ProcessesScreenV2::default()));
+    r.register(Box::new(ServicesScreenV2::default()));
+    r.register(Box::new(FilesScreenV2::default()));
+    r.register(Box::new(LogsScreenV2::default()));
+    r.register(Box::new(SettingsScreenV2::default()));
+    r.register(Box::new(EditorScreenV2::default()));
     r
+}
+
+fn apply_action(action: Action, state: &mut AppState, tx: &mpsc::Sender<Action>) {
+    match action {
+        Action::SetTheme(name) => {
+            state.ui.theme = Theme::by_name(name);
+            state.prefs.theme = name;
+            state.prefs.save();
+        }
+        Action::Run(ra) => {
+            let tx2 = tx.clone();
+            tokio::spawn(async move { handle_run_action(ra, tx2).await; });
+        }
+        _ => {}
+    }
+}
+
+async fn handle_run_action(action: RunAction, tx: mpsc::Sender<Action>) {
+    let result: Result<String, String> = tokio::task::spawn_blocking(move || {
+        run_system_action(&action)
+    }).await.unwrap_or(Err("task panicked".to_string()));
+
+    match result {
+        Ok(msg) if !msg.is_empty() => { tx.try_send(Action::Toast(ToastKind::Info, msg)).ok(); }
+        Err(e) => { tx.try_send(Action::Toast(ToastKind::Error, e)).ok(); }
+        _ => {}
+    }
+}
+
+fn run_system_action(action: &RunAction) -> Result<String, String> {
+    use std::process::Command;
+    fn sh(args: &[&str]) -> Result<String, String> {
+        let out = Command::new(args[0]).args(&args[1..]).output()
+            .map_err(|e| e.to_string())?;
+        if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+        }
+    }
+    match action {
+        RunAction::ProcessKill(pid) => {
+            sh(&["kill", "-9", &pid.to_string()])?;
+            Ok(format!("killed PID {pid}"))
+        }
+        RunAction::ServiceStart(unit) => {
+            sh(&["systemctl", "start", unit])?;
+            Ok(format!("started {unit}"))
+        }
+        RunAction::ServiceStop(unit) => {
+            sh(&["systemctl", "stop", unit])?;
+            Ok(format!("stopped {unit}"))
+        }
+        RunAction::ServiceRestart(unit) => {
+            sh(&["systemctl", "restart", unit])?;
+            Ok(format!("restarted {unit}"))
+        }
+        RunAction::SetGovernor(gov) => {
+            // Write to every online CPU core's scaling_governor.
+            let glob_path = "/sys/devices/system/cpu";
+            if let Ok(rd) = std::fs::read_dir(glob_path) {
+                for entry in rd.flatten() {
+                    let p = entry.path().join("cpufreq/scaling_governor");
+                    std::fs::write(&p, gov.as_bytes()).ok();
+                }
+            }
+            Ok(format!("governor → {gov}"))
+        }
+        RunAction::SetBrightness(pct) => {
+            // Find first backlight device.
+            let bl = "/sys/class/backlight";
+            if let Ok(rd) = std::fs::read_dir(bl) {
+                for entry in rd.flatten() {
+                    let max_path = entry.path().join("max_brightness");
+                    if let Ok(s) = std::fs::read_to_string(&max_path) {
+                        if let Ok(max) = s.trim().parse::<u64>() {
+                            let val = (max * *pct as u64 / 100).min(max);
+                            std::fs::write(entry.path().join("brightness"), val.to_string()).ok();
+                            return Ok(format!("brightness → {pct}%"));
+                        }
+                    }
+                }
+            }
+            Err("no backlight device found".to_string())
+        }
+        RunAction::SetVolume { target, percent } => {
+            sh(&["pactl", "set-sink-volume", target, &format!("{percent}%")])?;
+            Ok(format!("volume → {percent}%"))
+        }
+        RunAction::MuteSink { target, mute } => {
+            sh(&["pactl", "set-sink-mute", target, if *mute { "1" } else { "0" }])?;
+            Ok(if *mute { "muted".to_string() } else { "unmuted".to_string() })
+        }
+        RunAction::SetDefaultSink(id) => {
+            sh(&["pactl", "set-default-sink", id])?;
+            Ok(format!("default sink → {id}"))
+        }
+        RunAction::BluetoothConnect(mac) => {
+            sh(&["bluetoothctl", "connect", mac])?;
+            Ok(format!("connected {mac}"))
+        }
+        RunAction::BluetoothDisconnect(mac) => {
+            sh(&["bluetoothctl", "disconnect", mac])?;
+            Ok(format!("disconnected {mac}"))
+        }
+        RunAction::BluetoothPair(mac) => {
+            sh(&["bluetoothctl", "pair", mac])?;
+            Ok(format!("paired {mac}"))
+        }
+        RunAction::BluetoothTrust(mac) => {
+            sh(&["bluetoothctl", "trust", mac])?;
+            Ok(format!("trusted {mac}"))
+        }
+        RunAction::BluetoothScan => {
+            // Brief scan — non-blocking fire-and-forget.
+            Command::new("bluetoothctl").args(["scan", "on"]).spawn().ok();
+            Ok(String::new())
+        }
+        RunAction::Reboot => { sh(&["systemctl", "reboot"])?; Ok(String::new()) }
+        RunAction::Shutdown => { sh(&["systemctl", "poweroff"])?; Ok(String::new()) }
+        RunAction::Suspend => { sh(&["systemctl", "suspend"])?; Ok(String::new()) }
+        RunAction::Hibernate => { sh(&["systemctl", "hibernate"])?; Ok(String::new()) }
+        _ => Ok(String::new()), // other actions handled elsewhere
+    }
 }

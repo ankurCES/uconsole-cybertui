@@ -117,6 +117,16 @@ impl LiveData {
             }
         });
 
+        // ── one-shot: IP geolocation for City screen ─────────────────────────
+        let city_loc = self.city_loc.clone();
+        let tx_geo = tx.clone();
+        tokio::spawn(async move {
+            if let Ok(loc) = crate::screens::city::geo::locate().await {
+                *city_loc.write().await = Some(loc);
+                let _ = tx_geo.send(Action::Tick).await;
+            }
+        });
+
         // ── 5s: services ─────────────────────────────────────────────────────
         let me_svc = self.clone();
         tokio::spawn(async move {

@@ -23,6 +23,7 @@ const PAN_STEP: f64   = 0.1;
 pub struct CityScreenV2 {
     pub roads:          CityRoads,
     pub viewport_bbox:  [f64; 4],  // [min_lat, min_lon, max_lat, max_lon]
+    loaded_coords:      Option<(f64, f64)>,
 }
 
 impl Default for CityScreenV2 {
@@ -30,7 +31,7 @@ impl Default for CityScreenV2 {
         let (_, roads) = CityRoads::load_bundled_or_default("seattle");
         let loc = roads.location();
         let bbox = loc.bbox.unwrap_or(roads.bbox);
-        Self { roads, viewport_bbox: bbox }
+        Self { roads, viewport_bbox: bbox, loaded_coords: None }
     }
 }
 
@@ -39,6 +40,31 @@ impl ScreenV2 for CityScreenV2 {
     fn title(&self) -> &str { "City" }
     fn focusable_zones(&self) -> &[Zone] { ZONES }
     fn hint(&self) -> &str { "▲▼◀▶ pan   +/- zoom   ◀▶ pane   B back" }
+
+    fn on_focus(&mut self, ctx: &mut crate::nav::UiContext<'_>) {
+        let loc = match ctx.live.city_loc.try_read().ok().and_then(|g| g.clone()) {
+            Some(l) => l,
+            None => return,
+        };
+        // Skip reload if we already have data for this location (within ~1km).
+        if let Some((lat, lon)) = self.loaded_coords {
+            if (lat - loc.lat).abs() < 0.01 && (lon - loc.lon).abs() < 0.01 {
+                return;
+            }
+        }
+        let slug = loc.name.to_lowercase().replace(' ', "-");
+        let (used_slug, roads) = CityRoads::load_bundled_or_default(&slug);
+        // Use bundled bbox if the city matched; otherwise centre a default span on detected coords.
+        let bbox = if used_slug == slug {
+            roads.bbox
+        } else {
+            let span = 0.05;
+            [loc.lat - span, loc.lon - span, loc.lat + span, loc.lon + span]
+        };
+        self.roads = roads;
+        self.viewport_bbox = bbox;
+        self.loaded_coords = Some((loc.lat, loc.lon));
+    }
 
     fn on_nav(&mut self, event: NavEvent, ctx: &mut UiContext<'_>) -> Consumed {
         match event {

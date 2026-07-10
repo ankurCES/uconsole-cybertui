@@ -32,6 +32,18 @@ pub mod lora_v2;
 pub mod intel_v2;
 pub mod recon_v2;
 pub mod city_v2;
+pub mod settings_v2;
+pub mod bluetooth_v2;
+pub mod power_v2;
+pub mod storage_v2;
+pub mod packages_v2;
+pub mod processes_v2;
+pub mod services_v2;
+pub mod files_v2;
+pub mod logs_v2;
+pub mod display_v2;
+pub mod audio_v2;
+pub mod editor_v2;
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;
