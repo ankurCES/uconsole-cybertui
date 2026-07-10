@@ -76,6 +76,8 @@ pub struct LiveData {
     pub ai_messages: Arc<RwLock<Vec<AiMessage>>>,
     /// S19 — true once llama-server passes its health check.
     pub llama_ready:  Arc<RwLock<bool>>,
+    /// S19 — set on model load failure; AI screen shows this instead of "loading".
+    pub llama_error:  Arc<RwLock<Option<String>>>,
 
     /// Abort handles for background refreshers. Dropped on app exit.
     pub _refreshers: Vec<tokio::task::AbortHandle>,
@@ -122,6 +124,7 @@ impl Default for LiveData {
             intel_snapshots: Arc::new(RwLock::new(BTreeMap::new())),
             ai_messages:     Arc::new(RwLock::new(Vec::new())),
             llama_ready:     Arc::new(RwLock::new(false)),
+            llama_error:     Arc::new(RwLock::new(None)),
             _refreshers:     Vec::new(),
         }
     }

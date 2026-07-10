@@ -138,6 +138,8 @@ pub enum Action {
     AiDone,
     LlamaReady,
     LlamaDown,
+    /// Health poll timed out or process crashed — carries last stderr line.
+    LlamaFailed(String),
 }
 
 #[derive(Debug, Clone)]

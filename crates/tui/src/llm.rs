@@ -4,10 +4,12 @@
 //! The model loads ONCE at TUI boot and stays warm until exit. All HTTP is
 //! async (reqwest + chunk()); the tokio event loop is never blocked.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 
 use crate::app::action::Action;
 use crate::app::live_data::{AiMessage, AiRole};
@@ -18,29 +20,50 @@ const LLAMA_URL: &str = "http://127.0.0.1:8081";
 
 const SYSTEM_PROMPT: &str = "You are a CyberDeck field AI assistant embedded in a terminal on a \
     ClockworkPi uConsole CM4. Be concise and practical — the screen is small. \
-    Use code blocks for shell commands. Think through complex problems using <think> tags.";
+    Use code blocks for shell commands.";
 
 pub struct LlamaSidecar {
     child: tokio::process::Child,
+    pub stderr_tail: Arc<RwLock<Vec<String>>>,
 }
 
 /// Spawn llama-server with the discovered model. Returns None if no model
 /// found or if llama-server binary is missing.
 pub async fn spawn_sidecar(prefs: &Prefs) -> Option<LlamaSidecar> {
     let model_path = find_model_path(prefs)?;
-    let child = Command::new("llama-server")
+    let mut child = Command::new("llama-server")
         .args([
             "--model", &model_path,
+            "--host", "127.0.0.1",
+            "--port", &LLAMA_PORT.to_string(),
             "-c", "4096",
             "-t", "4",
-            "--port", &LLAMA_PORT.to_string(),
-            "-ngl", "0",  // CPU-only on CM4 (no CUDA)
+            "-ngl", "0",
+            "--jinja",
+            "--no-webui",
         ])
+        .env("LLAMA_ARG_NO_DISPLAY_PROMPT", "1")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .ok()?;
-    Some(LlamaSidecar { child })
+
+    // Capture last 30 lines of stderr for error reporting.
+    let stderr_tail: Arc<RwLock<Vec<String>>> = Arc::new(RwLock::new(Vec::new()));
+    if let Some(stderr) = child.stderr.take() {
+        let tail = stderr_tail.clone();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                tracing::debug!(target: "llama", "{line}");
+                let mut buf = tail.write().await;
+                buf.push(line);
+                if buf.len() > 30 { buf.remove(0); }
+            }
+        });
+    }
+
+    Some(LlamaSidecar { child, stderr_tail })
 }
 
 /// Graceful SIGTERM → 2s wait → SIGKILL.
@@ -52,15 +75,20 @@ pub async fn kill_sidecar(sidecar: &mut LlamaSidecar) {
     }
 }
 
-/// Poll /health every 1s for up to 30s. Sends LlamaReady or LlamaDown.
-pub fn spawn_health_poll(tx: mpsc::Sender<Action>) {
+/// Poll /health every 500ms for up to 90s. Detects early process exit.
+/// Sends LlamaReady or LlamaDown (with stderr tail on failure).
+pub fn spawn_health_poll(
+    tx: mpsc::Sender<Action>,
+    sidecar: &LlamaSidecar,
+) {
+    let stderr_tail = sidecar.stderr_tail.clone();
     tokio::spawn(async move {
         let client = reqwest::Client::new();
-        for _ in 0..30 {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+        for _ in 0..180 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
             let ok = client
                 .get(format!("{LLAMA_URL}/health"))
-                .timeout(Duration::from_secs(1))
+                .timeout(Duration::from_secs(2))
                 .send()
                 .await
                 .map(|r| r.status().is_success())
@@ -70,7 +98,14 @@ pub fn spawn_health_poll(tx: mpsc::Sender<Action>) {
                 return;
             }
         }
-        tx.send(Action::LlamaDown).await.ok();
+        // Timeout — report stderr tail so user knows why
+        let tail = stderr_tail.read().await;
+        let detail = if tail.is_empty() {
+            "timed out after 90s".into()
+        } else {
+            tail.last().cloned().unwrap_or_default()
+        };
+        tx.send(Action::LlamaFailed(detail)).await.ok();
     });
 }
 
@@ -117,7 +152,10 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
         "model": "minicpm5",
         "messages": json_msgs,
         "stream": true,
-        "temperature": 0.7,
+        "temperature": 0.6,
+        "top_p": 0.95,
+        "max_tokens": 1024,
+        "chat_template_kwargs": { "enable_thinking": true },
     });
 
     let client = reqwest::Client::new();
@@ -156,7 +194,14 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
                             return;
                         }
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(tok) = v["choices"][0]["delta"]["content"].as_str() {
+                            let delta = &v["choices"][0]["delta"];
+                            // --jinja splits thinking into reasoning_content
+                            if let Some(rc) = delta["reasoning_content"].as_str() {
+                                if !rc.is_empty() {
+                                    tx.send(Action::AiThinkToken(rc.to_string())).await.ok();
+                                }
+                            }
+                            if let Some(tok) = delta["content"].as_str() {
                                 if !tok.is_empty() {
                                     route_token(tok, &mut in_think, &mut pending, &tx).await;
                                 }

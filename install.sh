@@ -432,13 +432,29 @@ if [[ $PRESET_DEPS -eq 1 ]]; then
     exit 0
 fi
 
-# ---------- 0b. AI model download ----------
+# ---------- 0b. llama-server binary ----------
+# The TUI spawns llama-server as a sidecar for local AI inference.
+# Check if it's on PATH; if not, attempt to install via the llama.cpp
+# release binaries (ARM64 for CM4, x86_64 for dev machines).
+NEED_MODEL=0
+[[ $PRESET_TUI -eq 1 || $PRESET_FULL -eq 1 ]] && NEED_MODEL=1
+if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
+    if ! command -v llama-server >/dev/null 2>&1; then
+        warn "llama-server not found on PATH."
+        warn "Install llama.cpp: https://github.com/ggerganov/llama.cpp/releases"
+        warn "  On Debian/Ubuntu ARM64: apt install llama-cpp (if packaged)"
+        warn "  Or build from source: cmake -B build && cmake --build build --target llama-server"
+        warn "The AI screen will show an error until llama-server is available."
+    else
+        log "llama-server found: $(which llama-server)"
+    fi
+fi
+
+# ---------- 0c. AI model download ----------
 # Downloads MiniCPM5-1B Q4_K_M GGUF (~688 MB) to ~/.cyberdeck/models/.
 # Runs before the build so the model is ready when the TUI binary lands.
 # Skipped with --skip-model, --web (no TUI), --radar (no TUI), or --build.
 # Idempotent: skips if the file already exists at the expected path.
-NEED_MODEL=0
-[[ $PRESET_TUI -eq 1 || $PRESET_FULL -eq 1 ]] && NEED_MODEL=1
 if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
     MODEL_DEST="${AI_MODEL_DIR}/${AI_MODEL_FILE}"
     if [[ -f "$MODEL_DEST" ]]; then

@@ -119,15 +119,15 @@ impl ScreenV2 for AiScreenV2 {
         frame.render_widget(msgs_block, msg_area);
 
         if !llama_ready {
-            let loading = ctx.live.llama_ready.try_read()
-                .map(|_| ()) // lock acquired = we read false above
-                .err()
-                .map(|_| "  ⏳ Starting AI model...")
-                .unwrap_or("  ⏳ Starting AI model...");
-            // Check if we should show "no model" error via llama_down state
-            // ponytail: just show loading; LlamaDown arrives as a toast from apply_action
+            let err_msg = ctx.live.llama_error.try_read()
+                .ok()
+                .and_then(|g| g.clone());
+            let text = match err_msg {
+                Some(e) => format!("  ⚠ AI failed: {e}"),
+                None => "  ⏳ Starting AI model...".into(),
+            };
             frame.render_widget(
-                Paragraph::new(loading).style(Style::default().fg(theme.dim)),
+                Paragraph::new(text).style(Style::default().fg(theme.dim)),
                 inner,
             );
             return;

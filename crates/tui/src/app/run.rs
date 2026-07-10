@@ -45,7 +45,7 @@ pub async fn run_v2(terminal: &mut Tui) -> anyhow::Result<()> {
     let llama_child: Option<crate::llm::LlamaSidecar> = {
         match crate::llm::spawn_sidecar(&prefs).await {
             Some(sidecar) => {
-                crate::llm::spawn_health_poll(tx.clone());
+                crate::llm::spawn_health_poll(tx.clone(), &sidecar);
                 Some(sidecar)
             }
             None => {
@@ -364,11 +364,20 @@ fn apply_action(action: Action, state: &mut AppState, tx: &mpsc::Sender<Action>)
         }
         #[cfg(feature = "http")]
         Action::LlamaDown => {
-            // llama_ready stays false; screen shows loading state.
-            // Toast so user knows why AI isn't available.
+            let msg = "no model found — place a .gguf in ~/.cyberdeck/models/";
+            if let Ok(mut e) = state.live.llama_error.try_write() {
+                *e = Some(msg.into());
+            }
+            state.ui.push_toast(crate::app::toast::ToastKind::Error, &format!("AI: {msg}"));
+        }
+        #[cfg(feature = "http")]
+        Action::LlamaFailed(detail) => {
+            if let Ok(mut e) = state.live.llama_error.try_write() {
+                *e = Some(detail.clone());
+            }
             state.ui.push_toast(
                 crate::app::toast::ToastKind::Error,
-                "AI: no model found — place a .gguf in ~/.cyberdeck/models/",
+                &format!("AI model failed: {detail}"),
             );
         }
         _ => {}
