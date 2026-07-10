@@ -138,17 +138,19 @@ fn detail_lines_for(snap: Option<&Snapshot>, theme: &crate::theme::Theme) -> Vec
         LayerStatus::Error { .. } => "ERROR".to_string(),
     };
     let summary = if snap.summary.is_empty() { "(no summary yet)".to_string() } else { snap.summary.clone() };
-    let raw = serde_json::to_string(&snap.raw)
-        .unwrap_or_else(|_| "<unprintable>".into())
-        .chars().take(160).collect::<String>();
     let mut lines = vec![
         Line::from(header),
         Line::from(format!("{status_label} · {last_ok}")),
         Line::from(""),
         Line::from(summary),
-        Line::from(""),
-        Line::from(format!("raw: {raw}")),
     ];
+    if !snap.raw.is_null() {
+        let raw = serde_json::to_string(&snap.raw)
+            .unwrap_or_else(|_| "<unprintable>".into())
+            .chars().take(160).collect::<String>();
+        lines.push(Line::from(""));
+        lines.push(Line::from(format!("raw: {raw}")));
+    }
     if let LayerStatus::Error { reason, .. } = &snap.status {
         lines.push(Line::from(Span::styled(format!("error: {reason}"), theme.warn())));
     }

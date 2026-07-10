@@ -64,6 +64,9 @@ pub enum ScreenId {
     /// NavigationState::submenu_items set by the parent MainMenu on
     /// Confirm. Not in ScreenId::ALL.
     Submenu,
+    /// S16 — Splash shown when backing out of MainMenu. Any key returns;
+    /// Esc opens QuitConfirmModal. Not in ScreenId::ALL (not Tab-cycled).
+    Screensaver,
 }
 
 impl ScreenId {
@@ -115,8 +118,9 @@ impl ScreenId {
             ScreenId::City => "City",
             ScreenId::Intel => "Intel",
             ScreenId::Recon    => "Recon",
-            ScreenId::MainMenu => "Menu",
-            ScreenId::Submenu  => "Submenu",
+            ScreenId::MainMenu    => "Menu",
+            ScreenId::Submenu     => "Submenu",
+            ScreenId::Screensaver => "Screensaver",
         }
     }
 
@@ -176,8 +180,9 @@ impl ScreenId {
             // Enter, reads output) rather than the passive
             // surveillance shape of the Intel layer grid.
             ScreenId::Recon    => "⌕",
-            ScreenId::MainMenu => "▦",
-            ScreenId::Submenu  => "≡",
+            ScreenId::MainMenu    => "▦",
+            ScreenId::Submenu     => "≡",
+            ScreenId::Screensaver => "◌",
         }
     }
 

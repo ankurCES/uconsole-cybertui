@@ -1533,6 +1533,7 @@ impl App {
             traffic_overlay: self.traffic_overlay,
             show_weather_panel: self.show_weather_panel,
             keymap: self.keymap.clone(),
+            lora_nodes: vec![],
         };
         prefs.save();
     }

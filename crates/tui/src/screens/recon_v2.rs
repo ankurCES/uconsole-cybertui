@@ -1,6 +1,9 @@
 //! Recon screen v2 — 7-tab OSINT action console.
 //! Single-pane: Tab/BackTab cycle arms, Char appends to query,
 //! Confirm runs, Back clears or exits.
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
 use cyberdeck_intel::recon::ReconTab;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
@@ -8,29 +11,33 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 use ratatui::Frame;
 
+use crate::app::action::Action;
 use crate::app::screen::{ScreenId, ScreenV2, Zone};
 use crate::nav::event::{Consumed, NavEvent};
 use crate::nav::UiContext;
 
 const QUERY_MAX: usize  = 256;
-const OUTPUT_CAP: usize = 128; // max lines kept
+const OUTPUT_CAP: usize = 128;
+// Timeout for any single recon call — covers the SSL s_client hang case.
+const CALL_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub struct ReconScreenV2 {
-    pub tab:     ReconTab,
-    pub query:   String,
-    pub output:  Vec<String>,
-    pub scroll:  usize,
-    pub running: bool,
+    pub tab:    ReconTab,
+    pub query:  String,
+    pub scroll: usize,
+    // ponytail: shared mailbox — background task writes, render reads
+    output: Arc<Mutex<Vec<String>>>,
 }
 
 impl Default for ReconScreenV2 {
     fn default() -> Self {
         Self {
-            tab:     ReconTab::Dns,
-            query:   String::new(),
-            output:  vec!["Recon — type a query, hit A to run.".into()],
-            scroll:  0,
-            running: false,
+            tab:    ReconTab::Dns,
+            query:  String::new(),
+            scroll: 0,
+            output: Arc::new(Mutex::new(vec![
+                "Recon — type a query, hit A to run.".into(),
+            ])),
         }
     }
 }
@@ -56,11 +63,11 @@ impl ScreenV2 for ReconScreenV2 {
                 Consumed::Yes
             }
             NavEvent::Up => {
-                self.scroll = self.scroll.saturating_sub(1);
+                self.scroll = self.scroll.saturating_add(1);
                 Consumed::Yes
             }
             NavEvent::Down => {
-                self.scroll = self.scroll.saturating_add(1);
+                self.scroll = self.scroll.saturating_sub(1);
                 Consumed::Yes
             }
             NavEvent::Char(c) => {
@@ -72,13 +79,57 @@ impl ScreenV2 for ReconScreenV2 {
                 Consumed::Yes
             }
             NavEvent::Confirm => {
-                self.run_query();
+                let q = self.query.trim().to_string();
+                if q.is_empty() {
+                    *self.output.lock().unwrap() =
+                        vec!["(empty query — type something first)".into()];
+                    return Consumed::Yes;
+                }
+                // Signal running immediately so next render shows it.
+                *self.output.lock().unwrap() = vec!["running…".into()];
+                self.scroll = 0;
+                let tab    = self.tab;
+                let out_tx = Arc::clone(&self.output);
+                let tx     = ctx.tx.clone();
+                tokio::spawn(async move {
+                    // spawn_blocking so we don't stall the tokio runtime.
+                    // timeout guards against openssl s_client or whois hanging.
+                    let result = tokio::time::timeout(
+                        CALL_TIMEOUT,
+                        tokio::task::spawn_blocking(move || match tab {
+                            ReconTab::Dns       => cyberdeck_intel::recon::dns::run(&q),
+                            ReconTab::Whois     => cyberdeck_intel::recon::whois::run(&q),
+                            ReconTab::Ip        => cyberdeck_intel::recon::ip::run(&q),
+                            ReconTab::Ssl       => cyberdeck_intel::recon::ssl::run(&q),
+                            ReconTab::Cve       => cyberdeck_intel::recon::cve::run(&q),
+                            ReconTab::Crypto    => cyberdeck_intel::recon::crypto::run(&q),
+                            ReconTab::Sanctions => cyberdeck_intel::recon::sanctions::run(&q),
+                        }),
+                    )
+                    .await
+                    // timeout elapsed
+                    .unwrap_or_else(|_| Ok(Err(anyhow::anyhow!("timed out after 15s"))))
+                    // spawn_blocking join error
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("task panicked: {e}")));
+
+                    let mut lines: Vec<String> = match result {
+                        Ok(body) => body.lines().map(str::to_string).collect(),
+                        Err(e)   => vec![format!("error: {e}")],
+                    };
+                    if lines.is_empty() { lines = vec!["(no output)".into()]; }
+                    if lines.len() > OUTPUT_CAP {
+                        lines.drain(0..lines.len() - OUTPUT_CAP);
+                    }
+                    *out_tx.lock().unwrap() = lines;
+                    tx.try_send(Action::Tick).ok();
+                });
                 Consumed::Yes
             }
             NavEvent::Back => {
                 if !self.query.is_empty() {
                     self.query.clear();
-                    self.output = vec!["Recon — type a query, hit A to run.".into()];
+                    *self.output.lock().unwrap() =
+                        vec!["Recon — type a query, hit A to run.".into()];
                     self.scroll = 0;
                 } else {
                     ctx.go_back();
@@ -115,12 +166,11 @@ impl ScreenV2 for ReconScreenV2 {
                 Span::styled("│", sep_style),
             ]
         }).collect();
-        frame.render_widget(
-            Paragraph::new(Line::from(tab_spans)),
-            rows[0],
-        );
+        frame.render_widget(Paragraph::new(Line::from(tab_spans)), rows[0]);
 
         // ── Query row ────────────────────────────────────────────────────────
+        let output = self.output.lock().unwrap();
+        let is_running = output.first().map(|s| s == "running…").unwrap_or(false);
         let q_display = if self.query.is_empty() {
             Span::styled("(type query, A to run)", Style::default().fg(theme.dim))
         } else {
@@ -130,21 +180,27 @@ impl ScreenV2 for ReconScreenV2 {
             Paragraph::new(Line::from(vec![
                 Span::styled("❯ ", Style::default().fg(theme.accent)),
                 q_display,
-                if self.running { Span::styled(" …", Style::default().fg(theme.warn)) } else { Span::raw("") },
+                if is_running {
+                    Span::styled(" …", Style::default().fg(theme.warn))
+                } else {
+                    Span::raw("")
+                },
             ])),
             rows[1],
         );
 
         // ── Output pane ──────────────────────────────────────────────────────
         let visible = rows[2].height as usize;
-        let total   = self.output.len();
+        let total   = output.len();
+        // scroll=0 → bottom of output; scroll up to see earlier lines
         let scroll  = self.scroll.min(total.saturating_sub(visible));
         let end     = total.saturating_sub(scroll);
         let start   = end.saturating_sub(visible);
 
-        let out_lines: Vec<Line<'static>> = self.output[start..end].iter()
+        let out_lines: Vec<Line<'static>> = output[start..end].iter()
             .map(|s| Line::from(Span::styled(s.clone(), Style::default().fg(theme.fg))))
             .collect();
+        drop(output); // release lock before widget render
 
         frame.render_widget(
             Paragraph::new(out_lines)
@@ -153,38 +209,5 @@ impl ScreenV2 for ReconScreenV2 {
                     .border_style(Style::default().fg(theme.border))),
             rows[2],
         );
-    }
-}
-
-impl ReconScreenV2 {
-    fn run_query(&mut self) {
-        let q = self.query.trim().to_string();
-        if q.is_empty() {
-            self.output = vec!["(empty query — type something first)".into()];
-            return;
-        }
-        self.running = true;
-        let result = match self.tab {
-            ReconTab::Dns      => cyberdeck_intel::recon::dns::run(&q),
-            ReconTab::Whois    => cyberdeck_intel::recon::whois::run(&q),
-            ReconTab::Ip       => cyberdeck_intel::recon::ip::run(&q),
-            ReconTab::Ssl      => cyberdeck_intel::recon::ssl::run(&q),
-            ReconTab::Cve      => cyberdeck_intel::recon::cve::run(&q),
-            ReconTab::Crypto   => cyberdeck_intel::recon::crypto::run(&q),
-            ReconTab::Sanctions => cyberdeck_intel::recon::sanctions::run(&q),
-        };
-        self.running = false;
-        match result {
-            Ok(body) => {
-                self.output = body.lines().map(str::to_string).collect();
-                if self.output.is_empty() { self.output = vec!["(no output)".into()]; }
-            }
-            Err(e) => { self.output = vec![format!("error: {e}")]; }
-        }
-        // Cap buffer
-        if self.output.len() > OUTPUT_CAP {
-            self.output.drain(0..self.output.len() - OUTPUT_CAP);
-        }
-        self.scroll = 0;
     }
 }

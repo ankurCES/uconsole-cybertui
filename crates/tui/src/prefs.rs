@@ -24,6 +24,14 @@ use serde::{Deserialize, Serialize};
 use crate::keymap::Keymap;
 use crate::theme::ThemeName;
 
+/// A user-saved LoRa node endpoint (IP + optional human label).
+/// Stored in `Prefs::lora_nodes` so node addresses survive restarts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SavedLoraNode {
+    pub ip: String,
+    pub label: Option<String>,
+}
+
 /// Imperial vs Metric for weather display. Stored as a kebab-case string
 /// in the prefs file so future formats (e.g. `"scientific"`) can be added
 /// without a versioned migration.
@@ -96,6 +104,12 @@ pub struct Prefs {
     /// Older prefs files without this field load as empty.
     #[serde(default)]
     pub keymap: Keymap,
+
+    /// User-saved LoRa node IP endpoints. Managed from the LoRa screen
+    /// (add/delete). Empty on a fresh install; older prefs files without
+    /// this field load as empty via `#[serde(default)]`.
+    #[serde(default)]
+    pub lora_nodes: Vec<SavedLoraNode>,
 }
 
 fn default_true() -> bool {
@@ -115,6 +129,7 @@ impl Default for Prefs {
             traffic_overlay: true,
             show_weather_panel: true,
             keymap: Keymap::default(),
+            lora_nodes: vec![],
         }
     }
 }
@@ -237,6 +252,9 @@ mod tests {
             traffic_overlay: false,
             show_weather_panel: false,
             keymap: Keymap::default(),
+            lora_nodes: vec![
+                SavedLoraNode { ip: "192.168.1.10".to_string(), label: Some("node-a".to_string()) },
+            ],
         };
         original.save_to(&path).expect("save");
         let loaded = Prefs::load_from(&path);
@@ -250,6 +268,7 @@ mod tests {
         assert_eq!(loaded.traffic_overlay, original.traffic_overlay);
         assert_eq!(loaded.show_weather_panel, original.show_weather_panel);
         assert_eq!(loaded.keymap, original.keymap);
+        assert_eq!(loaded.lora_nodes, original.lora_nodes);
     }
 
     #[test]
@@ -272,6 +291,7 @@ mod tests {
             traffic_overlay: true,
             show_weather_panel: true,
             keymap: km,
+            lora_nodes: vec![],
         };
         original.save_to(&path).expect("save");
         let loaded = Prefs::load_from(&path);

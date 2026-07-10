@@ -7,8 +7,8 @@ use chrono::Local;
 use crossterm::event::{self, Event};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::Style;
-use ratatui::text::Span;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 use tokio::sync::mpsc;
@@ -134,18 +134,59 @@ fn draw_v2(
         hint_row,
     );
 
-    // Status/clock bar
-    let clock = state.ui.clock.format("%H:%M:%S").to_string();
-    let status = state.ui.status_msg.as_deref().unwrap_or("");
-    let bar = if status.is_empty() {
-        clock
-    } else {
-        format!("{clock}  {status}")
-    };
-    f.render_widget(
-        Paragraph::new(Span::raw(bar)).style(Style::default().fg(dim)),
-        status_row,
-    );
+    // Status/clock bar — metrics left, clock right
+    {
+        let clock_str = state.ui.clock.format("%H:%M:%S").to_string();
+        let mut spans: Vec<Span> = Vec::new();
+
+        if let Ok(ssid) = state.live.active_ssid.try_read() {
+            if let Some(name) = ssid.as_ref() {
+                if !spans.is_empty() { spans.push(Span::raw("  ")); }
+                spans.push(Span::styled(format!("▂▄▆█ {name}"), Style::default().fg(Color::Green)));
+            }
+        }
+
+        if let Ok(batt) = state.live.battery.try_read() {
+            if let Some(b) = batt.as_ref() {
+                if !spans.is_empty() { spans.push(Span::raw("  ")); }
+                let c = if b.capacity > 50 { Color::Green } else if b.capacity > 20 { Color::Yellow } else { Color::Red };
+                spans.push(Span::styled(format!("⚡ {}%", b.capacity), Style::default().fg(c)));
+            }
+        }
+
+        if let Ok(info) = state.live.info.try_read() {
+            if !spans.is_empty() { spans.push(Span::raw("  ")); }
+            let cpu_pct = ((info.loadavg.0 / info.cpu_count.max(1) as f64) * 100.0).min(100.0) as u8;
+            let cc = if cpu_pct < 50 { Color::Green } else if cpu_pct < 80 { Color::Yellow } else { Color::Red };
+            spans.push(Span::styled(format!("CPU {cpu_pct}%"), Style::default().fg(cc)));
+
+            let used_kb = info.memory.total_kb.saturating_sub(info.memory.available_kb);
+            let mem_str = if used_kb >= 1_048_576 {
+                format!("{:.1}G", used_kb as f64 / 1_048_576.0)
+            } else {
+                format!("{}M", used_kb / 1024)
+            };
+            let mc = if info.memory.used_pct < 60.0 { Color::Green } else if info.memory.used_pct < 85.0 { Color::Yellow } else { Color::Red };
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(format!("MEM {mem_str}"), Style::default().fg(mc)));
+        }
+
+        if let Some(msg) = state.ui.status_msg.as_deref() {
+            if !spans.is_empty() { spans.push(Span::raw("  ")); }
+            spans.push(Span::styled(msg.to_owned(), Style::default().fg(dim)));
+        }
+
+        let status_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(8)])
+            .split(status_row);
+
+        f.render_widget(Paragraph::new(Line::from(spans)), status_chunks[0]);
+        f.render_widget(
+            Paragraph::new(Span::raw(clock_str)).style(Style::default().fg(dim)),
+            status_chunks[1],
+        );
+    }
 
     // Modal overlay — rendered last so it sits on top.
     if let Some(modal) = state.ui.modal.as_ref() {
@@ -170,6 +211,7 @@ fn build_registry() -> ScreenRegistry {
         power_v2::PowerScreenV2,
         processes_v2::ProcessesScreenV2,
         recon_v2::ReconScreenV2,
+        screensaver_v2::ScreensaverScreen,
         services_v2::ServicesScreenV2,
         settings_v2::SettingsScreenV2,
         storage_v2::StorageScreenV2,
@@ -179,6 +221,7 @@ fn build_registry() -> ScreenRegistry {
 
     let mut r = ScreenRegistry::new();
     r.register(Box::new(MainMenuScreen::default()));
+    r.register(Box::new(ScreensaverScreen::default()));
     r.register(Box::new(SubMenuScreen::default()));
     r.register(Box::new(SystemScreenV2::default()));
     r.register(Box::new(NetworkScreenV2::default()));
@@ -207,6 +250,23 @@ fn apply_action(action: Action, state: &mut AppState, tx: &mpsc::Sender<Action>)
             state.ui.theme = Theme::by_name(name);
             state.prefs.theme = name;
             state.prefs.save();
+        }
+        Action::LoraNodeAdd(raw) => {
+            let mut parts = raw.trim().splitn(2, ' ');
+            let ip = parts.next().unwrap_or("").trim().to_string();
+            if ip.is_empty() { return; }
+            let label = parts.next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            state.prefs.lora_nodes.push(crate::prefs::SavedLoraNode { ip, label });
+            state.prefs.save();
+        }
+        Action::LoraNodeDelete(idx) => {
+            if idx < state.prefs.lora_nodes.len() {
+                state.prefs.lora_nodes.remove(idx);
+                state.prefs.save();
+            }
         }
         Action::Run(ra) => {
             let tx2 = tx.clone();

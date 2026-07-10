@@ -44,6 +44,7 @@ pub mod logs_v2;
 pub mod display_v2;
 pub mod audio_v2;
 pub mod editor_v2;
+pub mod screensaver_v2;
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;

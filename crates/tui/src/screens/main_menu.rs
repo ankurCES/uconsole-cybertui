@@ -1,3 +1,5 @@
+use std::cell::Cell;
+
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::Style,
@@ -7,11 +9,9 @@ use ratatui::{
 };
 
 use crate::app::screen::{ScreenId, ScreenV2, Zone};
-use crate::modal::QuitConfirmModal;
 use crate::nav::event::{Consumed, NavEvent};
 use crate::nav::UiContext;
 
-const COLS: usize = 5;
 const CELL_H: u16 = 4;
 
 static ITEMS: &[ScreenId] = &[
@@ -36,11 +36,36 @@ static ITEMS: &[ScreenId] = &[
 
 pub struct MainMenuScreen {
     cursor: usize,
+    scroll_offset: usize,
+    // ponytail: Cell for render→nav cache; render is &self per trait contract
+    cols: Cell<usize>,
+    visible_rows: Cell<usize>,
 }
 
 impl Default for MainMenuScreen {
     fn default() -> Self {
-        Self { cursor: 0 }
+        Self {
+            cursor: 0,
+            scroll_offset: 0,
+            cols: Cell::new(5),
+            visible_rows: Cell::new(3),
+        }
+    }
+}
+
+fn cols_for_width(inner_width: u16) -> usize {
+    ((inner_width as usize) / 15).clamp(2, 6)
+}
+
+impl MainMenuScreen {
+    fn clamp_scroll(&mut self) {
+        let cursor_row = self.cursor / self.cols.get();
+        let visible = self.visible_rows.get().max(1);
+        if cursor_row < self.scroll_offset {
+            self.scroll_offset = cursor_row;
+        } else if cursor_row >= self.scroll_offset + visible {
+            self.scroll_offset = cursor_row + 1 - visible;
+        }
     }
 }
 
@@ -50,30 +75,35 @@ impl ScreenV2 for MainMenuScreen {
     }
 
     fn on_nav(&mut self, event: NavEvent, ctx: &mut UiContext<'_>) -> Consumed {
+        let cols = self.cols.get();
         let total = ITEMS.len();
-        let rows = (total + COLS - 1) / COLS;
-        let col = self.cursor % COLS;
-        let row = self.cursor / COLS;
+        let rows = (total + cols - 1) / cols;
+        let col = self.cursor % cols;
+        let row = self.cursor / cols;
 
         match event {
             NavEvent::Right => {
                 self.cursor = (self.cursor + 1) % total;
+                self.clamp_scroll();
                 Consumed::Yes
             }
             NavEvent::Left => {
                 self.cursor = (self.cursor + total - 1) % total;
+                self.clamp_scroll();
                 Consumed::Yes
             }
             NavEvent::Down => {
                 let next_row = (row + 1) % rows;
-                let candidate = next_row * COLS + col;
+                let candidate = next_row * cols + col;
                 self.cursor = if candidate < total { candidate } else { col.min(total - 1) };
+                self.clamp_scroll();
                 Consumed::Yes
             }
             NavEvent::Up => {
                 let prev_row = (row + rows - 1) % rows;
-                let candidate = prev_row * COLS + col;
+                let candidate = prev_row * cols + col;
                 self.cursor = if candidate < total { candidate } else { total - 1 };
+                self.clamp_scroll();
                 Consumed::Yes
             }
             NavEvent::Confirm => {
@@ -81,7 +111,7 @@ impl ScreenV2 for MainMenuScreen {
                 Consumed::Yes
             }
             NavEvent::Back => {
-                ctx.open_modal(Box::new(QuitConfirmModal));
+                ctx.navigate_to(ScreenId::Screensaver);
                 Consumed::Yes
             }
             _ => Consumed::No,
@@ -108,11 +138,33 @@ impl ScreenV2 for MainMenuScreen {
         let inner = block.inner(chunks[1]);
         frame.render_widget(block, chunks[1]);
 
-        let cell_w = inner.width / COLS as u16;
+        let cols = cols_for_width(inner.width);
+        let cell_w = inner.width / cols as u16;
+        let visible_rows = (inner.height / CELL_H) as usize;
+        self.cols.set(cols);
+        self.visible_rows.set(visible_rows);
+
+        let total = ITEMS.len();
+        let total_rows = (total + cols - 1) / cols;
+        let scroll = self.scroll_offset;
+
+        if scroll > 0 && inner.height > 0 {
+            let x = inner.x + inner.width / 2;
+            frame.render_widget(Paragraph::new("▲"), Rect { x, y: inner.y, width: 1, height: 1 });
+        }
+        if scroll + visible_rows < total_rows && inner.height > 0 {
+            let x = inner.x + inner.width / 2;
+            let y = inner.y + inner.height.saturating_sub(1);
+            frame.render_widget(Paragraph::new("▼"), Rect { x, y, width: 1, height: 1 });
+        }
 
         for (i, &id) in ITEMS.iter().enumerate() {
-            let col = (i % COLS) as u16;
-            let row = (i / COLS) as u16;
+            let grid_row = i / cols;
+            if grid_row < scroll || grid_row >= scroll + visible_rows {
+                continue;
+            }
+            let col = (i % cols) as u16;
+            let row = (grid_row - scroll) as u16;
             let x = inner.x + col * cell_w;
             let y = inner.y + row * CELL_H;
 
@@ -136,19 +188,17 @@ impl ScreenV2 for MainMenuScreen {
             };
 
             if cell_inner.height >= 1 {
-                let glyph_rect = Rect { height: 1, ..cell_inner };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(id.glyph(), text_style)))
                         .alignment(Alignment::Center),
-                    glyph_rect,
+                    Rect { height: 1, ..cell_inner },
                 );
             }
             if cell_inner.height >= 2 {
-                let label_rect = Rect { y: cell_inner.y + 1, height: 1, ..cell_inner };
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(id.label(), text_style)))
                         .alignment(Alignment::Center),
-                    label_rect,
+                    Rect { y: cell_inner.y + 1, height: 1, ..cell_inner },
                 );
             }
         }
@@ -159,7 +209,7 @@ impl ScreenV2 for MainMenuScreen {
     }
 
     fn hint(&self) -> &str {
-        "Enter select  Esc back"
+        "▲▼◀▶ move  A select  B back"
     }
 }
 
@@ -167,46 +217,98 @@ impl ScreenV2 for MainMenuScreen {
 mod tests {
     use super::*;
 
+    fn nav_right(m: &mut MainMenuScreen) {
+        let total = ITEMS.len();
+        m.cursor = (m.cursor + 1) % total;
+        m.clamp_scroll();
+    }
+    fn nav_left(m: &mut MainMenuScreen) {
+        let total = ITEMS.len();
+        m.cursor = (m.cursor + total - 1) % total;
+        m.clamp_scroll();
+    }
+    fn nav_down(m: &mut MainMenuScreen) {
+        let cols = m.cols.get();
+        let total = ITEMS.len();
+        let rows = (total + cols - 1) / cols;
+        let col = m.cursor % cols;
+        let row = m.cursor / cols;
+        let next_row = (row + 1) % rows;
+        let candidate = next_row * cols + col;
+        m.cursor = if candidate < total { candidate } else { col.min(total - 1) };
+        m.clamp_scroll();
+    }
+    fn nav_up(m: &mut MainMenuScreen) {
+        let cols = m.cols.get();
+        let total = ITEMS.len();
+        let rows = (total + cols - 1) / cols;
+        let col = m.cursor % cols;
+        let row = m.cursor / cols;
+        let prev_row = (row + rows - 1) % rows;
+        let candidate = prev_row * cols + col;
+        m.cursor = if candidate < total { candidate } else { total - 1 };
+        m.clamp_scroll();
+    }
+
     #[test]
     fn right_wraps_to_start() {
-        let mut m = MainMenuScreen { cursor: ITEMS.len() - 1 };
-        // simulate Right: (total-1 + 1) % total == 0
-        m.cursor = (m.cursor + 1) % ITEMS.len();
+        let mut m = MainMenuScreen { cursor: ITEMS.len() - 1, ..Default::default() };
+        nav_right(&mut m);
         assert_eq!(m.cursor, 0);
     }
 
     #[test]
     fn left_wraps_to_end() {
-        let mut m = MainMenuScreen { cursor: 0 };
-        m.cursor = (m.cursor + ITEMS.len() - 1) % ITEMS.len();
+        let mut m = MainMenuScreen::default();
+        nav_left(&mut m);
         assert_eq!(m.cursor, ITEMS.len() - 1);
     }
 
     #[test]
     fn down_moves_to_next_row() {
-        let mut m = MainMenuScreen { cursor: 0 };
-        // col=0, row=0 → next_row=1, candidate=5
-        let total = ITEMS.len();
-        let rows = (total + COLS - 1) / COLS;
-        let col = m.cursor % COLS;
-        let row = m.cursor / COLS;
-        let next_row = (row + 1) % rows;
-        let candidate = next_row * COLS + col;
-        m.cursor = if candidate < total { candidate } else { col.min(total - 1) };
-        assert_eq!(m.cursor, COLS);
+        let mut m = MainMenuScreen::default(); // cols=5
+        nav_down(&mut m);
+        assert_eq!(m.cursor, 5);
     }
 
     #[test]
     fn up_from_row0_wraps_to_last_row() {
+        let mut m = MainMenuScreen::default(); // cols=5, cursor=0
+        nav_up(&mut m);
+        let cols = m.cols.get();
         let total = ITEMS.len();
-        let rows = (total + COLS - 1) / COLS;
-        let mut m = MainMenuScreen { cursor: 0 }; // col=0, row=0
-        let col = m.cursor % COLS;
-        let row = m.cursor / COLS;
-        let prev_row = (row + rows - 1) % rows;
-        let candidate = prev_row * COLS + col;
-        m.cursor = if candidate < total { candidate } else { total - 1 };
-        // col=0, last row = rows-1=3 → candidate = 15 (which is Logs, index 15 < 17)
-        assert_eq!(m.cursor, (rows - 1) * COLS);
+        let rows = (total + cols - 1) / cols;
+        assert_eq!(m.cursor, (rows - 1) * cols);
+    }
+
+    #[test]
+    fn cols_for_width_bounds() {
+        assert_eq!(cols_for_width(80), 5);  // 78/15=5
+        assert_eq!(cols_for_width(40), 2);  // 38/15=2
+        assert_eq!(cols_for_width(120), 6); // 118/15=7 → capped at 6
+        assert_eq!(cols_for_width(10), 2);  // 8/15=0 → clamped to 2
+    }
+
+    #[test]
+    fn scroll_clamps_down_on_cursor_advance() {
+        let mut m = MainMenuScreen {
+            visible_rows: Cell::new(1),
+            ..Default::default()
+        };
+        // cursor starts at row 0, visible_rows=1 → only row 0 visible
+        nav_down(&mut m); // cursor moves to row 1
+        assert_eq!(m.scroll_offset, 1);
+    }
+
+    #[test]
+    fn scroll_clamps_up_on_cursor_retreat() {
+        let mut m = MainMenuScreen {
+            cursor: 5, // row 1 with cols=5
+            scroll_offset: 1,
+            visible_rows: Cell::new(1),
+            ..Default::default()
+        };
+        nav_up(&mut m); // cursor moves to row 0
+        assert_eq!(m.scroll_offset, 0);
     }
 }

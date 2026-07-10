@@ -121,6 +121,12 @@ pub enum Action {
     /// S8 — Apply a new theme immediately (settings_v2 theme picker).
     /// Handled in run_v2: updates UiState::theme + Prefs::theme + saves prefs.
     SetTheme(crate::theme::ThemeName),
+    /// S15 — LoRa saved-node management. `LoraNodeAdd` carries "ip [label]"
+    /// (space-delimited; label is optional). `LoraNodeDelete` carries the
+    /// index into `prefs.lora_nodes`. Both are handled in `apply_action`
+    /// which mutates `state.prefs` and calls `save()`.
+    LoraNodeAdd(String),
+    LoraNodeDelete(usize),
 }
 
 #[derive(Debug, Clone)]

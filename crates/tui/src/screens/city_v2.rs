@@ -81,6 +81,17 @@ impl ScreenV2 for CityScreenV2 {
             NavEvent::Right => { self.pan( PAN_STEP, 0.0); Consumed::Yes }
             NavEvent::Char('+') | NavEvent::Char('=') => { self.zoom(ZOOM_STEP); Consumed::Yes }
             NavEvent::Char('-') | NavEvent::Char('_') => { self.zoom(1.0 / ZOOM_STEP); Consumed::Yes }
+            // Manual refresh: re-trigger geo + weather + roads fetch.
+            NavEvent::Char('r') => {
+                let city_loc     = ctx.live.city_loc.clone();
+                let city_weather = ctx.live.city_weather.clone();
+                let city_roads   = ctx.live.city_roads.clone();
+                let tx           = ctx.tx.clone();
+                tokio::spawn(async move {
+                    crate::app::live_data::refresh_city(city_loc, city_weather, city_roads, tx).await;
+                });
+                Consumed::Yes
+            }
             NavEvent::Back => { ctx.go_back(); Consumed::Yes }
             _ => Consumed::No,
         }
@@ -102,10 +113,14 @@ impl ScreenV2 for CityScreenV2 {
         let w = map_inner.width.saturating_sub(2);
         let h = map_inner.height.saturating_sub(2);
 
+        // Prefer live Overpass roads; fall back to bundled city data.
+        let live_roads = ctx.live.city_roads.try_read().ok().and_then(|g| g.clone());
         let map_lines: Vec<Line<'static>> = if w > 0 && h > 0 {
             let vp = Viewport::new(self.viewport_bbox, w, h);
             let mut grid = BrailleGrid::new(w, h);
-            draw_roads(&mut grid, &vp, &self.roads.roads);
+            let roads: &[crate::screens::city::roads::Polyline] =
+                live_roads.as_deref().unwrap_or(&self.roads.roads);
+            draw_roads(&mut grid, &vp, roads);
             grid.to_lines()
         } else {
             vec![Line::from("")]
@@ -124,14 +139,18 @@ impl ScreenV2 for CityScreenV2 {
         frame.render_widget(map_para, map_inner);
 
         // ── Right: weather ────────────────────────────────────────────────────
-        let weather_lines: Vec<Line<'static>> = if let Ok(w) = ctx.live.city_weather.try_read() {
-            if let Some(wx) = w.as_ref() {
-                build_weather_lines(wx, theme)
-            } else {
-                vec![Line::from(Span::styled("(fetching weather…)", Style::default().fg(theme.dim)))]
-            }
-        } else {
-            vec![Line::from(Span::styled("(weather unavailable)", Style::default().fg(theme.dim)))]
+        let weather_lines: Vec<Line<'static>> = match ctx.live.city_weather.try_read() {
+            Ok(g) => match g.as_ref() {
+                Some(wx) => build_weather_lines(wx, theme),
+                None => vec![Line::from(Span::styled(
+                    "(fetching weather…  press r to retry)",
+                    Style::default().fg(theme.dim),
+                ))],
+            },
+            Err(_) => vec![Line::from(Span::styled(
+                "weather unavailable",
+                Style::default().fg(theme.dim),
+            ))],
         };
 
         let weather_para = Paragraph::new(weather_lines)

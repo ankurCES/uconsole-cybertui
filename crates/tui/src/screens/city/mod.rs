@@ -35,6 +35,7 @@
 //!               map spans the full content width.
 
 pub mod geo;
+pub mod overpass;
 pub mod render;
 pub mod roads;
 pub mod traffic;
