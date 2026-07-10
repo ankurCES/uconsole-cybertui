@@ -91,9 +91,10 @@ pub async fn fetch_roads(bbox: [f64; 4]) -> Result<Vec<Polyline>, reqwest::Error
         .build()?;
     let resp: OverpassResp = client
         .post(OVERPASS_URL)
-        .body(query)
+        .form(&[("data", &query)])
         .send()
         .await?
+        .error_for_status()?
         .json()
         .await?;
 
@@ -135,13 +136,17 @@ pub async fn fetch_city_data(bbox: [f64; 4]) -> anyhow::Result<CityData> {
         .user_agent(USER_AGENT)
         .timeout(TIMEOUT)
         .build()?;
-    let resp: OverpassResp = client
+    let http_resp = client
         .post(OVERPASS_URL)
-        .body(query)
+        .form(&[("data", &query)])
         .send()
-        .await?
-        .json()
         .await?;
+    let status = http_resp.status();
+    if !status.is_success() {
+        let body = http_resp.text().await.unwrap_or_default();
+        anyhow::bail!("overpass returned HTTP {status}: {body}");
+    }
+    let resp: OverpassResp = http_resp.json().await?;
 
     let mut data = CityData::default();
 

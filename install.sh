@@ -114,6 +114,7 @@ FORCE_DEV=0
 RADAR_TAGS_PATH="${RADAR_TAGS_PATH:-/var/lib/wifi-radar/tags.json}"
 RADAR_PCAP="${RADAR_PCAP:-}"
 SKIP_MODEL=0
+DEBUG=0
 AI_MODEL_DIR="${AI_MODEL_DIR:-${HOME}/.cyberdeck/models}"
 AI_MODEL_FILE="MiniCPM5-1B-Q4_K_M.gguf"
 AI_MODEL_URL="https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q4_K_M.gguf"
@@ -145,6 +146,7 @@ OPTIONS
   --refuse-sudo        Refuse to escalate; require preset to be non-sudo.
   --skip-deps          Don't install OS-level packages.
   --skip-model         Don't download the AI model (MiniCPM5-1B GGUF).
+  --debug              Show full build/download logs instead of progress bars.
   --uninstall          Reverse the install.
 
 ENV
@@ -181,6 +183,7 @@ while [[ $# -gt 0 ]]; do
         --refuse-sudo) REFUSE_SUDO=1 ;;
         --skip-deps)  SKIP_DEPS=1 ;;
         --skip-model) SKIP_MODEL=1 ;;
+        --debug)      DEBUG=1 ;;
         --uninstall)  DO_UNINSTALL=1 ;;
         --prefix)     INSTALL_PREFIX="$2"; shift ;;
         --bind)       BIND_ADDR="$2"; shift ;;
@@ -217,10 +220,71 @@ die()  { printf '\033[1;31mxx\033[0m %s\n' "$*" >&2; exit 1; }
 confirm() {
     # No-op under -y / --yes. Otherwise prompt on the tty.
     [[ $ASSUME_YES -eq 1 ]] && return 0
+    # When stdin is a pipe (curl | bash), read from /dev/tty so the
+    # user actually sees the prompt instead of silently getting EOF.
+    if [[ ! -t 0 ]]; then
+        if [[ -r /dev/tty ]]; then
+            local prompt="$1" reply
+            read -r -p "$(printf '\033[1;33m??\033[0m %s [Y/n] ' "$prompt")" reply < /dev/tty
+            [[ ! "$reply" =~ ^[Nn]$ ]]
+            return
+        fi
+        # No TTY at all (CI, cron) — default yes
+        return 0
+    fi
     local prompt="$1"
     local reply
-    read -r -p "$(printf '\033[1;33m??\033[0m %s [y/N] ' "$prompt")" reply
-    [[ "$reply" =~ ^[Yy]$ ]]
+    read -r -p "$(printf '\033[1;33m??\033[0m %s [Y/n] ' "$prompt")" reply
+    [[ ! "$reply" =~ ^[Nn]$ ]]
+}
+
+# ---------- progress helpers ----------
+INSTALL_LOG="${TMPDIR:-/tmp}/cyberdeck-install-$$.log"
+: > "$INSTALL_LOG"
+STEP_CUR=0
+STEP_TOTAL=0
+
+step_init() { STEP_TOTAL="$1"; STEP_CUR=0; }
+step_label() { printf '[%d/%d]' "$STEP_CUR" "$STEP_TOTAL"; }
+
+# Run a command with a spinner, capturing output to the install log.
+# In --debug mode, show full output inline instead.
+# Usage: run_quiet "label text" command arg1 arg2 ...
+run_quiet() {
+    local label="$1"; shift
+    STEP_CUR=$((STEP_CUR + 1))
+    local pfx
+    pfx="$(step_label)"
+    if [[ $DEBUG -eq 1 ]]; then
+        log "$pfx $label"
+        "$@" 2>&1 | tee -a "$INSTALL_LOG"
+        return "${PIPESTATUS[0]}"
+    fi
+    printf '\r\033[1;34m==>\033[0m %s %s ' "$pfx" "$label"
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    "$@" >> "$INSTALL_LOG" 2>&1 &
+    local pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        printf '\r\033[1;34m==>\033[0m %s %s \033[1;36m%s\033[0m' "$pfx" "$label" "${spin:i++%${#spin}:1}"
+        sleep 0.1
+    done
+    wait "$pid"
+    local rc=$?
+    if [[ $rc -eq 0 ]]; then
+        printf '\r\033[1;32m ✓\033[0m %s %s\033[K\n' "$pfx" "$label"
+    else
+        printf '\r\033[1;31m ✗\033[0m %s %s  (exit %d)\033[K\n' "$pfx" "$label" "$rc"
+        warn "Last 10 lines from $INSTALL_LOG:"
+        tail -10 "$INSTALL_LOG" >&2
+        return $rc
+    fi
+}
+
+# Like log() but with step counter prefix. For non-command steps.
+step_log() {
+    STEP_CUR=$((STEP_CUR + 1))
+    log "$(step_label) $*"
 }
 
 # ---------- 0a. distro + package install ----------
@@ -340,32 +404,29 @@ install_deps() {
             if ! command -v apt-get >/dev/null 2>&1; then
                 die "apt-get not found on a Debian-family distro; install packages by hand."
             fi
-            log "Installing packages via apt-get: ${APT_PKGS[*]}"
             if [[ $EUID -ne 0 ]]; then
-                sudo apt-get update
-                sudo apt-get install -y "${APT_PKGS[@]}"
+                run_quiet "Updating package index" sudo apt-get update
+                run_quiet "Installing system packages (apt)" sudo apt-get install -y "${APT_PKGS[@]}"
             else
-                apt-get update
-                apt-get install -y "${APT_PKGS[@]}"
+                run_quiet "Updating package index" apt-get update
+                run_quiet "Installing system packages (apt)" apt-get install -y "${APT_PKGS[@]}"
             fi
             ;;
         fedora|rhel|centos|rocky|alma|nobara)
             if ! command -v dnf >/dev/null 2>&1; then
                 die "dnf not found on a Fedora-family distro; install packages by hand."
             fi
-            log "Installing packages via dnf: ${DNF_PKGS[*]}"
             local cmd=(dnf install -y)
             [[ $EUID -ne 0 ]] && cmd=(sudo dnf install -y)
-            "${cmd[@]}" "${DNF_PKGS[@]}"
+            run_quiet "Installing system packages (dnf)" "${cmd[@]}" "${DNF_PKGS[@]}"
             ;;
         arch|manjaro|endeavouros|garuda|archarm)
             if ! command -v pacman >/dev/null 2>&1; then
                 die "pacman not found on an Arch-family distro; install packages by hand."
             fi
-            log "Installing packages via pacman: ${PACMAN_PKGS[*]}"
             local cmd=(pacman -Syu --noconfirm --needed)
             [[ $EUID -ne 0 ]] && cmd=(sudo pacman -Syu --noconfirm --needed)
-            "${cmd[@]}" "${PACMAN_PKGS[@]}"
+            run_quiet "Installing system packages (pacman)" "${cmd[@]}" "${PACMAN_PKGS[@]}"
             ;;
         *)
             warn "Unknown distro '$distro'. The TUI shells out to:"
@@ -457,39 +518,38 @@ install_llama_server() {
     done
 
     if [[ -d "$src_dir/.git" ]]; then
-        log "Updating existing llama.cpp source…"
-        ( cd "$src_dir" && git pull --ff-only 2>/dev/null || true )
+        run_quiet "Updating llama.cpp source" bash -c "cd '$src_dir' && git pull --ff-only 2>/dev/null || true"
     else
-        log "Cloning llama.cpp…"
         mkdir -p "$build_dir"
-        git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$src_dir"
+        run_quiet "Cloning llama.cpp" git clone --depth 1 https://github.com/ggerganov/llama.cpp.git "$src_dir"
     fi
 
-    log "Building llama-server (release, CPU-only)…"
-    cmake -S "$src_dir" -B "$src_dir/build" \
+    run_quiet "Configuring llama-server (cmake)" cmake -S "$src_dir" -B "$src_dir/build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_CUDA=OFF \
         -DGGML_METAL=OFF \
-        -DBUILD_SHARED_LIBS=OFF 2>&1 | tail -5
-    cmake --build "$src_dir/build" --target llama-server -j "$(nproc 2>/dev/null || echo 2)" 2>&1 | tail -5
+        -DBUILD_SHARED_LIBS=OFF
+
+    run_quiet "Building llama-server (release, CPU-only)" \
+        cmake --build "$src_dir/build" --target llama-server -j "$(nproc 2>/dev/null || echo 2)"
 
     local server_bin="$src_dir/build/bin/llama-server"
     if [[ ! -x "$server_bin" ]]; then
         server_bin="$(find "$src_dir/build" -name llama-server -type f -executable 2>/dev/null | head -1)"
     fi
-    [[ -x "$server_bin" ]] || die "llama-server binary not found after build. Check cmake output above."
+    [[ -x "$server_bin" ]] || die "llama-server binary not found after build. Check $INSTALL_LOG"
 
-    log "Installing llama-server to ${LLAMA_INSTALL_PREFIX}/bin/"
     if [[ $EUID -eq 0 ]]; then
-        install -m 0755 "$server_bin" "${LLAMA_INSTALL_PREFIX}/bin/llama-server"
+        run_quiet "Installing llama-server to ${LLAMA_INSTALL_PREFIX}/bin/" \
+            install -m 0755 "$server_bin" "${LLAMA_INSTALL_PREFIX}/bin/llama-server"
     else
-        sudo install -m 0755 "$server_bin" "${LLAMA_INSTALL_PREFIX}/bin/llama-server"
+        run_quiet "Installing llama-server to ${LLAMA_INSTALL_PREFIX}/bin/" \
+            sudo install -m 0755 "$server_bin" "${LLAMA_INSTALL_PREFIX}/bin/llama-server"
     fi
-    log "llama-server installed: ${LLAMA_INSTALL_PREFIX}/bin/llama-server"
 }
 
 if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
-    if command -v llama-server >/dev/null 2>&1; then
+    if command -v llama-server >/dev/null 2>&1 && llama-server --version >/dev/null 2>&1; then
         log "llama-server found: $(which llama-server)"
     else
         log "llama-server not found — building from source…"
@@ -510,10 +570,11 @@ fi
 if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
     MODEL_DEST="${AI_MODEL_DIR}/${AI_MODEL_FILE}"
     if [[ -f "$MODEL_DEST" ]]; then
-        log "AI model already exists: $MODEL_DEST"
+        step_log "AI model already cached: $MODEL_DEST"
     else
-        log "Downloading AI model: MiniCPM5-1B Q4_K_M (~688 MB)"
-        log "  → $MODEL_DEST"
+        STEP_CUR=$((STEP_CUR + 1))
+        pfx="$(step_label)"
+        log "$pfx Downloading AI model: MiniCPM5-1B Q4_K_M (~688 MB)"
         mkdir -p "$AI_MODEL_DIR"
         if command -v curl >/dev/null 2>&1; then
             curl -L --progress-bar -o "${MODEL_DEST}.part" "$AI_MODEL_URL" \
@@ -526,7 +587,7 @@ if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
             warn "Download manually: $AI_MODEL_URL → $MODEL_DEST"
         fi
         if [[ -f "$MODEL_DEST" ]]; then
-            log "AI model downloaded: $(du -h "$MODEL_DEST" | cut -f1) at $MODEL_DEST"
+            printf '\033[1;32m ✓\033[0m %s AI model: %s\n' "$pfx" "$(du -h "$MODEL_DEST" | cut -f1)"
         fi
     fi
 fi
@@ -587,28 +648,24 @@ NEED_WEB_BUILD=0
 NEED_RADAR_BUILD=0
 [[ $PRESET_RADAR -eq 1 || $PRESET_FULL -eq 1 || $PRESET_BUILD -eq 1 ]] && NEED_RADAR_BUILD=1
 
+# ---------- step counter ----------
+_steps=$((NEED_BUILD + NEED_WEB_BUILD + NEED_RADAR_BUILD))
+if [[ $NEED_MODEL -eq 1 && $SKIP_MODEL -eq 0 && $INSTALL_ONLY -eq 0 ]]; then
+    _steps=$((_steps + 5))  # clone/update + configure + build + install + model download
+fi
+step_init "$_steps"
+[[ $DEBUG -eq 0 && $_steps -gt 0 ]] && log "Full build logs → $INSTALL_LOG  (pass --debug for inline output)"
+
 if [[ $INSTALL_ONLY -eq 0 ]] && [[ $NEED_BUILD -eq 1 || $NEED_WEB_BUILD -eq 1 || $NEED_RADAR_BUILD -eq 1 ]]; then
     ensure_rust
     if [[ $NEED_WEB_BUILD -eq 1 ]]; then
-        log "Building ${WEB_BIN} (release) as $(id -un)…"
-        ( cd "$REPO_DIR" && cargo build --release -p cyberdeck-web )
+        run_quiet "Building ${WEB_BIN} (release)" bash -c "cd '$REPO_DIR' && cargo build --release -p cyberdeck-web"
     fi
     if [[ $NEED_RADAR_BUILD -eq 1 ]]; then
-        log "Building ${RADAR_BIN} (release) as $(id -un)…"
-        ( cd "$REPO_DIR" && cargo build --release -p wifi-radar )
+        run_quiet "Building ${RADAR_BIN} (release)" bash -c "cd '$REPO_DIR' && cargo build --release -p wifi-radar"
     fi
     if [[ $NEED_BUILD -eq 1 ]]; then
-        log "Building ${TUI_BIN} (release)…"
-        # The `http` feature compiles in `reqwest` + the
-        # `HttpLoraTransport` so the LoRa screen can talk to a
-        # Meshtastic node over LAN HTTP. Without it the screen falls
-        # back to the in-process `FakeTransport` (always disconnected)
-        # and shows "not connected" even when the user has typed a
-        # valid node IP. The feature is enabled by default in
-        # `crates/tui/Cargo.toml`; we pass `--features http`
-        # explicitly so an opt-out via `default-features = false`
-        # still gets the transport.
-        ( cd "$REPO_DIR" && cargo build --release -p cyberdeck-tui --features http )
+        run_quiet "Building ${TUI_BIN} (release)" bash -c "cd '$REPO_DIR' && cargo build --release -p cyberdeck-tui --features http"
     fi
 fi
 

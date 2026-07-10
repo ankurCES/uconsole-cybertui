@@ -231,13 +231,18 @@ pub async fn refresh_city(
     tx:           tokio::sync::mpsc::Sender<Action>,
 ) {
     let loc = match crate::screens::city::geo::locate().await {
-        Ok(l) => l,
+        Ok(l) => {
+            *city_loc.write().await = Some(l.clone());
+            l
+        }
         Err(e) => {
-            tracing::debug!("city geo locate failed: {e}");
-            return;
+            tracing::warn!("city geo locate failed: {e}");
+            match city_loc.read().await.clone() {
+                Some(prev) => prev,
+                None => return,
+            }
         }
     };
-    *city_loc.write().await = Some(loc.clone());
     let _ = tx.send(Action::Tick).await;
 
     match crate::screens::city::weather::fetch(&loc).await {
@@ -268,9 +273,12 @@ pub async fn refresh_city(
             if fresh {
                 if let Ok(bytes) = tokio::fs::read(p).await {
                     if let Ok(data) = serde_json::from_slice::<CityData>(&bytes) {
-                        *city_data.write().await = Some(std::sync::Arc::new(data));
-                        let _ = tx.send(Action::Tick).await;
-                        return;
+                        if !data.roads.is_empty() {
+                            *city_data.write().await = Some(std::sync::Arc::new(data));
+                            let _ = tx.send(Action::Tick).await;
+                            return;
+                        }
+                        let _ = tokio::fs::remove_file(p).await;
                     }
                 }
             }

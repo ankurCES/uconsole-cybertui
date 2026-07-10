@@ -666,36 +666,31 @@ impl Live {
                 t.tick().await;
                 // IP → CityLocation. One-shot; the screen debounces by
                 // only enqueuing `CityCtrlRefresh` on focus + manual `r`.
-                let loc_result = crate::screens::city::geo::locate().await;
-                match loc_result {
+                let loc = match crate::screens::city::geo::locate().await {
                     Ok(loc) => {
-                        if tx_city.send(Action::CityResolved(loc)).await.is_err() {
+                        if tx_city.send(Action::CityResolved(loc.clone())).await.is_err() {
+                            return;
+                        }
+                        loc
+                    }
+                    Err(e) => {
+                        tracing::debug!("city::locate failed: {e}");
+                        continue;
+                    }
+                };
+                match crate::screens::city::weather::fetch(&loc).await {
+                    Ok(fr) => {
+                        *is_day_arc.write().await = fr.is_day;
+                        if tx_city
+                            .send(Action::CityWeatherRefreshed(fr.weather))
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }
                     Err(e) => {
-                        tracing::debug!("city::locate failed: {e}");
-                    }
-                }
-                // Weather pull needs a resolved location. If the
-                // geolocator didn't return one this tick (rate-limited,
-                // network down), skip the weather call — the previous
-                // snapshot stays on screen.
-                if let Ok(loc) = crate::screens::city::geo::locate().await {
-                    match crate::screens::city::weather::fetch(&loc).await {
-                        Ok(fr) => {
-                            *is_day_arc.write().await = fr.is_day;
-                            if tx_city
-                                .send(Action::CityWeatherRefreshed(fr.weather))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!("city::weather::fetch failed: {e}");
-                        }
+                        tracing::debug!("city::weather::fetch failed: {e}");
                     }
                 }
             }
