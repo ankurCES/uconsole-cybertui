@@ -32,6 +32,7 @@ pub struct AiMessage {
     pub thinking: String,  // content inside <think>...</think>
     pub content: String,   // answer text
     pub streaming: bool,   // true while tokens are still arriving
+    pub tool_log: Vec<String>, // tool calls executed during this turn
 }
 
 impl AiMessage {

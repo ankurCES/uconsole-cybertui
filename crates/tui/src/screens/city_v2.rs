@@ -1,5 +1,6 @@
 //! City screen v2 — braille road map (left) + weather (right).
 //! Ports state from the existing CityScreen; navigation rewritten for NavEvent.
+use std::cell::Cell;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
@@ -22,8 +23,9 @@ const PAN_STEP: f64   = 0.1;
 
 pub struct CityScreenV2 {
     pub roads:          CityRoads,
-    pub viewport_bbox:  [f64; 4],  // [min_lat, min_lon, max_lat, max_lon]
-    loaded_coords:      Option<(f64, f64)>,
+    // Cell: render() is &self but must snap viewport when live location arrives
+    viewport_bbox:      Cell<[f64; 4]>,
+    loaded_coords:      Cell<Option<(f64, f64)>>,
 }
 
 impl Default for CityScreenV2 {
@@ -31,7 +33,7 @@ impl Default for CityScreenV2 {
         let (_, roads) = CityRoads::load_bundled_or_default("seattle");
         let loc = roads.location();
         let bbox = loc.bbox.unwrap_or(roads.bbox);
-        Self { roads, viewport_bbox: bbox, loaded_coords: None }
+        Self { roads, viewport_bbox: Cell::new(bbox), loaded_coords: Cell::new(None) }
     }
 }
 
@@ -42,28 +44,7 @@ impl ScreenV2 for CityScreenV2 {
     fn hint(&self) -> &str { "▲▼◀▶ pan   +/- zoom   ◀▶ pane   B back" }
 
     fn on_focus(&mut self, ctx: &mut crate::nav::UiContext<'_>) {
-        let loc = match ctx.live.city_loc.try_read().ok().and_then(|g| g.clone()) {
-            Some(l) => l,
-            None => return,
-        };
-        // Skip reload if we already have data for this location (within ~1km).
-        if let Some((lat, lon)) = self.loaded_coords {
-            if (lat - loc.lat).abs() < 0.01 && (lon - loc.lon).abs() < 0.01 {
-                return;
-            }
-        }
-        let slug = loc.name.to_lowercase().replace(' ', "-");
-        let (used_slug, roads) = CityRoads::load_bundled_or_default(&slug);
-        // Use bundled bbox if the city matched; otherwise centre a default span on detected coords.
-        let bbox = if used_slug == slug {
-            roads.bbox
-        } else {
-            let span = 0.05;
-            [loc.lat - span, loc.lon - span, loc.lat + span, loc.lon + span]
-        };
-        self.roads = roads;
-        self.viewport_bbox = bbox;
-        self.loaded_coords = Some((loc.lat, loc.lon));
+        self.sync_location(ctx.live);
     }
 
     fn on_nav(&mut self, event: NavEvent, ctx: &mut UiContext<'_>) -> Consumed {
@@ -99,6 +80,10 @@ impl ScreenV2 for CityScreenV2 {
     }
 
     fn render(&self, frame: &mut Frame, area: Rect, ctx: &UiContext<'_>) {
+        // Snap viewport when live geo-location arrives (on_focus is never called
+        // by the run loop, so this is the only place the viewport gets updated).
+        self.sync_location(ctx.live);
+
         let theme = &ctx.ui.theme;
         let left_focused  = ctx.nav.focus_zone == 0;
         let right_focused = ctx.nav.focus_zone == 1;
@@ -115,8 +100,9 @@ impl ScreenV2 for CityScreenV2 {
         let h = map_inner.height.saturating_sub(2);
 
         let live_data = ctx.live.city_data.try_read().ok().and_then(|g| g.clone());
+        let vp_bbox = self.viewport_bbox.get();
         let map_lines: Vec<Line<'static>> = if w > 0 && h > 0 {
-            let vp = Viewport::new(self.viewport_bbox, w, h);
+            let vp = Viewport::new(vp_bbox, w, h);
             let mut grid = BrailleGrid::new(w, h);
             if let Some(ref cd) = live_data {
                 draw_areas(&mut grid, &vp, &cd.areas);
@@ -168,32 +154,50 @@ impl ScreenV2 for CityScreenV2 {
 }
 
 impl CityScreenV2 {
+    /// Snap viewport + loaded_coords when live geo changes.
+    /// Safe from &self (Cell fields) so render() can call it.
+    fn sync_location(&self, live: &crate::app::live_data::LiveData) {
+        let loc = match live.city_loc.try_read().ok().and_then(|g| g.clone()) {
+            Some(l) => l,
+            None => return,
+        };
+        let needs_update = match self.loaded_coords.get() {
+            Some((lat, lon)) => (lat - loc.lat).abs() >= 0.01 || (lon - loc.lon).abs() >= 0.01,
+            None => true,
+        };
+        if !needs_update { return; }
+        // Match the span used by the Overpass fetch in live_data::refresh_city
+        let span = 0.1;
+        self.viewport_bbox.set([loc.lat - span, loc.lon - span, loc.lat + span, loc.lon + span]);
+        self.loaded_coords.set(Some((loc.lat, loc.lon)));
+    }
+
     fn pan(&mut self, dlon_frac: f64, dlat_frac: f64) {
-        let [min_lat, min_lon, max_lat, max_lon] = self.viewport_bbox;
+        let [min_lat, min_lon, max_lat, max_lon] = self.viewport_bbox.get();
         let lat_span = max_lat - min_lat;
         let lon_span = max_lon - min_lon;
         let new_min_lat = min_lat + dlat_frac * lat_span;
         let new_min_lon = min_lon + dlon_frac * lon_span;
-        self.viewport_bbox = [
+        self.viewport_bbox.set([
             new_min_lat,
             new_min_lon,
             new_min_lat + lat_span,
             new_min_lon + lon_span,
-        ];
+        ]);
     }
 
     fn zoom(&mut self, factor: f64) {
-        let [min_lat, min_lon, max_lat, max_lon] = self.viewport_bbox;
+        let [min_lat, min_lon, max_lat, max_lon] = self.viewport_bbox.get();
         let clat = (min_lat + max_lat) / 2.0;
         let clon = (min_lon + max_lon) / 2.0;
         let new_span = ((max_lat - min_lat) * factor)
             .clamp(MIN_SPAN, MAX_SPAN);
-        self.viewport_bbox = [
+        self.viewport_bbox.set([
             clat - new_span / 2.0,
             clon - new_span / 2.0,
             clat + new_span / 2.0,
             clon + new_span / 2.0,
-        ];
+        ]);
     }
 }
 

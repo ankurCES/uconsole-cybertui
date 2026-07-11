@@ -135,6 +135,7 @@ pub enum Action {
     AiSubmit(String),
     AiToken(String),
     AiThinkToken(String),
+    AiToolLog(String),
     AiDone,
     LlamaReady,
     LlamaDown,

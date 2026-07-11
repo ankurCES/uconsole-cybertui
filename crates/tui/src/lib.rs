@@ -13,6 +13,8 @@ pub mod app;
 pub mod keymap;
 #[cfg(feature = "http")]
 pub mod llm;
+#[cfg(feature = "http")]
+pub mod tools;
 pub mod modal;
 pub mod nav;
 pub mod prefs;

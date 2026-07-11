@@ -147,21 +147,22 @@ impl ScreenV2 for AiScreenV2 {
             return;
         }
 
-        // Build flat line list from all messages
+        // Build flat line list from all messages, word-wrapped to fit
+        let max_w = inner.width as usize;
         let mut lines: Vec<Line<'static>> = Vec::new();
         let code_style  = Style::default().fg(Color::Cyan);
         let think_style = Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC);
         let user_style  = Style::default().fg(theme.accent);
         let dim_style   = Style::default().fg(theme.dim);
+        let tool_style  = Style::default().fg(Color::Yellow);
 
         for msg in msgs_guard.iter() {
             match msg.role {
                 AiRole::User => {
-                    lines.push(Line::from(Span::styled(
-                        format!("You: {}", msg.content),
-                        user_style,
-                    )));
-                    lines.push(Line::from("")); // blank spacer
+                    for wl in wrap_line(&format!("You: {}", msg.content), max_w) {
+                        lines.push(Line::from(Span::styled(wl, user_style)));
+                    }
+                    lines.push(Line::from(""));
                 }
                 AiRole::Assistant => {
                     if self.show_thinking && !msg.thinking.is_empty() {
@@ -170,12 +171,21 @@ impl ScreenV2 for AiScreenV2 {
                             dim_style,
                         )));
                         for tline in msg.thinking.split('\n') {
-                            lines.push(Line::from(Span::styled(
-                                format!("    {}", tline),
-                                think_style,
-                            )));
+                            for wl in wrap_line(&format!("    {}", tline), max_w) {
+                                lines.push(Line::from(Span::styled(wl, think_style)));
+                            }
                         }
-                        lines.push(Line::from("")); // blank spacer
+                        lines.push(Line::from(""));
+                    }
+
+                    // Show tool calls inline
+                    if !msg.tool_log.is_empty() {
+                        for tl in &msg.tool_log {
+                            for wl in wrap_line(&format!("  🔧 {tl}"), max_w) {
+                                lines.push(Line::from(Span::styled(wl, tool_style)));
+                            }
+                        }
+                        lines.push(Line::from(""));
                     }
 
                     let mut in_code = false;
@@ -183,23 +193,25 @@ impl ScreenV2 for AiScreenV2 {
                         if cline.trim_start().starts_with("```") {
                             in_code = !in_code;
                             lines.push(Line::from(Span::styled(
-                                cline.to_string(),
+                                truncate_or_pad(cline, max_w),
                                 dim_style,
                             )));
                         } else if in_code {
                             lines.push(Line::from(Span::styled(
-                                format!("  {cline}"),
+                                truncate_or_pad(&format!("  {cline}"), max_w),
                                 code_style,
                             )));
                         } else {
-                            lines.push(Line::from(cline.to_string()));
+                            for wl in wrap_line(cline, max_w) {
+                                lines.push(Line::from(wl));
+                            }
                         }
                     }
 
                     if msg.streaming {
                         lines.push(Line::from(Span::styled("▌", Style::default().fg(theme.accent))));
                     }
-                    lines.push(Line::from("")); // blank spacer
+                    lines.push(Line::from(""));
                 }
             }
         }
@@ -224,4 +236,45 @@ impl ScreenV2 for AiScreenV2 {
 
         frame.render_widget(List::new(visible_lines), inner);
     }
+}
+
+/// Word-wrap `text` to fit within `max_w` columns. Breaks at spaces
+/// when possible, hard-breaks mid-word when a single word exceeds width.
+fn wrap_line(text: &str, max_w: usize) -> Vec<String> {
+    if max_w == 0 { return vec![String::new()]; }
+    if text.len() <= max_w { return vec![text.to_string()]; }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for word in text.split(' ') {
+        if cur.is_empty() {
+            if word.len() > max_w {
+                // hard-break long word
+                for chunk in word.as_bytes().chunks(max_w) {
+                    out.push(String::from_utf8_lossy(chunk).into_owned());
+                }
+            } else {
+                cur = word.to_string();
+            }
+        } else if cur.len() + 1 + word.len() <= max_w {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut cur));
+            if word.len() > max_w {
+                for chunk in word.as_bytes().chunks(max_w) {
+                    out.push(String::from_utf8_lossy(chunk).into_owned());
+                }
+            } else {
+                cur = word.to_string();
+            }
+        }
+    }
+    if !cur.is_empty() { out.push(cur); }
+    if out.is_empty() { out.push(String::new()); }
+    out
+}
+
+/// Truncate to max_w for code lines (no wrapping — preserves formatting).
+fn truncate_or_pad(s: &str, max_w: usize) -> String {
+    if s.len() <= max_w { s.to_string() } else { format!("{}…", &s[..max_w.saturating_sub(1)]) }
 }

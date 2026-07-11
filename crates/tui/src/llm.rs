@@ -132,6 +132,9 @@ pub fn find_model_path(prefs: &Prefs) -> Option<String> {
 /// POST a chat completion request to llama-server and stream the response
 /// back through the Action channel. `msgs` is a snapshot of the full
 /// conversation history (all messages except the current streaming one).
+///
+/// Supports tool calling: if the model returns tool_calls, we execute them
+/// and re-request with the results (up to MAX_TOOL_ROUNDS to prevent loops).
 pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
     let mut json_msgs = vec![serde_json::json!({
         "role": "system",
@@ -148,37 +151,109 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
         }));
     }
 
-    let body = serde_json::json!({
-        "model": "minicpm5",
-        "messages": json_msgs,
-        "stream": true,
-        "temperature": 0.6,
-        "top_p": 0.95,
-        "max_tokens": 1024,
-        "chat_template_kwargs": { "enable_thinking": true },
-    });
-
+    let tools = crate::tools::tool_definitions();
     let client = reqwest::Client::new();
-    let resp = match client
-        .post(format!("{LLAMA_URL}/v1/chat/completions"))
-        .json(&body)
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("llama-server request failed: {e}");
-            tx.send(Action::AiToken(format!("⚠ Connection failed: {e}"))).await.ok();
-            tx.send(Action::AiDone).await.ok();
-            return;
-        }
-    };
 
-    let mut resp = resp;
+    // Tool-call loop: stream → maybe tool calls → re-request
+    const MAX_TOOL_ROUNDS: usize = 5;
+    for _round in 0..MAX_TOOL_ROUNDS {
+        let body = serde_json::json!({
+            "model": "minicpm5",
+            "messages": json_msgs,
+            "stream": true,
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "max_tokens": 1024,
+            "tools": tools,
+            "chat_template_kwargs": { "enable_thinking": true },
+        });
+
+        let resp = match client
+            .post(format!("{LLAMA_URL}/v1/chat/completions"))
+            .json(&body)
+            .timeout(Duration::from_secs(120))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("llama-server request failed: {e}");
+                tx.send(Action::AiToken(format!("⚠ Connection failed: {e}"))).await.ok();
+                tx.send(Action::AiDone).await.ok();
+                return;
+            }
+        };
+
+        let stream_result = stream_one_response(resp, &tx).await;
+
+        match stream_result {
+            StreamResult::Done => {
+                tx.send(Action::AiDone).await.ok();
+                return;
+            }
+            StreamResult::ToolCalls(calls) => {
+                // Append assistant message with tool_calls
+                json_msgs.push(serde_json::json!({
+                    "role": "assistant",
+                    "tool_calls": calls.iter().map(|tc| serde_json::json!({
+                        "id": tc.id,
+                        "type": "function",
+                        "function": { "name": tc.name, "arguments": tc.arguments }
+                    })).collect::<Vec<_>>(),
+                }));
+
+                // Execute each tool and append results
+                for tc in &calls {
+                    let args: serde_json::Value = serde_json::from_str(&tc.arguments)
+                        .unwrap_or(serde_json::json!({}));
+                    let result = tokio::task::spawn_blocking({
+                        let name = tc.name.clone();
+                        let args = args.clone();
+                        move || crate::tools::execute_tool(&name, &args)
+                    }).await.unwrap_or_else(|_| "tool execution panicked".into());
+
+                    let log = crate::tools::tool_log_line(&tc.name, &args, &result);
+                    tx.send(Action::AiToolLog(log)).await.ok();
+
+                    json_msgs.push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": result,
+                    }));
+                }
+                // Loop back for the model's next response
+            }
+        }
+    }
+
+    tx.send(Action::AiToken("(tool call limit reached)".into())).await.ok();
+    tx.send(Action::AiDone).await.ok();
+}
+
+struct ToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+enum StreamResult {
+    Done,
+    ToolCalls(Vec<ToolCall>),
+}
+
+/// Stream a single response from llama-server. Returns whether the model
+/// finished with content (Done) or wants to call tools (ToolCalls).
+async fn stream_one_response(
+    mut resp: reqwest::Response,
+    tx: &mpsc::Sender<Action>,
+) -> StreamResult {
     let mut sse_buf = String::new();
     let mut in_think = false;
     let mut pending = String::new();
+
+    // Accumulate tool calls across SSE chunks
+    let mut tool_calls: Vec<ToolCall> = Vec::new();
+    let mut finish_reason = String::new();
 
     loop {
         match resp.chunk().await {
@@ -189,28 +264,64 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
                     sse_buf = sse_buf[nl + 1..].to_string();
                     if let Some(data) = line.strip_prefix("data: ") {
                         if data == "[DONE]" {
-                            flush_pending(&mut pending, in_think, &tx).await;
-                            tx.send(Action::AiDone).await.ok();
-                            return;
+                            flush_pending(&mut pending, in_think, tx).await;
+                            if !tool_calls.is_empty() {
+                                return StreamResult::ToolCalls(tool_calls);
+                            }
+                            return StreamResult::Done;
                         }
                         if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
-                            let delta = &v["choices"][0]["delta"];
-                            // --jinja splits thinking into reasoning_content
+                            let choice = &v["choices"][0];
+                            let delta = &choice["delta"];
+
+                            // Check finish_reason
+                            if let Some(fr) = choice["finish_reason"].as_str() {
+                                finish_reason = fr.to_string();
+                            }
+
+                            // reasoning_content (--jinja thinking)
                             if let Some(rc) = delta["reasoning_content"].as_str() {
                                 if !rc.is_empty() {
                                     tx.send(Action::AiThinkToken(rc.to_string())).await.ok();
                                 }
                             }
+
+                            // content tokens
                             if let Some(tok) = delta["content"].as_str() {
                                 if !tok.is_empty() {
-                                    route_token(tok, &mut in_think, &mut pending, &tx).await;
+                                    route_token(tok, &mut in_think, &mut pending, tx).await;
+                                }
+                            }
+
+                            // tool_calls — streamed incrementally
+                            if let Some(tcs) = delta["tool_calls"].as_array() {
+                                for tc_delta in tcs {
+                                    let idx = tc_delta["index"].as_u64().unwrap_or(0) as usize;
+                                    while tool_calls.len() <= idx {
+                                        tool_calls.push(ToolCall {
+                                            id: String::new(),
+                                            name: String::new(),
+                                            arguments: String::new(),
+                                        });
+                                    }
+                                    if let Some(id) = tc_delta["id"].as_str() {
+                                        tool_calls[idx].id = id.to_string();
+                                    }
+                                    if let Some(func) = tc_delta["function"].as_object() {
+                                        if let Some(name) = func.get("name").and_then(|n| n.as_str()) {
+                                            tool_calls[idx].name = name.to_string();
+                                        }
+                                        if let Some(args) = func.get("arguments").and_then(|a| a.as_str()) {
+                                            tool_calls[idx].arguments.push_str(args);
+                                        }
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-            Ok(None) => break, // EOF
+            Ok(None) => break,
             Err(e) => {
                 tracing::warn!("llama-server stream error: {e}");
                 break;
@@ -218,8 +329,19 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
         }
     }
 
-    flush_pending(&mut pending, in_think, &tx).await;
-    tx.send(Action::AiDone).await.ok();
+    flush_pending(&mut pending, in_think, tx).await;
+
+    if !tool_calls.is_empty() || finish_reason == "tool_calls" {
+        // Fill in missing tool call IDs
+        for (i, tc) in tool_calls.iter_mut().enumerate() {
+            if tc.id.is_empty() {
+                tc.id = format!("call_{i}");
+            }
+        }
+        StreamResult::ToolCalls(tool_calls)
+    } else {
+        StreamResult::Done
+    }
 }
 
 async fn flush_pending(pending: &mut String, in_think: bool, tx: &mpsc::Sender<Action>) {

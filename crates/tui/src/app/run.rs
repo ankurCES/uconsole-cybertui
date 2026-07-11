@@ -349,6 +349,14 @@ fn apply_action(action: Action, state: &mut AppState, tx: &mpsc::Sender<Action>)
             }
         }
         #[cfg(feature = "http")]
+        Action::AiToolLog(entry) => {
+            if let Ok(mut msgs) = state.live.ai_messages.try_write() {
+                if let Some(last) = msgs.last_mut() {
+                    last.tool_log.push(entry);
+                }
+            }
+        }
+        #[cfg(feature = "http")]
         Action::AiDone => {
             if let Ok(mut msgs) = state.live.ai_messages.try_write() {
                 if let Some(last) = msgs.last_mut() {
