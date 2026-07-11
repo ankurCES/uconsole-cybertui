@@ -2,7 +2,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::app::action::{Action, RunAction};
-use crate::app::screen::ScreenRegistry;
+use crate::app::screen::{ScreenId, ScreenRegistry};
 use crate::app::state::AppState;
 use crate::keymap::{resolve_keymap, NavAction};
 use crate::modal::{AboutModal, ModalResult, QuitConfirmModal, RunActionModal};
@@ -20,15 +20,18 @@ pub fn dispatch_key(
     tx: &mpsc::Sender<Action>,
 ) -> bool {
     // 1. Hardware remap: uConsole A-button→Enter, B-button→Esc
-    //    Gate: skip when a text-input modal is active so 'a'/'b' reach the buffer.
-    let key = if !state.ui.modal_accepts_text_input() {
+    //    Gate: skip when a text-input modal or the AI chat screen is active
+    //    so letter keys reach the input buffer.
+    let text_input_active = state.ui.modal_accepts_text_input()
+        || state.nav.stack.current() == ScreenId::Ai;
+    let key = if !text_input_active {
         hardware_remap(raw)
     } else {
         raw
     };
 
     // 2. User keymap remap (same gate)
-    let key = if !state.ui.modal_accepts_text_input() {
+    let key = if !text_input_active {
         apply_keymap(key, &state.prefs.keymap)
     } else {
         key

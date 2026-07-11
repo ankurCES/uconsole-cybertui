@@ -60,6 +60,21 @@ Re-running is safe. To remove: `cyberdeck --uninstall`.
 | `CYBERDECK_NO_ANIM=1`   | Static banner, no animation.        |
 | `NO_COLOR=1`            | Disable all ANSI.                   |
 
+## AI model (MiniCPM5-1B)
+
+The installer downloads the MiniCPM5-1B GGUF model automatically, but the
+download can silently produce a corrupt file (partial transfer, CDN error).
+If `llama-server` exits with **"model loading error"**, re-download the model
+manually:
+
+```sh
+rm -f ~/.cyberdeck/models/MiniCPM5-1B-Q4_K_M.gguf
+curl -L -o ~/.cyberdeck/models/MiniCPM5-1B-Q4_K_M.gguf \
+  https://huggingface.co/openbmb/MiniCPM5-1B-GGUF/resolve/main/MiniCPM5-1B-Q4_K_M.gguf
+```
+
+The file should be ~656 MB. Verify with `ls -lh ~/.cyberdeck/models/`.
+
 ## Build from source
 
 Rust 1.80+ (tested on 1.96). No system deps beyond what Debian provides

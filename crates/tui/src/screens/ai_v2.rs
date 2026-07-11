@@ -37,7 +37,7 @@ impl ScreenV2 for AiScreenV2 {
     fn id(&self) -> ScreenId { ScreenId::Ai }
     fn title(&self) -> &str { "AI" }
     fn focusable_zones(&self) -> &[Zone] { &[Zone::Main] }
-    fn hint(&self) -> &str { "▲▼ scroll   Tab thinking   A send   B back" }
+    fn hint(&self) -> &str { "▲▼ scroll   Tab thinking   Enter send   Esc back" }
 
     fn on_nav(&mut self, event: NavEvent, ctx: &mut UiContext<'_>) -> Consumed {
         match event {
