@@ -47,6 +47,7 @@ pub mod editor_v2;
 pub mod screensaver_v2;
 pub mod ai_v2;
 pub mod ai_logs_v2;
+pub mod whatsapp_v2;
 
 use ratatui::layout::Rect;
 use ratatui::text::Line;

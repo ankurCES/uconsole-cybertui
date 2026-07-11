@@ -227,6 +227,7 @@ fn short_label(id: ScreenId) -> &'static str {
         ScreenId::Screensaver => "    ",
         ScreenId::Ai    => "AI",
         ScreenId::AiLogs => "AILg",
+        ScreenId::WhatsApp => "WA",
     }
 }
 
@@ -279,12 +280,12 @@ mod tests {
     fn tab_strip_renders_glyphs_wide() {
         use ratatui::backend::TestBackend;
         use ratatui::Terminal;
-        let backend = TestBackend::new(160, 3);
+        let backend = TestBackend::new(200, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         let app = fresh_app();
         let theme = Theme::by_name(crate::theme::ThemeName::Dark);
         terminal
-            .draw(|f| draw(f, Rect::new(0, 0, 160, 1), &app, None, &theme))
+            .draw(|f| draw(f, Rect::new(0, 0, 200, 1), &app, None, &theme))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
         let mut row = String::new();

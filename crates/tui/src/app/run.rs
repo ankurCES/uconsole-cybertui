@@ -230,6 +230,7 @@ fn build_registry() -> ScreenRegistry {
     use screens::{
         ai_v2::AiScreenV2,
         ai_logs_v2::AiLogsScreen,
+        whatsapp_v2::WhatsAppScreenV2,
         audio_v2::AudioScreenV2,
         bluetooth_v2::BluetoothScreenV2,
         city_v2::CityScreenV2,
@@ -277,6 +278,7 @@ fn build_registry() -> ScreenRegistry {
     r.register(Box::new(EditorScreenV2::default()));
     r.register(Box::new(AiScreenV2::default()));
     r.register(Box::new(AiLogsScreen::default()));
+    r.register(Box::new(WhatsAppScreenV2::default()));
     r
 }
 
@@ -387,6 +389,27 @@ fn apply_action(action: Action, state: &mut AppState, tx: &mpsc::Sender<Action>)
                 crate::app::toast::ToastKind::Error,
                 &format!("AI model failed: {detail}"),
             );
+        }
+        Action::WhatsAppQr(qr) => {
+            if let Ok(mut w) = state.live.wa_qr.try_write() { *w = Some(qr); }
+        }
+        Action::WhatsAppConnected => {
+            if let Ok(mut w) = state.live.wa_connected.try_write() { *w = true; }
+            if let Ok(mut w) = state.live.wa_qr.try_write() { *w = None; }
+        }
+        Action::WhatsAppDisconnected(_reason) => {
+            if let Ok(mut w) = state.live.wa_connected.try_write() { *w = false; }
+        }
+        Action::WhatsAppContacts(contacts) => {
+            if let Ok(mut w) = state.live.wa_contacts.try_write() { *w = contacts; }
+        }
+        Action::WhatsAppMessage { jid, text, from_me, timestamp } => {
+            if let Ok(mut w) = state.live.wa_messages.try_write() {
+                w.push(crate::app::live_data::WaMessage { jid, text, from_me, timestamp });
+            }
+        }
+        Action::WhatsAppSubmit(jid, text) => {
+            crate::screens::whatsapp_v2::send_wa_message(&jid, &text);
         }
         _ => {}
     }

@@ -1,0 +1,12 @@
+{
+  "name": "cyberdeck-whatsapp-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "WhatsApp Web sidecar for cyberdeck-tui. JSON-line protocol over stdin/stdout.",
+  "main": "bridge.mjs",
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.16",
+    "qrcode": "^1.5.4"
+  }
+}

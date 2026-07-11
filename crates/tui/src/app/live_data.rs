@@ -78,8 +78,23 @@ pub struct LiveData {
     /// S19 — set on model load failure; AI screen shows this instead of "loading".
     pub llama_error:  Arc<RwLock<Option<String>>>,
 
+    /// WhatsApp sidecar state.
+    pub wa_qr:        Arc<RwLock<Option<String>>>,
+    pub wa_connected: Arc<RwLock<bool>>,
+    pub wa_contacts:  Arc<RwLock<Vec<(String, String)>>>, // (jid, name)
+    pub wa_messages:  Arc<RwLock<Vec<WaMessage>>>,
+
     /// Abort handles for background refreshers. Dropped on app exit.
     pub _refreshers: Vec<tokio::task::AbortHandle>,
+}
+
+/// One WhatsApp message (inbound or outbound).
+#[derive(Debug, Clone)]
+pub struct WaMessage {
+    pub jid: String,
+    pub text: String,
+    pub from_me: bool,
+    pub timestamp: u64,
 }
 
 impl Default for LiveData {
@@ -125,6 +140,10 @@ impl Default for LiveData {
             ai_messages:     Arc::new(RwLock::new(Vec::new())),
             llama_ready:     Arc::new(RwLock::new(false)),
             llama_error:     Arc::new(RwLock::new(None)),
+            wa_qr:           Arc::new(RwLock::new(None)),
+            wa_connected:    Arc::new(RwLock::new(false)),
+            wa_contacts:     Arc::new(RwLock::new(Vec::new())),
+            wa_messages:     Arc::new(RwLock::new(Vec::new())),
             _refreshers:     Vec::new(),
         }
     }

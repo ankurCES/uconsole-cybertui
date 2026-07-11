@@ -12,6 +12,7 @@ use crate::app::screen::{ScreenId, ScreenV2, Zone};
 use crate::nav::event::{Consumed, NavEvent};
 use crate::nav::UiContext;
 use crate::screens::city::roads::CityRoads;
+use ratatui::style::Color;
 use crate::screens::city::render::{draw_areas, draw_pois, draw_roads, BrailleGrid, Viewport};
 use crate::screens::city::weather::weather_label;
 
@@ -110,6 +111,14 @@ impl ScreenV2 for CityScreenV2 {
                 draw_pois(&mut grid, &vp, &cd.pois);
             } else {
                 draw_roads(&mut grid, &vp, &self.roads.roads);
+            }
+            // GPS marker: draw user's location as a yellow crosshair
+            if let Some((lat, lon)) = self.loaded_coords.get() {
+                let (cx, cy) = vp.project(lat, lon);
+                for d in -2..=2i32 {
+                    grid.set_dot_colored(cx + d, cy, Color::Yellow);
+                    grid.set_dot_colored(cx, cy + d, Color::Yellow);
+                }
             }
             grid.to_lines()
         } else {

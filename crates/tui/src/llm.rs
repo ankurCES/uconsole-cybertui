@@ -5,11 +5,16 @@
 //! async (reqwest + chunk()); the tokio event loop is never blocked.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, RwLock};
+
+/// Set to true after a tools request fails (4xx/5xx) — skips tools on
+/// subsequent requests so a model without tool support still works.
+static TOOLS_DISABLED: AtomicBool = AtomicBool::new(false);
 
 use crate::app::action::Action;
 use crate::app::live_data::{AiMessage, AiRole};
@@ -153,20 +158,24 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
 
     let tools = crate::tools::tool_definitions();
     let client = reqwest::Client::new();
+    let use_tools = !TOOLS_DISABLED.load(Ordering::Relaxed);
 
     // Tool-call loop: stream → maybe tool calls → re-request
     const MAX_TOOL_ROUNDS: usize = 5;
-    for _round in 0..MAX_TOOL_ROUNDS {
-        let body = serde_json::json!({
+    for round in 0..MAX_TOOL_ROUNDS {
+        let mut body = serde_json::json!({
             "model": "minicpm5",
             "messages": json_msgs,
             "stream": true,
             "temperature": 0.6,
             "top_p": 0.95,
             "max_tokens": 1024,
-            "tools": tools,
             "chat_template_kwargs": { "enable_thinking": true },
         });
+        // Only include tools if not disabled by a prior failure
+        if use_tools {
+            body["tools"] = tools.clone();
+        }
 
         let resp = match client
             .post(format!("{LLAMA_URL}/v1/chat/completions"))
@@ -175,7 +184,39 @@ pub async fn stream_chat(msgs: Vec<AiMessage>, tx: mpsc::Sender<Action>) {
             .send()
             .await
         {
-            Ok(r) => r,
+            Ok(r) => {
+                if !r.status().is_success() && use_tools && round == 0 {
+                    // Tools likely caused the error — disable and retry without
+                    tracing::warn!("llama-server returned {} with tools; retrying without", r.status());
+                    TOOLS_DISABLED.store(true, Ordering::Relaxed);
+                    let body_no_tools = serde_json::json!({
+                        "model": "minicpm5",
+                        "messages": json_msgs,
+                        "stream": true,
+                        "temperature": 0.6,
+                        "top_p": 0.95,
+                        "max_tokens": 1024,
+                        "chat_template_kwargs": { "enable_thinking": true },
+                    });
+                    match client
+                        .post(format!("{LLAMA_URL}/v1/chat/completions"))
+                        .json(&body_no_tools)
+                        .timeout(Duration::from_secs(120))
+                        .send()
+                        .await
+                    {
+                        Ok(r2) => r2,
+                        Err(e) => {
+                            tracing::warn!("llama-server retry failed: {e}");
+                            tx.send(Action::AiToken(format!("⚠ Connection failed: {e}"))).await.ok();
+                            tx.send(Action::AiDone).await.ok();
+                            return;
+                        }
+                    }
+                } else {
+                    r
+                }
+            }
             Err(e) => {
                 tracing::warn!("llama-server request failed: {e}");
                 tx.send(Action::AiToken(format!("⚠ Connection failed: {e}"))).await.ok();

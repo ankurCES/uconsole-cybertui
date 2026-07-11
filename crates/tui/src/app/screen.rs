@@ -75,6 +75,8 @@ pub enum ScreenId {
     /// (User / Think / Assistant) as one-line entries; Enter expands the
     /// selected entry into a full-content detail panel below the list.
     AiLogs,
+    /// WhatsApp Web via Node.js sidecar (baileys). QR pairing → contacts → chat.
+    WhatsApp,
 }
 
 impl ScreenId {
@@ -105,6 +107,7 @@ impl ScreenId {
         ScreenId::Recon,
         ScreenId::Ai,
         ScreenId::AiLogs,
+        ScreenId::WhatsApp,
     ];
 
     pub fn label(self) -> &'static str {
@@ -130,6 +133,7 @@ impl ScreenId {
             ScreenId::Recon    => "Recon",
             ScreenId::Ai       => "AI",
             ScreenId::AiLogs   => "AI Logs",
+            ScreenId::WhatsApp => "WhatsApp",
             ScreenId::MainMenu    => "Menu",
             ScreenId::Submenu     => "Submenu",
             ScreenId::Screensaver => "Screensaver",
@@ -194,6 +198,7 @@ impl ScreenId {
             ScreenId::Recon    => "⌕",
             ScreenId::Ai       => "◈",
             ScreenId::AiLogs   => "▧",
+            ScreenId::WhatsApp => "✆",
             ScreenId::MainMenu    => "▦",
             ScreenId::Submenu     => "≡",
             ScreenId::Screensaver => "◌",

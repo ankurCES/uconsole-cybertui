@@ -34,6 +34,7 @@ static ITEMS: &[ScreenId] = &[
     ScreenId::Settings,
     ScreenId::Ai,
     ScreenId::AiLogs,
+    ScreenId::WhatsApp,
 ];
 
 pub struct MainMenuScreen {

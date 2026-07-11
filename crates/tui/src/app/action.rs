@@ -141,6 +141,18 @@ pub enum Action {
     LlamaDown,
     /// Health poll timed out or process crashed — carries last stderr line.
     LlamaFailed(String),
+    /// WhatsApp sidecar events.
+    WhatsAppQr(String),
+    WhatsAppConnected,
+    WhatsAppDisconnected(String),
+    WhatsAppContacts(Vec<(String, String)>),  // (jid, name)
+    WhatsAppMessage {
+        jid: String,
+        text: String,
+        from_me: bool,
+        timestamp: u64,
+    },
+    WhatsAppSubmit(String, String), // (jid, text)
 }
 
 #[derive(Debug, Clone)]
