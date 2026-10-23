@@ -41,6 +41,7 @@ async fn build_test_app() -> (Arc<AppState>, axum::Router) {
     let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
     let state = Arc::new(AppState {
         store,
+        ble_store: std::sync::Arc::new(wifi_radar::ble_devices::BleDeviceStore::new()),
         tags,
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,

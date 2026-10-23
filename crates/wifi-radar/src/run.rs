@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::Request;
+use axum::extract::{Request, State};
 use axum::http::{header, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -55,6 +55,11 @@ pub struct RunConfig {
     pub csi_rate_hz: Option<f32>,
     /// Presence/motion detection threshold on the chest signal.
     pub csi_motion_threshold: f32,
+    /// Shared bearer token guarding `/api/*` and the SSE stream.
+    /// `None` disables the gate (tests, local dev). The HTML shell and
+    /// `/static` stay public either way so the page can boot; every
+    /// data path requires the token.
+    pub auth_token: Option<String>,
 }
 
 /// Long-lived handle returned by `run_with`. Drop it (or call [`shutdown`])
@@ -114,13 +119,96 @@ async fn static_fallback(req: Request, next: Next) -> Response {
     crate::assets::get(name)
 }
 
+/// Bearer-token gate for the data plane.
+///
+/// The token may arrive as `Authorization: Bearer <t>`, `?token=<t>`
+/// (needed by `EventSource`, which cannot set headers) or a
+/// `freya_token` cookie (set by the UI after the first ?token= hit).
+/// A `None` state disables the gate entirely.
+async fn auth_middleware(
+    State(required): State<Option<Arc<String>>>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(token) = required.as_deref() else {
+        return next.run(req).await;
+    };
+    let supplied = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty());
+    let supplied = supplied.or_else(|| {
+        let q = req.uri().query()?;
+        q.split('&').find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == "token").then(|| v.to_owned())
+        })
+    });
+    let supplied = supplied.or_else(|| {
+        req.headers()
+            .get(header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|cookies| {
+                cookies.split(';').find_map(|c| {
+                    let c = c.trim();
+                    c.strip_prefix("freya_token=")
+                        .map(|v| v.trim().to_owned())
+                })
+            })
+    });
+
+    match supplied {
+        Some(supplied) if constant_time_eq(supplied.as_bytes(), token.as_bytes()) => {
+            next.run(req).await
+        }
+        _ => Response::builder()
+            .status(StatusCode::UNAUTHORIZED)
+            .header(header::WWW_AUTHENTICATE, "Bearer")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(
+                "{\"error\":\"unauthorized\",\"hint\":\"present the shared token as Authorization: Bearer, ?token= or freya_token cookie\"}",
+            ))
+            .unwrap(),
+    }
+}
+
+/// Constant-time comparison so a misbehaving LAN peer cannot time the
+/// token out byte by byte.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Build the full axum app: HTML shell + static assets + API + SSE.
-pub fn build_router(state: Arc<AppState>, static_dir: PathBuf) -> Router {
+/// `auth_token` guards the API + SSE merge; the shell and static
+/// assets stay public so the page can boot at all.
+pub fn build_router(
+    state: Arc<AppState>,
+    static_dir: PathBuf,
+    auth_token: Option<String>,
+) -> Router {
     let api = crate::api::router(state.clone());
     let sse = sse_router(state.clone());
     let shell = Router::new().route("/", get(shell_handler));
 
-    api.merge(sse)
+    let token_state = auth_token.map(Arc::new);
+    let protected = api
+        .merge(sse)
+        .layer(middleware::from_fn_with_state(
+            token_state.clone(),
+            auth_middleware,
+        ));
+
+    protected
         .merge(shell)
         .nest_service("/static", ServeDir::new(static_dir))
         // Order matters: `no_store_layer` MUST be applied first so it
@@ -232,7 +320,7 @@ pub async fn run_with(cfg: RunConfig) -> anyhow::Result<StandaloneLive> {
     };
     let scanner_handle = spawn(store.clone(), scanner_tx, source);
 
-    let app = build_router(state, cfg.static_dir);
+    let app = build_router(state, cfg.static_dir, cfg.auth_token.clone());
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     let addr = listener.local_addr()?;

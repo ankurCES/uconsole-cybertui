@@ -35,6 +35,7 @@ async fn sse_endpoint_streams_events_over_real_socket() {
     let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
     let state = Arc::new(AppState {
         store: store.clone(),
+        ble_store: std::sync::Arc::new(wifi_radar::ble_devices::BleDeviceStore::new()),
         tags: tags.clone(),
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx: events_tx.clone(),
@@ -42,7 +43,7 @@ async fn sse_endpoint_streams_events_over_real_socket() {
         ble_store: Arc::new(BleDeviceStore::new()),
     });
     let static_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("web");
-    let app = build_router(state.clone(), static_dir);
+    let app = build_router(state.clone(), static_dir, None);
 
     // 2. Bind to a random loopback port and serve in the background.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

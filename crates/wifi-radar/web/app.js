@@ -16,6 +16,34 @@
     let eventSource = null;
     let selectedMac = null;
 
+    // ---- token gate ----------------------------------------------------
+    // The server may require a shared token on /api/* and SSE. The first
+    // visit carries it as ?token=; we mirror it into a cookie + sessionStorage
+    // so fetch() gets an Authorization header and EventSource (which cannot
+    // set headers) can use ?token= on its URL.
+    const params = new URLSearchParams(window.location.search);
+    let token = params.get("token")
+        || sessionStorage.getItem("wifi-radar-token")
+        || (document.cookie.match(/(?:^|;\s*)wifi_radar_token=([^;]*)/) || [])[1]
+        || "";
+    if (params.get("token")) {
+        sessionStorage.setItem("wifi-radar-token", token);
+        document.cookie = "wifi_radar_token=" + encodeURIComponent(token)
+            + "; path=/; SameSite=Strict";
+        // keep the token out of the address bar / history
+        window.history.replaceState(null, "", window.location.pathname);
+    }
+    function authUrl(url) {
+        if (!token) return url;
+        return url + (url.includes("?") ? "&" : "?") + "token="
+            + encodeURIComponent(token);
+    }
+    function authFetch(url, opts) {
+        const headers = Object.assign({}, (opts && opts.headers) || {});
+        if (token) headers["Authorization"] = "Bearer " + token;
+        return fetch(authUrl(url), Object.assign({}, opts, { headers }));
+    }
+
     function $(id) { return document.getElementById(id); }
 
     function setStatus(text, klass) {
@@ -74,8 +102,8 @@
     async function refreshSnapshot() {
         try {
             const [devResp, tagResp] = await Promise.all([
-                fetch("/api/devices").then((r) => r.json()),
-                fetch("/api/tags").then((r) => r.json()),
+                authFetch("/api/devices").then((r) => r.json()),
+                authFetch("/api/tags").then((r) => r.json()),
             ]);
             store.devices.clear();
             for (const d of devResp.devices) store.devices.set(d.mac, d);
@@ -87,7 +115,7 @@
     }
 
     function connect() {
-        eventSource = new EventSource("/api/events");
+        eventSource = new EventSource(authUrl("/api/events"));
         eventSource.onopen = () => setStatus("live", "connected");
         eventSource.onerror = () => setStatus("disconnected", "disconnected");
         eventSource.onmessage = (msg) => {
@@ -107,7 +135,7 @@
     async function refreshVitals() {
         let v;
         try {
-            v = await fetch("/api/vitals").then((r) => r.json());
+            v = await authFetch("/api/vitals").then((r) => r.json());
         } catch (_) {
             return; // transient; keep last paint
         }
@@ -141,7 +169,7 @@
         const icon = $("tag-icon").value;
         const color = $("tag-color").value;
         if (!mac) return;
-        const resp = await fetch("/api/tags", {
+        const resp = await authFetch("/api/tags", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ mac, label, icon, color }),
@@ -155,7 +183,7 @@
     async function deleteTag() {
         const mac = $("tag-mac").value.trim();
         if (!mac) return;
-        const resp = await fetch(`/api/tags/${encodeURIComponent(mac)}`, {
+        const resp = await authFetch(`/api/tags/${encodeURIComponent(mac)}`, {
             method: "DELETE",
         });
         if (resp.ok) {

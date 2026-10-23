@@ -17,6 +17,8 @@ Options:
   --dev               Force the dev-mode synthetic scanner
   --tags <PATH>       Tag DB path (default: data/tags.json)
   --static-dir <DIR>  Static asset directory (default: crates/wifi-radar/web)
+  --auth-token <T>    Require this bearer token on /api/* and SSE
+                      (?token= and freya_token cookie also accepted)
   --pcap <PATH>       Read frames from a pcap file instead of scanning live
   --nexmon            Enable CSI vitals on 0.0.0.0:5500 (nexmon_csi default)
   --csi-udp <ADDR>    Listen for nexmon_csi UDP frames on this address
@@ -32,6 +34,7 @@ fn main() {
     let mut dev_mode = false;
     let mut tags_path = PathBuf::from(DEFAULT_TAGS_PATH);
     let mut static_dir = PathBuf::from(DEFAULT_STATIC_DIR);
+    let mut auth_token: Option<String> = None;
     let mut pcap_path: Option<PathBuf> = None;
     let mut csi_udp: Option<SocketAddr> = None;
     let mut csi_pcap: Option<PathBuf> = None;
@@ -52,6 +55,10 @@ fn main() {
             "--tags" => {
                 i += 1;
                 tags_path = PathBuf::from(&args[i]);
+            }
+            "--auth-token" => {
+                i += 1;
+                auth_token = Some(args[i].clone());
             }
             "--static-dir" => {
                 i += 1;
@@ -104,6 +111,11 @@ fn main() {
         i += 1;
     }
 
+    // Env fallback: systemd passes the token via EnvironmentFile so the
+    // DynamicUser process never needs to read a root-owned file itself.
+    // An explicit --auth-token always wins.
+    let auth_token = auth_token.or_else(|| std::env::var("WIFI_RADAR_TOKEN").ok());
+
     init_tracing();
 
     let cfg = RunConfig {
@@ -116,6 +128,7 @@ fn main() {
         csi_pcap,
         csi_rate_hz,
         csi_motion_threshold,
+        auth_token,
     };
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");

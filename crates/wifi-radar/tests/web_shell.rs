@@ -40,13 +40,14 @@ async fn get_root_returns_radar_html() {
     let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
     let state = Arc::new(AppState {
         store,
+        ble_store: std::sync::Arc::new(wifi_radar::ble_devices::BleDeviceStore::new()),
         tags,
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
         ble_store: Arc::new(BleDeviceStore::new()),
     });
-    let app = build_router(state, workspace_web_dir());
+    let app = build_router(state, workspace_web_dir(), None);
 
     let resp = app
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -72,13 +73,14 @@ async fn static_assets_are_served() {
     let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
     let state = Arc::new(AppState {
         store,
+        ble_store: std::sync::Arc::new(wifi_radar::ble_devices::BleDeviceStore::new()),
         tags,
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
         scanner_tx,
         ble_store: Arc::new(BleDeviceStore::new()),
     });
-    let app = build_router(state, workspace_web_dir());
+    let app = build_router(state, workspace_web_dir(), None);
 
     for asset in ["style.css", "app.js", "radar.js"] {
         let resp = app
@@ -110,6 +112,7 @@ async fn static_assets_fall_back_to_embedded_when_dir_absent() {
     let (scanner_tx, _scanner_rx) = mpsc::channel::<DeviceEvent>(16);
     let state = Arc::new(AppState {
         store,
+        ble_store: std::sync::Arc::new(wifi_radar::ble_devices::BleDeviceStore::new()),
         tags,
         vitals: std::sync::Arc::new(wifi_radar::csi::VitalsStore::new()),
         events_tx,
@@ -124,7 +127,7 @@ async fn static_assets_fall_back_to_embedded_when_dir_absent() {
         "test precondition: {missing:?} must not exist"
     );
 
-    let app = build_router(state, missing);
+    let app = build_router(state, missing, None);
 
     for asset in ["style.css", "app.js", "radar.js"] {
         let resp = app
